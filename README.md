@@ -311,9 +311,33 @@ pytest tests/ -v
 
 如有问题或建议，请通过以下方式联系：
 
-- 项目地址：https://github.com/yourusername/ai-uitest-agent
+- 项目地址：https://gitee.com/fxlysm/ai_uitest_agent.git
 - 邮箱：fxlysm@126.com
 - 若大家有公司介绍，感谢推荐
 ---
 
 **注意**：本项目仅供学习和研究使用，生产环境使用前请进行充分测试。
+
+
+## 截图
+
+<table>
+    <tr>
+        <td><img src="https://gitee.com/fxlysm/ai_uitest_agent/raw/master/image/001.png"/></td>
+        <td><img src="https://gitee.com/fxlysm/ai_uitest_agent/raw/master/image/002.png"/></td>
+    </tr>
+    <tr>
+                <td><img src="https://gitee.com/fxlysm/ai_uitest_agent/raw/master/image/003.png"/></td>
+        <td><img src="https://gitee.com/fxlysm/ai_uitest_agent/raw/master/image/004.png"/></td>
+    </tr>
+    <tr>
+              <td><img src="https://gitee.com/fxlysm/ai_uitest_agent/raw/master/image/005.png"/></td>
+        <td><img src="https://gitee.com/fxlysm/ai_uitest_agent/raw/master/image/006.png"/></td>
+    </tr>
+	<tr>
+           <td><img src="https://gitee.com/fxlysm/ai_uitest_agent/raw/master/image/007.png"/></td>
+        <td><img src="https://gitee.com/fxlysm/ai_uitest_agent/raw/master/image/008.png"/></td>
+    </tr>	 
+
+
+</table>
