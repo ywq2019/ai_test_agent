@@ -1,4 +1,4 @@
-# 自动化UI测试Agent
+# UI自动化测试Agent
 
 基于 **LangChain + LangGraph** 的智能化、零代码Web UI自动化测试平台。
 
@@ -424,6 +424,7 @@ async def execute(**kwargs) -> dict:
 如有问题或建议，请通过以下方式联系：
 
 - 项目地址：https://gitee.com/fxlysm/ai_uitest_agent.git
+- 微信公众号：魅力测试
 - 邮箱：fxlysm@126.com
 - 当离职状态，若深圳武汉大家有公司介绍，求推荐
 ---
@@ -451,4 +452,20 @@ async def execute(**kwargs) -> dict:
         <td><img src="https://gitee.com/fxlysm/ai_uitest_agent/raw/master/image/008.png"/></td>
     </tr>	 
 
+</table>
+
+
+## 捐赠支持
+
+😀 你可以请作者喝杯咖啡表示鼓励
+
+- 有捐赠的小伙伴（金额不限）可以联系作者领取一份 **独家提升开发技能的文档**
+- 加QQ814380399或者邮件到 fxlysm@126.com邮箱 *注明 领取开发技能提升文档*
+- 文档宗旨在于提升测试人员的测试理论及测试开发相关技术，讲述**如何测试**，高质量测试，**如何开发测试平台**等
+
+<table>
+    <tr>
+        <td><img src="https://gitee.com/fxlysm/ai_uitest_agent/raw/master/image/0010.jpg"/></td>
+        <td><img src="https://gitee.com/fxlysm/ai_uitest_agent/raw/master/image/0011.png"/></td>
+    </tr>  
 </table>
