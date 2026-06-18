@@ -1,16 +1,16 @@
 # 自动化UI测试Agent
 
-智能化、零代码的Web UI自动化测试工具，基于大语言模型和Playwright实现。
-注： 当前项目部分功能实现了，但UI 及 交互还没时间来做优化，大家时间充足可自行优化！
+基于 **LangChain + LangGraph** 的智能化、零代码Web UI自动化测试平台。
 
 ## 🎯 项目简介
 
-自动化UI测试Agent是一款基于FastAPI + Vue3的Web UI自动化测试平台，具有以下特点：
+自动化UI测试Agent是一款基于 **FastAPI + Vue3 + LangChain/LangGraph** 的企业级Web UI自动化测试平台，具有以下特点：
 
 - **零代码测试**：只需输入URL即可自动生成测试用例
 - **AI驱动**：基于大语言模型智能分析页面元素和需求文档
+- **Agent架构**：标准的「大模型 + 思考决策逻辑 + 外部工具集」架构
+- **技能扩展**：遵循企业级标准化技能目录规范，支持插件化扩展
 - **可视化管理**：提供完整的任务、用例、执行和报告管理界面
-- **技能扩展**：支持插件化技能系统，可灵活扩展功能
 
 ## 🛠️ 技术栈
 
@@ -21,9 +21,11 @@
 | FastAPI | 0.109.0 | 高性能Web框架 |
 | Uvicorn | 0.27.0 | ASGI服务器 |
 | SQLAlchemy | 2.0.25 | 异步ORM框架 |
+| **LangChain** | 1.3.9 | LLM应用开发框架 |
+| **LangGraph** | 1.2.5 | 状态机工作流引擎 |
+| **langchain-openai** | 1.3.2 | OpenAI兼容接口 |
 | Playwright | 1.41.0 | 自动化测试工具 |
 | SQLite | 内置 | 轻量级数据库 |
-| WebSocket | 原生 | 实时通信 |
 
 ### 前端技术栈
 | 技术 | 版本 | 说明 |
@@ -35,19 +37,73 @@
 | ECharts | 5.5+ | 图表库 |
 | Vite | 5.4+ | 构建工具 |
 
+## 🧠 Agent架构设计
+
+### 核心架构
+```
+Agent = 大模型(LLM) + 思考决策逻辑(LangGraph) + 外部工具集(LangChain Tools)
+```
+
+### 大模型配置
+```python
+llm = ChatOpenAI(
+    model="deepseek-chat",
+    temperature=0.5,
+    api_key=apikey,
+    base_url=baseurl
+)
+```
+
+### 工具调用机制
+- 使用 `@tool` 装饰器定义工具
+- LLM通过语义自主匹配、智能调用
+- 告别关键词硬匹配
+
 ## ✨ 功能特性
 
 ### 核心功能
 1. **任务管理**：创建、编辑、删除测试任务，支持URL和文档导入
 2. **页面解析**：自动抓取页面元素，识别可交互元素（按钮、输入框、选择框等）
-3. **用例生成**：基于页面元素智能生成测试用例
-4. **测试执行**：支持批量执行测试用例，实时显示进度
+3. **用例生成**：基于页面元素和需求文档智能生成测试用例
+4. **测试执行**：支持批量执行测试用例，实时显示进度（WebSocket推送）
 5. **报告生成**：自动生成详细的测试报告，包含统计图表和截图
 
 ### 扩展功能
-1. **技能管理**：插件化技能系统，支持自定义技能扩展
-2. **大模型配置**：支持多大模型切换和API配置
-3. **WebSocket通信**：实时推送执行进度和状态
+1. **技能管理**：标准化技能目录规范，支持自定义技能扩展
+2. **大模型配置**：支持多模型切换和API配置
+3. **自动技能发现**：启动时自动扫描技能目录，动态注册工具
+
+## 📁 标准化技能目录规范
+
+遵循主流开源企业级Agent工程规范：
+
+```
+skills/
+└── <skill_name>/           # 独立可插拔技能目录
+    ├── SKILL.md           # 技能说明文档（场景、约束、风险提示）
+    ├── metadata.yaml      # 技能元数据（入参规范、输出格式）
+    ├── examples/          # 使用示例和错误案例
+    ├── templates/         # 模板文件
+    ├── resources/         # 资源文件（白名单、权限规则）
+    └── scripts/
+        └── run.py         # 核心执行逻辑
+```
+
+### 已实现的技能
+| 技能名称 | 描述 | 工具名 |
+|----------|------|--------|
+| 页面解析器 | 抓取网页可交互元素 | `parse_page` |
+| 文档解析器 | 解析PDF/Word需求文档 | `parse_document` |
+| 用例生成器 | 智能生成测试用例 | `generate_cases` |
+| 测试执行器 | 执行测试用例 | `execute_tests` |
+| 报告生成器 | 生成测试报告 | `generate_report` |
+
+### 添加新技能
+只需创建符合规范的技能目录，系统启动时自动发现并注册：
+1. 创建目录 `skills/your_skill/`
+2. 添加 `metadata.yaml` 定义元数据
+3. 添加 `scripts/run.py` 实现核心逻辑
+4. 重启服务即可自动注册
 
 ## 🚀 快速开始
 
@@ -71,6 +127,17 @@ cd ui
 npm install
 ```
 
+### 配置大模型
+
+编辑 `.env` 文件：
+```ini
+# 大模型配置
+AI_API_KEY=your_api_key_here
+AI_API_URL=https://api.deepseek.com/v1/chat/completions
+AI_MODEL=deepseek-chat
+AI_MODEL_NAME=deepseek-chat
+```
+
 ### 运行项目
 
 #### 启动后端服务
@@ -85,31 +152,49 @@ npm run dev
 ```
 
 ### 访问地址
-- **前端页面**: http://localhost:8090
-- **后端API**: http://localhost:4000
-- **API文档**: http://localhost:4000/docs
+| 服务 | 地址 |
+|------|------|
+| 前端页面 | http://localhost:8090 |
+| 后端API | http://localhost:4000 |
+| API文档 | http://localhost:4000/docs |
 
 ## 📁 项目结构
 
 ```
 ai_uitest_agent/
-├── agent/                    # 代理核心模块
+├── agent/                    # Agent核心模块
 │   ├── __init__.py
-│   └── core.py               # 代理核心逻辑
+│   ├── core.py               # 代理核心逻辑
+│   └── langgraph_agent.py    # LangGraph状态机代理
 ├── api/                      # API接口模块
 │   ├── __init__.py
 │   ├── routes.py             # REST API路由
 │   ├── schemas.py            # 数据模型定义
 │   ├── websocket.py          # WebSocket处理
 │   └── websocket_manager.py  # WebSocket连接管理
-├── skills/                   # 技能模块
+├── skills/                   # 技能模块（标准化结构）
 │   ├── __init__.py
-│   ├── case_generator.py     # 测试用例生成器
-│   ├── report_generator.py   # 报告生成器
-│   ├── skill_loader.py       # 技能加载器
-│   ├── skill_registry.py     # 技能注册表
-│   ├── test_executor.py      # 测试执行器
-│   └── */                    # 各技能的SKILL.md配置
+│   ├── langchain_tools.py    # LangChain工具注册
+│   ├── page_parser/          # 页面解析器技能
+│   │   ├── SKILL.md
+│   │   ├── metadata.yaml
+│   │   └── scripts/run.py
+│   ├── document_parser/      # 文档解析器技能
+│   │   ├── SKILL.md
+│   │   ├── metadata.yaml
+│   │   └── scripts/run.py
+│   ├── case_generator/       # 用例生成器技能
+│   │   ├── SKILL.md
+│   │   ├── metadata.yaml
+│   │   └── scripts/run.py
+│   ├── test_executor/        # 测试执行器技能
+│   │   ├── SKILL.md
+│   │   ├── metadata.yaml
+│   │   └── scripts/run.py
+│   └── report_generator/     # 报告生成器技能
+│       ├── SKILL.md
+│       ├── metadata.yaml
+│       └── scripts/run.py
 ├── tools/                    # 工具模块
 │   ├── __init__.py
 │   ├── browser.py            # 浏览器操作工具
@@ -152,10 +237,10 @@ PORT=4000
 CORS_ORIGINS=["*"]
 
 # 大模型配置
-LLM_TYPE=openai
-LLM_API_KEY=your_api_key
-LLM_API_URL=https://api.openai.com/v1/chat/completions
-LLM_MODEL=gpt-3.5-turbo
+AI_API_KEY=your_api_key
+AI_API_URL=https://api.deepseek.com/v1/chat/completions
+AI_MODEL=deepseek-chat
+AI_MODEL_NAME=deepseek-chat
 
 # 路径配置
 SCREENSHOT_DIR=./screenshots
@@ -166,12 +251,12 @@ LOG_DIR=./logs
 DATABASE_URL=sqlite+aiosqlite:///./uitest_agent.db
 ```
 
-### 大模型配置
-
-支持多种大模型：
+### 支持的大模型
+- DeepSeek (deepseek-chat)
 - OpenAI (gpt-3.5-turbo, gpt-4)
-- 国产大模型 (如智谱、豆包等)
-- 本地部署模型
+- 智谱AI (chatglm)
+- 豆包
+- 其他OpenAI兼容接口
 
 ## 📦 打包部署
 
@@ -280,28 +365,54 @@ docker run -p 4000:4000 uitest-agent
 ### 3. 生成用例
 1. 切换到「用例管理」页面
 2. 选择任务
-3. 点击「生成用例」
+3. 点击「生成用例」（可导入需求文档辅助生成）
 
 ### 4. 执行测试
 1. 切换到「测试执行」页面
 2. 选择任务
 3. 点击「执行全部」或选择部分用例执行
+4. 实时查看执行进度
 
 ### 5. 查看报告
 1. 切换到「测试报告」页面
 2. 从列表中选择报告
-3. 查看统计图表和详细结果
+3. 查看统计图表、详细结果和截图
 
-## 🧪 测试
+## 🔌 技能开发指南
 
-### 运行测试用例
-```bash
-# 安装测试依赖
-pip install pytest pytest-asyncio
-
-# 运行测试
-pytest tests/ -v
+### 技能元数据规范 (metadata.yaml)
+```yaml
+name: "技能名称"
+version: "1.0.0"
+category: "技能类别"
+description: "技能描述"
+parameters:
+  param_name:
+    type: string
+    required: true
+    description: "参数说明"
+output:
+  type: object
+  properties:
+    field_name:
+      type: string
 ```
+
+### 执行脚本规范 (scripts/run.py)
+```python
+async def execute(**kwargs) -> dict:
+    """
+    技能核心执行逻辑
+    
+    Returns:
+        dict: 执行结果
+    """
+    return {
+        "status": "success",
+        "data": ...
+    }
+```
+
 
 
 ## 📄 许可证
@@ -339,6 +450,5 @@ pytest tests/ -v
            <td><img src="https://gitee.com/fxlysm/ai_uitest_agent/raw/master/image/007.png"/></td>
         <td><img src="https://gitee.com/fxlysm/ai_uitest_agent/raw/master/image/008.png"/></td>
     </tr>	 
-
 
 </table>

@@ -1,0 +1,49 @@
+name: "文档解析器"
+version: "1.0.0"
+category: "document-parsing"
+description: "解析PDF、Word等需求文档，提取测试需求信息"
+author: "UITest Agent Team"
+created_at: "2026-06-18"
+last_updated: "2026-06-18"
+
+parameters:
+  document_path:
+    type: string
+    required: true
+    description: "文档文件路径"
+    example: "./requirements.docx"
+  
+  file_type:
+    type: string
+    required: false
+    default: "auto"
+    description: "文件类型"
+    enum:
+      - auto
+      - pdf
+      - docx
+      - txt
+
+output:
+  type: object
+  properties:
+    page_count:
+      type: integer
+    paragraph_count:
+      type: integer
+    content:
+      type: string
+    metadata:
+      type: object
+
+triggers:
+  - "解析文档"
+  - "导入文档"
+  - "上传需求"
+  - "文档分析"
+
+dependencies:
+  - pypdf2
+  - python-docx
+
+risk_level: low

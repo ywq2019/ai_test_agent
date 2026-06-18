@@ -86,12 +86,10 @@ class UITestAgent:
             "step": "parse_page"
         })
 
-        def parse_sync():
-            browser = browser_pool.get_browser(browser_type)
-            browser.navigate(url)
-            return browser.capture_elements()
-
-        elements = await asyncio.to_thread(parse_sync)
+        browser = await browser_pool.get_browser(browser_type)
+        await browser.navigate(url)
+        elements = await browser.capture_elements()
+        
         self.state.page_elements = elements
 
         await self.send_progress({

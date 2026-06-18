@@ -194,7 +194,17 @@ const createTask = async () => {
 
     ElMessage.info('正在解析页面元素...')
     await taskStore.parsePage(task.url, task.browser, task.id)
-    ElMessage.success('页面解析完成，可前往测试用例管理生成测试用例')
+    ElMessage.success('页面解析完成')
+
+    if (taskForm.document_path) {
+      ElMessage.info('正在解析需求文档...')
+      await taskStore.parseDocument(taskForm.document_path)
+      ElMessage.success('需求文档解析完成')
+    }
+
+    ElMessage.info('正在生成测试用例...')
+    await taskStore.generateCases(task.id)
+    ElMessage.success('测试用例生成完成')
   } catch (error) {
     ElMessage.error('创建失败: ' + error.message)
   } finally {

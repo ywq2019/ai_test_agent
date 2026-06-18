@@ -300,6 +300,11 @@ async def generate_cases(
         uitest_agent.state.page_elements = task.page_elements
         uitest_agent.state.current_task_id = task_id
         
+        if task.document_path:
+            logger.info(f"Parsing document: {task.document_path}")
+            document_data = await uitest_agent.parse_document(task.document_path)
+            uitest_agent.state.document_data = document_data
+        
         cases = await uitest_agent.generate_cases()
         
         for case in cases:
@@ -733,38 +738,57 @@ async def update_llm_model(config: LLMConfigRequest):
     api_url = config.api_url
 
     env_path = Path(__file__).parent.parent / ".env"
-    env_content = ""
+    
+    # 读取现有配置
+    env_lines = []
     if env_path.exists():
         with open(env_path, 'r', encoding='utf-8') as f:
-            env_content = f.read()
+            env_lines = f.readlines()
 
     updates = []
+    
+    # 更新或添加配置项
+    updated = False
+    for i, line in enumerate(env_lines):
+        if line.startswith("AI_MODEL="):
+            env_lines[i] = f"AI_MODEL={model}\n"
+            updated = True
+            break
+    if not updated and model:
+        env_lines.append(f"AI_MODEL={model}\n")
     if model:
         settings.AI_MODEL = model
         updates.append(f"AI_MODEL={model}")
-        if "AI_MODEL" in env_content:
-            env_content = f'AI_MODEL={model}\n'.join(env_content.split("AI_MODEL="))
-        else:
-            env_content += f"\nAI_MODEL={model}"
 
+    updated = False
+    for i, line in enumerate(env_lines):
+        if line.startswith("AI_API_KEY="):
+            env_lines[i] = "AI_API_KEY=***\n"
+            updated = True
+            break
+    if not updated and api_key:
+        env_lines.append(f"AI_API_KEY=***\n")
     if api_key:
         settings.AI_API_KEY = api_key
         updates.append("AI_API_KEY=***")
-        if "AI_API_KEY" in env_content:
-            env_content = env_content.replace(f"AI_API_KEY={api_key}", "AI_API_KEY=***")
-        else:
-            env_content += f"\nAI_API_KEY={api_key}"
 
+    updated = False
+    for i, line in enumerate(env_lines):
+        if line.startswith("AI_API_URL="):
+            env_lines[i] = f"AI_API_URL={api_url}\n"
+            updated = True
+            break
+    if not updated and api_url:
+        env_lines.append(f"AI_API_URL={api_url}\n")
     if api_url:
         settings.AI_API_URL = api_url
         updates.append(f"AI_API_URL={api_url}")
-        if "AI_API_URL" in env_content:
-            env_content = env_content.replace(f"AI_API_URL={api_url}", f"AI_API_URL={api_url}")
-        else:
-            env_content += f"\nAI_API_URL={api_url}"
 
+    # 清理空行
+    env_lines = [line for line in env_lines if line.strip() or line == '\n']
+    
     with open(env_path, 'w', encoding='utf-8') as f:
-        f.write(env_content)
+        f.writelines(env_lines)
 
     return {
         "message": "LLM configuration updated",

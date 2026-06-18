@@ -2,7 +2,7 @@
 测试用例生成技能
 """
 import json
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from loguru import logger
 
 
@@ -14,7 +14,7 @@ class CaseGenerator:
         self,
         url: str,
         page_elements: List[Dict[str, Any]],
-        document_data: Dict[str, Any],
+        document_data: Optional[Dict[str, Any]] = None,
         requirements: List[str] = None
     ) -> List[Dict[str, Any]]:
         logger.info("Generating test cases...")

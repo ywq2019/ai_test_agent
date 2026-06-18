@@ -196,6 +196,7 @@ export const useTaskStore = defineStore('task', () => {
     resumeExecution,
     stopExecution,
     sendCommand,
+    generateCases,
     fetchReport,
     addTask,
     setCases,

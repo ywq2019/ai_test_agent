@@ -191,10 +191,10 @@ class TestExecutor:
         start_time = datetime.utcnow()
 
         try:
-            browser = browser_pool.get_browser(browser_type)
+            browser = await browser_pool.get_browser(browser_type)
             page = browser.page
 
-            browser.navigate(url)
+            await browser.navigate(url)
 
             screenshot_path = None
             error_message = None
@@ -204,23 +204,21 @@ class TestExecutor:
                     selector = case["element_selector"]
 
                     if "input" in case.get("name", "").lower():
-                        page.wait_for_selector(selector, timeout=5000)
+                        await browser.wait_for_selector(selector, timeout=5000)
                         test_value = "Test123"
-                        page.fill(selector, test_value)
+                        await browser.fill_input(selector, test_value)
 
-                    elif "点击" in case.get("name", "") or "button" in case.lower():
-                        page.wait_for_selector(selector, timeout=5000)
-                        page.click(selector)
+                    elif "点击" in case.get("name", "") or "button" in case.get("name", "").lower():
+                        await browser.wait_for_selector(selector, timeout=5000)
+                        await browser.click_element(selector)
 
                     elif "选择" in case.get("name", "") or "select" in case.get("name", "").lower():
-                        page.wait_for_selector(selector, timeout=5000)
-                        options = page.query_selector_all(f"{selector} option")
-                        if len(options) > 1:
-                            page.select_option(selector, options[1].get_attribute("value"))
+                        await browser.wait_for_selector(selector, timeout=5000)
+                        await browser.select_option(selector, "1")
 
                     else:
-                        page.wait_for_selector(selector, timeout=5000)
-                        page.click(selector)
+                        await browser.wait_for_selector(selector, timeout=5000)
+                        await browser.click_element(selector)
 
                     await asyncio.sleep(0.5)
 
@@ -228,10 +226,10 @@ class TestExecutor:
                     error_message = str(e)
                     logger.error(f"Case execution error: {e}")
 
-            if screenshots_dir:
-                screenshot_filename = f"case_{case['id']}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.png"
+            if screenshots_dir and not error_message:
+                screenshot_filename = f"case_{case.get('id', 'unknown')}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.png"
                 screenshot_path = str(Path(screenshots_dir) / screenshot_filename)
-                page.screenshot(path=screenshot_path, full_page=True)
+                await browser.take_screenshot(screenshot_path)
 
             end_time = datetime.utcnow()
             duration = (end_time - start_time).total_seconds()
@@ -240,6 +238,7 @@ class TestExecutor:
 
             return {
                 "case_id": case.get("id"),
+                "case_name": case.get("name", ""),
                 "status": status,
                 "start_time": start_time.isoformat(),
                 "end_time": end_time.isoformat(),
@@ -256,6 +255,7 @@ class TestExecutor:
 
             return {
                 "case_id": case.get("id"),
+                "case_name": case.get("name", ""),
                 "status": "failed",
                 "start_time": start_time.isoformat(),
                 "end_time": end_time.isoformat(),

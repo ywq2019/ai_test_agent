@@ -1,0 +1,47 @@
+name: "报告生成器"
+version: "1.0.0"
+category: "reporting"
+description: "生成测试报告（HTML和JSON格式）"
+author: "UITest Agent Team"
+created_at: "2026-06-18"
+last_updated: "2026-06-18"
+
+parameters:
+  task_id:
+    type: integer
+    required: true
+    description: "任务ID"
+  
+  task_name:
+    type: string
+    required: true
+    description: "任务名称"
+  
+  results:
+    type: array
+    required: true
+    description: "测试结果列表"
+  
+  metadata:
+    type: object
+    required: false
+    description: "额外元数据"
+
+output:
+  type: object
+  properties:
+    html_path: string
+    json_path: string
+    summary: object
+    pass_rate: float
+
+triggers:
+  - "生成报告"
+  - "查看报告"
+  - "导出报告"
+
+dependencies:
+  - jinja2
+  - weasyprint
+
+risk_level: low

@@ -1,0 +1,58 @@
+name: "用例生成器"
+version: "1.0.0"
+category: "test-generation"
+description: "基于页面元素和需求文档智能生成测试用例"
+author: "UITest Agent Team"
+created_at: "2026-06-18"
+last_updated: "2026-06-18"
+
+parameters:
+  url:
+    type: string
+    required: false
+    description: "目标网页URL"
+  
+  page_elements:
+    type: array
+    required: true
+    description: "页面元素列表"
+  
+  document_data:
+    type: object
+    required: false
+    description: "需求文档数据"
+  
+  llm_model:
+    type: string
+    required: false
+    default: "deepseek-chat"
+    description: "大模型名称"
+
+output:
+  type: object
+  properties:
+    cases:
+      type: array
+      items:
+        type: object
+        properties:
+          id: integer
+          name: string
+          module: string
+          priority: string
+          preconditions: string
+          steps: string
+          expected_results: string
+    case_count:
+      type: integer
+
+triggers:
+  - "生成用例"
+  - "创建测试用例"
+  - "自动生成"
+
+dependencies:
+  - langchain
+  - langchain-openai
+
+risk_level: low

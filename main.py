@@ -1,5 +1,6 @@
 """
 自动化UI测试Agent - FastAPI应用入口
+基于 LangChain + LangGraph 架构
 """
 import asyncio
 import os
@@ -13,16 +14,34 @@ from api.routes import router as api_router
 from api.websocket import websocket_endpoint
 from tools.database import init_database
 from tools.config import settings
+from skills.langchain_tools import tool_registry
+from agent.langgraph_agent import init_langgraph_agent
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting Automated UI Testing Agent...")
+    
+    # 初始化数据库
     await init_database()
     logger.info("Database initialized")
-
+    
+    # 创建必要目录
     os.makedirs(settings.SCREENSHOT_DIR, exist_ok=True)
     os.makedirs(settings.REPORT_OUTPUT_DIR, exist_ok=True)
+    
+    # 注册 LangChain 工具
+    tool_registry.register_all()
+    logger.info("LangChain tools registered")
+    
+    # 初始化 LangGraph Agent（如果配置了大模型）
+    if settings.AI_API_KEY and settings.AI_API_URL:
+        init_langgraph_agent(
+            api_key=settings.AI_API_KEY,
+            base_url=settings.AI_API_URL,
+            model_name=settings.AI_MODEL_NAME
+        )
+        logger.info("LangGraph Agent initialized")
 
     yield
     logger.info("Shutting down...")

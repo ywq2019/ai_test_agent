@@ -1,0 +1,74 @@
+name: "测试执行器"
+version: "1.0.0"
+category: "execution"
+description: "执行测试用例并返回结果"
+author: "UITest Agent Team"
+created_at: "2026-06-18"
+last_updated: "2026-06-18"
+
+parameters:
+  cases:
+    type: array
+    required: true
+    description: "测试用例列表"
+  
+  url:
+    type: string
+    required: true
+    description: "目标网页URL"
+  
+  browser_type:
+    type: string
+    required: false
+    default: "chromium"
+    description: "浏览器类型"
+    enum:
+      - chromium
+      - firefox
+      - webkit
+  
+  headless:
+    type: boolean
+    required: false
+    default: true
+    description: "是否使用无头模式"
+  
+  screenshots_dir:
+    type: string
+    required: false
+    default: "./screenshots"
+    description: "截图保存目录"
+
+output:
+  type: object
+  properties:
+    results:
+      type: array
+      items:
+        type: object
+        properties:
+          case_id: integer
+          case_name: string
+          status: string
+          start_time: string
+          end_time: string
+          duration: float
+          error_message: string
+          screenshot_path: string
+    summary:
+      type: object
+      properties:
+        total: integer
+        passed: integer
+        failed: integer
+
+triggers:
+  - "执行测试"
+  - "运行用例"
+  - "执行全部"
+
+dependencies:
+  - playwright
+  - asyncio
+
+risk_level: medium

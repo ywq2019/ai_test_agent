@@ -1,0 +1,65 @@
+name: "页面解析器"
+version: "1.0.0"
+category: "web-testing"
+description: "自动抓取和分析网页元素，提取可交互元素信息"
+author: "UITest Agent Team"
+created_at: "2026-06-18"
+last_updated: "2026-06-18"
+
+parameters:
+  url:
+    type: string
+    required: true
+    description: "目标网页URL"
+    example: "https://example.com"
+  
+  browser_type:
+    type: string
+    required: false
+    default: "chromium"
+    description: "浏览器类型"
+    enum:
+      - chromium
+      - firefox
+      - webkit
+  
+  headless:
+    type: boolean
+    required: false
+    default: true
+    description: "是否使用无头模式"
+  
+  timeout:
+    type: integer
+    required: false
+    default: 30000
+    description: "超时时间(毫秒)"
+
+output:
+  type: object
+  properties:
+    elements:
+      type: array
+      items:
+        type: object
+        properties:
+          id: string
+          type: string
+          tag: string
+          selector: string
+          text: string
+          attributes: object
+    element_count:
+      type: integer
+
+triggers:
+  - "解析页面"
+  - "抓取元素"
+  - "页面分析"
+  - "获取页面元素"
+
+dependencies:
+  - playwright
+  - asyncio
+
+risk_level: low
