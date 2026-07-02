@@ -650,6 +650,10 @@ server {
         <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/15.png"/></td>
         <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/16.png"/></td>
     </tr>
+    <tr>
+        <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/17.jpg"/></td>
+        <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/18.jpg"/></td>
+    </tr>
 </table>
 
 ***
