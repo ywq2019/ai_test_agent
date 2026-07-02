@@ -4,33 +4,60 @@
       <el-aside width="200px" class="layout-aside">
         <div class="logo">
           <el-icon><Monitor /></el-icon>
-          <span>UI测试Agent</span>
+          <span>AI测试工具平台</span>
         </div>
         <el-menu
           :default-active="$route.path"
           router
           class="layout-menu"
+          background-color="#304156"
+          text-color="#bfcbd9"
+          active-text-color="#409eff"
         >
-          <el-menu-item index="/">
-            <el-icon><House /></el-icon>
-            <span>首页</span>
+          <el-sub-menu index="webui-group">
+            <template #title>
+              <el-icon><Monitor /></el-icon>
+              <span>WebUI 自动化</span>
+            </template>
+            <el-menu-item index="/">
+              <el-icon><House /></el-icon>
+              <span>首页</span>
+            </el-menu-item>
+            <el-menu-item index="/tasks">
+              <el-icon><FolderOpened /></el-icon>
+              <span>任务管理</span>
+            </el-menu-item>
+            <el-menu-item index="/cases">
+              <el-icon><Document /></el-icon>
+              <span>用例管理</span>
+            </el-menu-item>
+            <el-menu-item index="/execution">
+              <el-icon><VideoPlay /></el-icon>
+              <span>测试执行</span>
+            </el-menu-item>
+            <el-menu-item index="/reports">
+              <el-icon><DataAnalysis /></el-icon>
+              <span>报告查看</span>
+            </el-menu-item>
+          </el-sub-menu>
+          <el-menu-item index="/ai-cases">
+            <el-icon><MagicStick /></el-icon>
+            <span>AI用例生成</span>
           </el-menu-item>
-          <el-menu-item index="/tasks">
-            <el-icon><FolderOpened /></el-icon>
-            <span>任务管理</span>
-          </el-menu-item>
-          <el-menu-item index="/cases">
-            <el-icon><Document /></el-icon>
-            <span>用例管理</span>
-          </el-menu-item>
-          <el-menu-item index="/execution">
-            <el-icon><VideoPlay /></el-icon>
-            <span>测试执行</span>
-          </el-menu-item>
-          <el-menu-item index="/reports">
-            <el-icon><DataAnalysis /></el-icon>
-            <span>报告查看</span>
-          </el-menu-item>
+          <el-sub-menu index="api-group">
+            <template #title>
+              <el-icon><Connection /></el-icon>
+              <span>接口自动化</span>
+            </template>
+            <el-menu-item index="/api-test">
+              <el-icon><Tickets /></el-icon>
+              <span>接口测试</span>
+            </el-menu-item>
+            <el-menu-item index="/test-plan">
+              <el-icon><Memo /></el-icon>
+              <span>测试计划</span>
+            </el-menu-item>
+          </el-sub-menu>
           <el-divider />
           <el-menu-item index="/skills">
             <el-icon><Box /></el-icon>
@@ -49,6 +76,9 @@
             <h2>{{ pageTitle }}</h2>
           </div>
           <div class="header-right">
+            <el-tooltip content="刷新页面数据" placement="bottom">
+              <el-button circle text :icon="RefreshRight" @click="refreshPage" style="margin-right:8px" />
+            </el-tooltip>
             <el-badge :value="notificationCount" :hidden="notificationCount === 0">
               <el-icon size="20"><Bell /></el-icon>
             </el-badge>
@@ -74,15 +104,21 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useTaskStore } from './stores/task'
+import { RefreshRight } from '@element-plus/icons-vue'
 
 const route = useRoute()
+const router = useRouter()
 const taskStore = useTaskStore()
 
 const wsConnected = ref(false)
 const wsDialogVisible = ref(false)
 const notificationCount = ref(0)
+
+const refreshPage = () => {
+  router.go(0)
+}
 
 const pageTitle = computed(() => {
   const titles = {
@@ -91,10 +127,13 @@ const pageTitle = computed(() => {
     '/cases': '用例管理',
     '/execution': '测试执行',
     '/reports': '报告查看',
+    '/ai-cases': 'AI用例生成',
+    '/api-test': '接口测试',
+    '/test-plan': '测试计划',
     '/skills': '技能管理',
     '/llm': '大模型配置'
   }
-  return titles[route.path] || '自动化UI测试Agent'
+  return titles[route.path] || 'AI测试工具平台'
 })
 
 let ws = null
@@ -204,6 +243,31 @@ onUnmounted(() => {
 .layout-menu .el-menu-item.is-active {
   background-color: #263445;
   color: #409eff;
+}
+
+/* 子菜单标题行 */
+.layout-menu :deep(.el-sub-menu__title) {
+  color: #bfcbd9 !important;
+  background-color: #304156 !important;
+}
+.layout-menu :deep(.el-sub-menu__title:hover) {
+  background-color: #263445 !important;
+  color: #409eff !important;
+}
+
+/* 子菜单展开的内嵌列表 */
+.layout-menu :deep(.el-menu) {
+  background-color: #263445 !important;
+}
+.layout-menu :deep(.el-menu .el-menu-item) {
+  color: #bfcbd9 !important;
+  background-color: #263445 !important;
+  padding-left: 40px !important;
+}
+.layout-menu :deep(.el-menu .el-menu-item:hover),
+.layout-menu :deep(.el-menu .el-menu-item.is-active) {
+  background-color: #1f2d3d !important;
+  color: #409eff !important;
 }
 
 .layout-header {

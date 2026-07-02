@@ -1,8 +1,8 @@
 # 文档解析技能
 
 name: 需求文档解析
-description: 解析PDF和Word格式的产品需求文档，提取功能点、业务规则、校验逻辑等结构化信息
-version: 1.0.0
+description: 解析PDF和Word等格式的产品需求文档，提取功能点、业务规则、校验逻辑等结构化信息
+version: 1.1.0
 category: document-parsing
 
 triggers:
@@ -13,14 +13,14 @@ triggers:
   - 分析需求
 
 parameters:
-  file_path:
+  document_path:
     type: string
     required: true
     description: 文档文件路径
   file_type:
     type: string
-    enum: [pdf, docx, doc]
-    description: 文档类型（自动检测）
+    enum: [auto, pdf, docx, doc, txt, md, csv, xlsx, xls, html, htm, pptx, json]
+    description: 文档类型（默认自动检测）
 
 actions:
   - type: extract_text
@@ -34,6 +34,8 @@ examples:
   - "解析这个需求文档"
   - "读取PDF文档"
   - "分析Word文档"
+  - "解析Excel需求表格"
+  - "读取Markdown文档"
 
 ---
 
@@ -42,8 +44,18 @@ examples:
 本技能解析产品需求文档，提取可用于测试用例生成的结构化信息。
 
 ### 支持的格式
-- **PDF**: .pdf文件
-- **Word**: .docx, .doc文件
+
+| 类型 | 扩展名 | 依赖 |
+|------|--------|------|
+| PDF | .pdf | PyPDF2 |
+| Word | .docx, .doc | python-docx |
+| Excel | .xlsx, .xls | openpyxl |
+| PowerPoint | .pptx | python-pptx |
+| Markdown | .md | 内置 |
+| 纯文本 | .txt | 内置（自动探测编码） |
+| CSV | .csv | 内置 |
+| HTML | .html, .htm | 内置 |
+| JSON | .json | 内置 |
 
 ### 提取的内容
 
@@ -71,3 +83,4 @@ examples:
 1. **需求理解**: 快速把握需求文档的核心内容
 2. **用例生成**: 结合页面元素生成贴合业务的测试用例
 3. **测试覆盖**: 确保测试用例覆盖所有功能点和业务规则
+4. **数据驱动**: Excel/CSV 格式可直接作为测试数据源

@@ -27,6 +27,21 @@ const routes = [
     component: () => import('../views/Reports.vue')
   },
   {
+    path: '/ai-cases',
+    name: 'AiCases',
+    component: () => import('../views/AiCases.vue')
+  },
+  {
+    path: '/api-test',
+    name: 'ApiTest',
+    component: () => import('../views/ApiTest.vue')
+  },
+  {
+    path: '/test-plan',
+    name: 'TestPlan',
+    component: () => import('../views/TestPlan.vue')
+  },
+  {
     path: '/skills',
     name: 'Skills',
     component: () => import('../views/Skills.vue')

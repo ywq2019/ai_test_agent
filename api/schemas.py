@@ -55,6 +55,7 @@ class CaseResponse(BaseModel):
     preconditions: Optional[str]
     steps: str
     expected_results: str
+    element_selector: Optional[str] = ""
     enabled: bool
 
 
@@ -120,8 +121,10 @@ class HealthResponse(BaseModel):
 
 class LLMConfigRequest(BaseModel):
     model: Optional[str] = None
+    model_name: Optional[str] = None
     api_key: Optional[str] = None
     api_url: Optional[str] = None
+    temperature: Optional[float] = None
 
 
 class LLMTestRequest(BaseModel):

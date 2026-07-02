@@ -28,14 +28,11 @@ async def execute(
     
     # 延迟导入以避免启动时的依赖问题
     from tools.browser import browser_pool
-    
-    def parse_sync():
-        browser = browser_pool.get_browser(browser_type, headless=headless)
-        browser.navigate(url)
-        return browser.capture_elements()
-    
+
     try:
-        elements = await asyncio.to_thread(parse_sync)
+        browser = await browser_pool.get_browser(browser_type, headless=headless)
+        await browser.navigate(url)
+        elements = await browser.capture_elements()
         
         result = {
             "status": "success",

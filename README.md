@@ -1,471 +1,643 @@
-# UI自动化测试Agent
+# AI 测试工具平台
 
-基于 **LangChain + LangGraph** 的智能化、零代码Web UI自动化测试平台。
+基于 **Claude AI + LangGraph + Playwright** 的智能化零代码全场景自动化测试平台，覆盖 UI 自动化与接口自动化双引擎。
 
-## 🎯 项目简介
+## 项目简介
 
-自动化UI测试Agent是一款基于 **FastAPI + Vue3 + LangChain/LangGraph** 的企业级Web UI自动化测试平台，具有以下特点：
+AI 测试工具平台是一款面向测试工程师的智能测试平台，核心理念是让测试人员**无需编写代码**，通过 AI 大模型完成从需求文档解析、测试用例设计、自动化执行到报告生成的完整测试闭环。
 
-- **零代码测试**：只需输入URL即可自动生成测试用例
-- **AI驱动**：基于大语言模型智能分析页面元素和需求文档
-- **Agent架构**：标准的「大模型 + 思考决策逻辑 + 外部工具集」架构
-- **技能扩展**：遵循企业级标准化技能目录规范，支持插件化扩展
-- **可视化管理**：提供完整的任务、用例、执行和报告管理界面
+平台提供三套并行的用例生成与执行体系：
 
-## 🛠️ 技术栈
+- **AI 用例生成**（文档驱动）：上传需求文档，分段调用 Claude，按功能模块并行生成包含测试方法标注的高质量用例，支持导出 Markdown / XMind
+- **WebUI 自动化**（页面驱动）：解析目标页面元素，结合需求文档，生成可直接被 Playwright 执行的 UI 自动化测试用例
+- **接口自动化**：支持接口用例管理、AI 生成、单测执行、测试计划编排、压力测试与全局变量池，覆盖完整 API 测试场景
 
-### 后端技术栈
-| 技术 | 版本 | 说明 |
-|------|------|------|
-| Python | 3.11+ | 编程语言 |
-| FastAPI | 0.109.0 | 高性能Web框架 |
-| Uvicorn | 0.27.0 | ASGI服务器 |
-| SQLAlchemy | 2.0.25 | 异步ORM框架 |
-| **LangChain** | 1.3.9 | LLM应用开发框架 |
-| **LangGraph** | 1.2.5 | 状态机工作流引擎 |
-| **langchain-openai** | 1.3.2 | OpenAI兼容接口 |
-| Playwright | 1.41.0 | 自动化测试工具 |
-| SQLite | 内置 | 轻量级数据库 |
+***
 
-### 前端技术栈
-| 技术 | 版本 | 说明 |
-|------|------|------|
-| Vue | 3.4+ | 前端框架 |
-| Element Plus | 2.6+ | UI组件库 |
-| Pinia | 2.1+ | 状态管理 |
-| Vue Router | 4.3+ | 路由管理 |
-| ECharts | 5.5+ | 图表库 |
-| Vite | 5.4+ | 构建工具 |
+## 核心功能
 
-## 🧠 Agent架构设计
+### AI 用例生成（文档驱动）
 
-### 核心架构
+| 功能 | 说明 |
+| --- | --- |
+| 分段生成 | 先提取功能模块，再并行逐模块生成（Semaphore=2），每次 Claude 调用输出量可控，不超时 |
+| 6 种测试方法 | 等价类划分、边界值分析、判定表、场景法、错误推测、状态转换，每条用例标注所用方法 |
+| 多维度覆盖 | 同步生成功能用例 + 性能用例 + 兼容性用例 |
+| 覆盖度优化 | 分析已有用例盲区，逐模块追加补充用例（边界、异常、状态转换） |
+| 覆盖度分析 | 综合评分 + 测试方法覆盖情况 + 优先级分布 + 模块分布 + 优化建议 |
+| 多格式导出 | Markdown（含完整用例表格）+ XMind（思维导图） |
+| test-case-pro-max 技能 | 可在技能管理页启用，启用后使用增强提示词生成更高质量用例 |
+
+### WebUI 自动化
+
+#### 用例管理（页面驱动）
+
+| 功能 | 说明 |
+| --- | --- |
+| 页面元素解析 | Playwright 自动抓取可交互元素（input/button/select/textarea），提取 CSS 选择器 |
+| AI 生成用例 | 结合页面元素 + 需求文档 + 目标 URL，分段生成含具体 selector 和测试数据的可执行用例 |
+| 生成进度 | WebSocket 实时推送生成阶段（模块识别→逐模块生成→完成） |
+| 用例优化 | 逐模块分析覆盖缺口，追加边界值/异常分支/状态转换补充用例 |
+| 覆盖度分析 | 元素覆盖率 + 优先级分布 + 模块覆盖 + 具体优化建议 |
+| 用例管理 | 新建、编辑、批量启用/禁用/删除、按任务筛选 |
+
+#### 测试执行
+
+| 功能 | 说明 |
+| --- | --- |
+| 批量执行 | 按任务执行所有启用用例，支持指定用例 ID 子集执行 |
+| 实时进度 | 通过 WebSocket 推送每条用例执行结果，无需刷新页面 |
+| 执行控制 | 支持暂停（当前用例完成后生效）、继续、停止 |
+| 自动截图 | 每条用例执行后截图，文件名标注 pass/fail |
+| 测试报告 | 自动生成含统计图表、失败截图、完整执行日志的 HTML 报告 |
+
+### 接口自动化
+
+#### 接口测试
+
+| 功能 | 说明 |
+| --- | --- |
+| 项目管理 | 多项目隔离，支持配置 Base URL、全局请求头、鉴权方式（Bearer / Basic / API Key） |
+| 代理配置 | 支持 HTTP / HTTPS / SOCKS5 代理，留空直连 |
+| Hosts 映射 | 类 `/etc/hosts` 格式，将指定域名的请求打到自定义 IP，适用于测试环境 DNS 隔离场景 |
+| 用例管理 | 新建、编辑、批量启用/禁用/删除，支持 GET/POST/PUT/DELETE 等全 HTTP 方法 |
+| AI 生成用例 | 粘贴 Swagger / OpenAPI 文档或功能描述，AI 自动生成含断言的接口用例 |
+| 参数化 | 支持全局变量池（`{{var}}`）、内置函数（随机字符串/时间戳/UUID 等）、自定义 Python 脚本函数 |
+| 前置用例 | 用例间依赖编排，支持配置登录前置用例，自动提取 Token 注入后续请求 |
+| 鉴权失败重试 | 配置失败特征（状态码/响应字段），命中后自动重跑前置用例刷新 Token 并重试 |
+| 变量提取 | 从响应 JSON/Header 中提取字段写入全局变量池，跨用例传递 |
+| 断言 | 支持状态码、响应体字段、响应时间多维度断言 |
+| 单测执行 | 按项目/勾选用例执行，WebSocket 实时推送每条用例结果 |
+| 压力测试 | 配置并发用户数、持续时长、爬坡时间，实时推送 TPS / P95 / P99 等性能指标 |
+| AI 报告分析 | 执行完成后调用 LLM 自动分析失败原因、性能瓶颈，给出修复建议 |
+| 全局变量池 | 统一管理跨项目变量，支持手动创建、用例执行自动写入、页面实时查看 |
+
+#### 测试计划
+
+将多个项目的接口用例按顺序组合，共享变量上下文，实现跨服务的端到端接口链路测试。
+
+| 功能 | 说明 |
+| --- | --- |
+| 计划管理 | 新建、编辑、删除测试计划，支持配置描述、代理地址、Hosts 映射 |
+| 步骤编排 | 从任意项目拖入接口用例，自由排序、启用/禁用单步 |
+| 共享变量 | 所有步骤共享同一 `var_store`，前一步提取的变量可直接用于后续步骤的参数/断言 |
+| 代理配置 | 计划级代理优先级高于项目级，可按计划统一走指定网络环境 |
+| Hosts 映射 | 计划级 hosts 条目覆盖项目级同名条目，两者不冲突的条目合并生效 |
+| 异步执行 | 后台执行，执行期间 WebSocket 实时推送每步进度（步骤名/状态/耗时/响应码） |
+| 执行报告 | 记录每次执行的汇总（通过率/总步数/耗时）及每步详情（断言结果/提取变量/响应预览） |
+| 报告可视化 | 卡片式报告列表，圆环图显示通过率，颜色区分通过/警告/失败 |
+| AI 分析 | 一键调用 LLM 分析失败步骤、断言偏差，给出修复建议，结果结构化展示并可复制 |
+| 批量删除 | 多选报告批量删除 |
+
+***
+
+## 技术栈
+
+### 后端
+
+| 技术 | 说明 |
+| --- | --- |
+| Python 3.11+ | 主语言，全异步架构 |
+| FastAPI 0.138 | ASGI Web 框架 |
+| Uvicorn | ASGI 服务器（端口 8000） |
+| SQLAlchemy 2.0 + aiosqlite | 异步 ORM，SQLite 数据库 |
+| httpx | 异步 HTTP 客户端，支持代理 / 自定义 transport（Hosts 映射） |
+| LangChain + LangGraph | LLM 对话代理工作流（可选，需配置 API Key） |
+| Claude CLI 子进程 | AI 用例生成核心路径（通过 `claude.cmd` 调用） |
+| Playwright 1.39 | 浏览器自动化（Chromium / Firefox / WebKit） |
+| Jinja2 | HTML 报告模板渲染 |
+| loguru | 滚动日志，按日切割 |
+| PyYAML | 技能配置读取 |
+| pydantic-settings | 环境变量管理 |
+
+### 前端
+
+| 技术 | 说明 |
+| --- | --- |
+| Vue 3.4 + Vite 5 | 前端框架 + 构建工具 |
+| Element Plus 2.14 | UI 组件库 |
+| Pinia 2.1 | 状态管理 |
+| Vue Router 4.2 | 路由 |
+| ECharts 5.5 | 报告图表可视化 |
+| Axios 1.6 | HTTP 客户端（生成接口超时 420s） |
+| WebSocket 原生 API | 执行进度、生成进度、压测指标实时推送 |
+
+***
+
+## AI 集成方式
+
+### 主路径：Claude CLI 子进程（用例生成）
+
+用例生成（AI 用例生成页 + 用例管理页）通过调用本机安装的 `claude` / `claude.cmd` 实现，无需直接配置 API Key：
+
 ```
-Agent = 大模型(LLM) + 思考决策逻辑(LangGraph) + 外部工具集(LangChain Tools)
+asyncio.create_subprocess_exec("claude.cmd", "--output-format", "text",
+    "--system-prompt", system_prompt, "-p",
+    stdin=PIPE, stdout=PIPE)
 ```
 
-### 大模型配置
-```python
-llm = ChatOpenAI(
-    model="deepseek-chat",
-    temperature=0.5,
-    api_key=apikey,
-    base_url=baseurl
-)
+分段生成流程：
+
+```
+Step-1  提取功能模块（30s）
+        ↓
+Step-2  并行逐模块生成用例（Semaphore=2，每模块 90s）
+        ↓
+合并   统一编号 TC001…TCN，汇总输出
 ```
 
-### 工具调用机制
-- 使用 `@tool` 装饰器定义工具
-- LLM通过语义自主匹配、智能调用
-- 告别关键词硬匹配
+### 可选路径：LangGraph 对话代理
 
-## ✨ 功能特性
+配置 `.env` 中的 `AI_API_KEY` 和 `AI_API_URL` 后启用，支持通过自然语言指令驱动完整测试流程：
 
-### 核心功能
-1. **任务管理**：创建、编辑、删除测试任务，支持URL和文档导入
-2. **页面解析**：自动抓取页面元素，识别可交互元素（按钮、输入框、选择框等）
-3. **用例生成**：基于页面元素和需求文档智能生成测试用例
-4. **测试执行**：支持批量执行测试用例，实时显示进度（WebSocket推送）
-5. **报告生成**：自动生成详细的测试报告，包含统计图表和截图
+```
+用户指令 → LangGraph 状态机 → 工具调用（parse_page / generate_cases / execute_tests）→ 输出结果
+```
 
-### 扩展功能
-1. **技能管理**：标准化技能目录规范，支持自定义技能扩展
-2. **大模型配置**：支持多模型切换和API配置
-3. **自动技能发现**：启动时自动扫描技能目录，动态注册工具
+支持 DeepSeek / OpenAI / Claude（兼容代理）/ 阿里云 / 月之暗面 / Ollama 等任意 OpenAI 兼容接口。
 
-## 📁 标准化技能目录规范
+### AI 报告分析
 
-遵循主流开源企业级Agent工程规范：
+接口测试报告和测试计划执行报告均支持一键 AI 分析，通过 `AI_API_KEY` / `AI_API_URL` 调用 LLM，对失败用例、断言偏差、性能指标进行结构化分析并给出修复建议。
+
+***
+
+## 插件化技能架构
 
 ```
 skills/
-└── <skill_name>/           # 独立可插拔技能目录
-    ├── SKILL.md           # 技能说明文档（场景、约束、风险提示）
-    ├── metadata.yaml      # 技能元数据（入参规范、输出格式）
-    ├── examples/          # 使用示例和错误案例
-    ├── templates/         # 模板文件
-    ├── resources/         # 资源文件（白名单、权限规则）
-    └── scripts/
-        └── run.py         # 核心执行逻辑
+├── ai_case_generator.py       # AI 用例生成核心（分段 + 覆盖度优化）
+├── case_generator.py          # UI 用例生成（分段 + 优化 + 覆盖度分析）
+├── api_case_generator.py      # 接口用例 AI 生成（Swagger / 描述驱动）
+├── api_executor.py            # 接口用例执行（断言 + 变量提取 + 前置依赖 + 代理 + Hosts）
+├── api_load_tester.py         # 接口压力测试（并发 + TPS/P95/P99 指标）
+├── param_resolver.py          # 参数解析（全局变量 / 内置函数 / 自定义脚本）
+├── test_executor.py           # UI 用例执行（Playwright）
+├── report_generator.py        # 报告生成（HTML + 图表）
+├── langchain_tools.py         # 自动注册 LangChain Tools
+├── skill_loader.py            # 技能目录扫描
+├── test_case_pro_max/         # 增强提示词技能（可在技能管理页启用）
+│   ├── SKILL.md
+│   └── prompt.yaml
+├── page_parser/               # 页面元素解析技能
+├── document_parser/           # PDF/Word/Excel 文档解析技能
+├── case_generator/            # 技能元数据目录
+├── test_executor/
+└── report_generator/
 ```
 
-### 已实现的技能
-| 技能名称 | 描述 | 工具名 |
-|----------|------|--------|
-| 页面解析器 | 抓取网页可交互元素 | `parse_page` |
-| 文档解析器 | 解析PDF/Word需求文档 | `parse_document` |
-| 用例生成器 | 智能生成测试用例 | `generate_cases` |
-| 测试执行器 | 执行测试用例 | `execute_tests` |
-| 报告生成器 | 生成测试报告 | `generate_report` |
+**新增技能**：在 `skills/` 下创建子目录，放入 `SKILL.md` 和 `scripts/run.py`，重启自动发现注册。
 
-### 添加新技能
-只需创建符合规范的技能目录，系统启动时自动发现并注册：
-1. 创建目录 `skills/your_skill/`
-2. 添加 `metadata.yaml` 定义元数据
-3. 添加 `scripts/run.py` 实现核心逻辑
-4. 重启服务即可自动注册
+***
 
-## 🚀 快速开始
+## 项目结构
+
+```
+ai_test_agent/
+├── main.py                    # 应用入口（Uvicorn 8000，Windows 异步策略）
+├── agent/
+│   ├── core.py                # UITestAgent 主控（单例）
+│   └── langgraph_agent.py     # LangGraph 对话代理
+├── api/
+│   ├── routes.py              # 全部 REST + AI 端点
+│   ├── schemas.py             # Pydantic 数据模型
+│   ├── websocket.py           # WebSocket 端点
+│   └── websocket_manager.py   # WS 连接管理（按 client_id 分组广播）
+├── skills/                    # 技能与 AI 核心逻辑
+│   ├── ai_case_generator.py   # AI 文档驱动用例生成
+│   ├── case_generator.py      # UI 用例生成
+│   ├── api_case_generator.py  # 接口用例 AI 生成
+│   ├── api_executor.py        # 接口用例执行引擎（含代理 / Hosts 映射）
+│   ├── api_load_tester.py     # 压力测试引擎
+│   └── param_resolver.py      # 参数解析（变量 / 函数 / 脚本）
+├── tools/
+│   ├── browser.py             # Playwright 浏览器封装（BrowserPool）
+│   ├── config.py              # 环境变量（pydantic-settings）
+│   ├── database.py            # SQLAlchemy 模型（Task/Case/Result/Report/ApiProject/ApiCase/TestPlan/TestPlanStep/TestPlanReport 等）
+│   └── document_parser.py     # PDF / Word / Excel / HTML 解析
+├── ui/
+│   ├── src/
+│   │   ├── api/index.js       # Axios 封装（含各接口超时配置）
+│   │   ├── router/            # Vue Router
+│   │   ├── stores/task.js     # Pinia 状态
+│   │   └── views/
+│   │       ├── Home.vue       # 首页 / 任务管理
+│   │       ├── Cases.vue      # 用例管理（AI生成 + 优化 + 覆盖度）
+│   │       ├── AiCases.vue    # AI 用例生成（文档驱动）
+│   │       ├── ApiTest.vue    # 接口测试（项目/用例/执行/压测/报告）
+│   │       ├── TestPlan.vue   # 测试计划（编排 + 执行 + 报告 + AI 分析）
+│   │       ├── Execution.vue  # UI 测试执行（实时 WS）
+│   │       ├── Reports.vue    # UI 测试报告
+│   │       ├── LLM.vue        # 大模型配置
+│   │       └── Skills.vue     # 技能管理
+│   └── dist/                  # 构建产物（FastAPI 静态文件服务）
+├── uploads/documents/         # 上传文档（自动创建）
+├── ai_cases/                  # AI 生成的 MD / XMind 文件
+├── screenshots/               # 执行截图
+├── reports/                   # HTML 报告
+├── logs/                      # 运行日志
+├── .env                       # 环境变量配置
+├── requirements.txt           # Python 依赖
+└── uitest_agent.db            # SQLite 数据库
+```
+
+***
+
+## 快速开始
 
 ### 环境要求
+
 - Python 3.11+
 - Node.js 18+
-- npm 9+
+- Claude Code CLI（`npm install -g @anthropic-ai/claude-code`，用于 AI 用例生成）
+- Playwright 浏览器内核
 
-### 安装依赖
+### 安装
 
-#### 后端依赖
 ```bash
-cd ai_uitest_agent
+# 1. 克隆项目
+git clone <repo-url>
+cd ai_test_agent
+
+# 2. 安装 Python 依赖
 pip install -r requirements.txt
-playwright install
-```
 
-#### 前端依赖
-```bash
+# 3. 安装 Playwright 浏览器
+playwright install chromium
+
+# 4. 安装前端依赖并构建
 cd ui
 npm install
+npm run build
+cd ..
 ```
 
-### 配置大模型
+### 配置
 
-编辑 `.env` 文件：
-```ini
-# 大模型配置
-AI_API_KEY=your_api_key_here
-AI_API_URL=https://api.deepseek.com/v1/chat/completions
-AI_MODEL=deepseek-chat
-AI_MODEL_NAME=deepseek-chat
-```
-
-### 运行项目
-
-#### 启动后端服务
-```bash
-python -m uvicorn main:app --host 0.0.0.0 --port 4000
-```
-
-#### 启动前端服务
-```bash
-cd ui
-npm run dev
-```
-
-### 访问地址
-| 服务 | 地址 |
-|------|------|
-| 前端页面 | http://localhost:8090 |
-| 后端API | http://localhost:4000 |
-| API文档 | http://localhost:4000/docs |
-
-## 📁 项目结构
-
-```
-ai_uitest_agent/
-├── agent/                    # Agent核心模块
-│   ├── __init__.py
-│   ├── core.py               # 代理核心逻辑
-│   └── langgraph_agent.py    # LangGraph状态机代理
-├── api/                      # API接口模块
-│   ├── __init__.py
-│   ├── routes.py             # REST API路由
-│   ├── schemas.py            # 数据模型定义
-│   ├── websocket.py          # WebSocket处理
-│   └── websocket_manager.py  # WebSocket连接管理
-├── skills/                   # 技能模块（标准化结构）
-│   ├── __init__.py
-│   ├── langchain_tools.py    # LangChain工具注册
-│   ├── page_parser/          # 页面解析器技能
-│   │   ├── SKILL.md
-│   │   ├── metadata.yaml
-│   │   └── scripts/run.py
-│   ├── document_parser/      # 文档解析器技能
-│   │   ├── SKILL.md
-│   │   ├── metadata.yaml
-│   │   └── scripts/run.py
-│   ├── case_generator/       # 用例生成器技能
-│   │   ├── SKILL.md
-│   │   ├── metadata.yaml
-│   │   └── scripts/run.py
-│   ├── test_executor/        # 测试执行器技能
-│   │   ├── SKILL.md
-│   │   ├── metadata.yaml
-│   │   └── scripts/run.py
-│   └── report_generator/     # 报告生成器技能
-│       ├── SKILL.md
-│       ├── metadata.yaml
-│       └── scripts/run.py
-├── tools/                    # 工具模块
-│   ├── __init__.py
-│   ├── browser.py            # 浏览器操作工具
-│   ├── config.py             # 配置管理
-│   ├── database.py           # 数据库操作
-│   ├── document_parser.py    # 文档解析工具
-│   └── logger.py             # 日志管理
-├── ui/                       # 前端模块
-│   ├── src/
-│   │   ├── api/              # API调用封装
-│   │   ├── router/           # 路由配置
-│   │   ├── stores/           # 状态管理
-│   │   ├── views/            # 页面组件
-│   │   ├── App.vue           # 根组件
-│   │   └── main.js           # 入口文件
-│   ├── index.html
-│   ├── package.json
-│   └── vite.config.js
-├── .env                      # 环境变量配置
-├── main.py                   # 应用入口
-├── requirements.txt          # Python依赖
-└── uitest_agent.db           # SQLite数据库文件
-```
-
-## 🔧 配置说明
-
-### 环境变量配置 (.env)
+复制并编辑 `.env`：
 
 ```ini
-# 应用配置
-APP_NAME=自动化UI测试Agent
-APP_VERSION=1.0.0
-DEBUG=True
-
 # 服务配置
 HOST=0.0.0.0
-PORT=4000
+PORT=8000
 
-# 跨域配置
-CORS_ORIGINS=["*"]
-
-# 大模型配置
-AI_API_KEY=your_api_key
-AI_API_URL=https://api.deepseek.com/v1/chat/completions
-AI_MODEL=deepseek-chat
-AI_MODEL_NAME=deepseek-chat
-
-# 路径配置
-SCREENSHOT_DIR=./screenshots
-REPORT_OUTPUT_DIR=./reports
-LOG_DIR=./logs
-
-# 数据库配置
+# 数据库
 DATABASE_URL=sqlite+aiosqlite:///./uitest_agent.db
+
+# LangGraph 代理（可选，不配置则跳过代理功能）
+# 同时用于接口测试报告 / 测试计划报告的 AI 分析
+AI_API_KEY=your_api_key
+AI_API_URL=https://api.deepseek.com/v1
+AI_MODEL=deepseek-chat
+AI_MODEL_NAME=DeepSeek Chat
 ```
 
-### 支持的大模型
-- DeepSeek (deepseek-chat)
-- OpenAI (gpt-3.5-turbo, gpt-4)
-- 智谱AI (chatglm)
-- 豆包
-- 其他OpenAI兼容接口
+> **AI 用例生成不依赖** **`.env`** **中的 API Key**，通过本机 Claude CLI 调用。确保已执行 `claude` 命令完成登录。
 
-## 📦 打包部署
+### 启动
 
-### 后端打包
+项目分为**后端**（FastAPI）和**前端**（Vue + Vite）两个服务，需分别启动。
 
-#### 使用 PyInstaller
+---
+
+#### 第一步：启动后端（必须先启动）
+
+打开一个终端，在项目根目录执行：
+
 ```bash
-pip install pyinstaller
-pyinstaller --onefile --name uitest-agent main.py
+cd E:\ai_test_agent
+
+# 前台运行（推荐开发时使用，可直接看日志）
+python main.py
+
+# 或后台运行（Windows，日志写入文件）
+start /B python main.py > logs\server_out.txt 2>&1
 ```
 
-#### 生成的文件
-- `dist/uitest-agent.exe` (Windows)
-- `dist/uitest-agent` (Linux/Mac)
+后端启动成功后，终端会输出类似：
 
-### 前端打包
-
-```bash
-cd ui
-npm run build
+```
+INFO     Starting Automated UI Testing Agent...
+INFO     Database initialized
+INFO     LangChain tools registered
+INFO     Uvicorn running on http://0.0.0.0:8000
 ```
 
-打包产物位于 `ui/dist` 目录。
+---
 
-### 部署方案
+#### 第二步：启动前端开发服务器
 
-#### 方案一：独立运行（开发环境）
+**另开一个新终端**，必须先 `cd` 进入 `ui` 目录再运行：
+
 ```bash
-# 后端
-python -m uvicorn main:app --host 0.0.0.0 --port 4000
-
-# 前端（开发模式）
-cd ui
+cd E:\ai_test_agent\ui
 npm run dev
 ```
 
-#### 方案二：Nginx反向代理（生产环境）
+前端启动成功后，终端会输出类似：
+
+```
+  VITE v5.x.x  ready in xxx ms
+
+  ➜  Local:   http://localhost:8090/
+  ➜  Network: use --host to expose
+```
+
+---
+
+#### 本地访问地址
+
+两个服务都启动后，通过以下地址访问：
+
+| 服务 | 地址 | 说明 |
+| --- | --- | --- |
+| **平台主页面（推荐）** | http://localhost:8090 | 前端 Vue 界面，开发模式 |
+| **后端 API** | http://localhost:8000 | FastAPI 直接访问 |
+| **API 文档（Swagger）** | http://localhost:8000/docs | 接口调试文档 |
+| **健康检查** | http://localhost:8000/health | 服务状态检测 |
+
+> **推荐访问 `http://localhost:8090`**，前端开发服务器会自动将 `/api`、`/ws`、`/screenshots`、`/reports` 等请求代理到后端 8000 端口，无需手动配置跨域。
+
+---
+
+#### 仅使用后端（生产模式）
+
+如果只想运行后端（不启动前端 dev server），需要先构建前端：
+
+```bash
+cd E:\ai_test_agent\ui
+npm run build
+cd ..
+python main.py
+```
+
+构建产物会输出到 `ui/dist/`，FastAPI 会自动将其挂载为静态文件，直接访问 `http://localhost:8000` 即可。
+
+---
+
+#### 停止服务
+
+- 前台运行：在对应终端按 `Ctrl + C`
+- 后台运行：`taskkill /F /IM python.exe`（停止后端）、`taskkill /F /IM node.exe`（停止前端）
+
+***
+
+## 使用流程
+
+### 流程一：AI 用例生成（文档驱动）
+
+适用于**有需求文档**、生成高质量功能测试用例并导出的场景。
+
+```
+1. 进入「AI 用例生成」菜单
+2. 点击「新建生成」→ 填写任务名，上传需求文档（PDF/Word/HTML）或粘贴文本
+3. 选择输出格式（Markdown / XMind），点击「开始生成」
+4. 等待分段生成完成（进度条实时显示当前模块）
+5. 查看生成结果，点击「覆盖度分析」评估测试覆盖情况
+6. 如需补充，点击「覆盖度优化」自动追加缺口用例
+7. 下载 Markdown 或 XMind 文件
+```
+
+> 启用「技能管理」中的 `test-case-pro-max` 可使用增强提示词，生成更规范的用例（含测试方法标注）。
+
+### 流程二：WebUI 自动化测试（页面驱动）
+
+适用于**直接执行自动化测试**的场景。
+
+```
+1. 「任务管理」→ 新建任务，填写目标 URL，可选上传需求文档
+2. 点击「解析页面」，等待 Playwright 抓取页面元素
+3. 「用例管理」→ 选择任务 → 点击「AI 生成用例」
+   - 进度弹窗实时显示生成阶段
+   - 生成完成后可点击「覆盖度分析」查看覆盖情况
+   - 点击「优化用例」自动追加补充用例
+4. 勾选用例 → 点击「批量执行测试」，进入执行页面
+5. 「报告查看」查看结果，下载 HTML 报告
+```
+
+### 流程三：接口测试
+
+适用于**单接口/单项目 API 测试与压力测试**的场景。
+
+```
+1. 「接口测试」→ 新建项目，填写 Base URL、鉴权方式
+   - 可选：配置代理地址（http://proxy:8080）
+   - 可选：配置 Hosts 映射（47.94.236.243 japi.example.com）
+2. 手动新建用例，或粘贴 Swagger 文档点击「AI 生成」批量创建用例
+3. 配置断言规则（状态码 / 响应字段 / 响应时间）
+4. 配置变量提取，将登录 Token 等字段写入全局变量池，供后续用例复用
+5. 点击「执行」，WebSocket 实时推送每条用例结果
+6. 查看执行报告，点击「AI 分析」获取失败原因和修复建议
+7. 如需压测：配置并发用户数 / 持续时长 / 爬坡策略，实时查看 TPS / P95 / P99 指标
+```
+
+### 流程四：测试计划（跨项目接口链路测试）
+
+适用于**多服务端到端接口链路测试**的场景，例如：登录 → 获取数据 → 提交订单 → 查询结果。
+
+```
+1. 「测试计划」→ 新建计划，填写名称、描述
+   - 可选：配置计划级代理（优先级高于项目代理）
+   - 可选：配置计划级 Hosts 映射（覆盖项目级同名条目）
+2. 点击「添加步骤」，从任意项目选择接口用例，调整执行顺序
+3. 点击「执行计划」，后台异步执行，WebSocket 实时推送每步进度
+   - 步骤间共享变量上下文（前步提取的变量可直接用于后步）
+4. 执行完成后查看报告：
+   - 卡片列表展示历史报告（通过率/耗时/步骤数）
+   - 点击「详情」查看每步断言结果、提取变量、响应预览
+   - 点击「AI 分析」获取失败分析和修复建议
+5. 支持多选报告批量删除
+```
+
+***
+
+## 代理与 Hosts 映射
+
+接口测试和测试计划均支持配置网络环境，适用于多套测试环境（内网/外网/代理）的切换。
+
+### 代理地址
+
+支持 HTTP / HTTPS / SOCKS5 协议，留空表示直连：
+
+```
+# 以下写法均支持
+192.168.1.100:8080              ← 自动补 http://
+http://192.168.1.100:8080
+https://proxy.corp.com:3128
+socks5://user:pass@host:1080
+```
+
+**优先级**：测试计划代理 > 项目代理 > 直连
+
+### Hosts 映射
+
+格式同系统 `/etc/hosts`，将指定域名的连接打到目标 IP，但保留原域名作为 `Host` 请求头（HTTPS 下配合 `verify=False` 使用）：
+
+```
+# 格式：IP 域名（每行一条，支持一 IP 对多域名，# 开头为注释）
+47.94.236.243 japi.hqwx.com
+192.168.1.10  api.dev.example.com staging.example.com
+```
+
+**优先级**：测试计划 hosts 条目 > 项目 hosts 条目（相同域名计划覆盖项目，不冲突的条目合并生效）
+
+***
+
+## 接口说明
+
+### 主要 REST 端点
+
+**WebUI 自动化**
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/api/v1/tasks` | 创建任务 |
+| POST | `/api/v1/parse/page` | 解析页面元素 |
+| POST | `/api/v1/cases/generate/{task_id}` | AI 生成 UI 用例（分段） |
+| POST | `/api/v1/cases/optimize/{task_id}` | 优化用例（追加补充） |
+| GET  | `/api/v1/cases/coverage/{task_id}` | 用例覆盖度分析 |
+| POST | `/api/v1/execute` | 执行 UI 测试用例 |
+
+**AI 用例生成**
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/api/v1/ai-cases/generate` | AI 用例生成（文档驱动） |
+| POST | `/api/v1/ai-cases/{id}/optimize` | AI 用例覆盖度优化 |
+| GET  | `/api/v1/ai-cases/{id}/coverage` | AI 用例覆盖度分析 |
+| GET  | `/api/v1/ai-cases/{id}/download` | 下载 MD / XMind |
+
+**接口测试**
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/api/v1/api-test/projects` | 创建接口项目 |
+| GET  | `/api/v1/api-test/projects` | 项目列表 |
+| PUT  | `/api/v1/api-test/projects/{id}` | 更新项目（含代理/Hosts配置） |
+| POST | `/api/v1/api-test/cases` | 新建接口用例 |
+| PUT  | `/api/v1/api-test/cases/{id}` | 编辑接口用例 |
+| POST | `/api/v1/api-test/projects/{id}/cases/generate` | AI 生成接口用例 |
+| POST | `/api/v1/api-test/projects/{id}/execute` | 执行接口用例 |
+| POST | `/api/v1/api-test/projects/{id}/load` | 启动压力测试 |
+| POST | `/api/v1/api-test/load/stop` | 停止压力测试 |
+| GET  | `/api/v1/api-test/projects/{id}/reports` | 接口测试报告列表 |
+| POST | `/api/v1/api-test/reports/{id}/analyze` | AI 分析接口测试报告 |
+| GET  | `/api/v1/global-vars` | 全局变量池列表 |
+
+**测试计划**
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET  | `/api/v1/test-plans` | 计划列表 |
+| POST | `/api/v1/test-plans` | 新建计划 |
+| GET  | `/api/v1/test-plans/{id}` | 计划详情（含步骤） |
+| PUT  | `/api/v1/test-plans/{id}` | 更新计划（含代理/Hosts配置） |
+| DELETE | `/api/v1/test-plans/{id}` | 删除计划 |
+| POST | `/api/v1/test-plans/{id}/run` | 执行计划（异步） |
+| GET  | `/api/v1/test-plans/{id}/reports` | 执行报告列表 |
+| DELETE | `/api/v1/test-plans/reports/batch` | 批量删除报告 |
+| POST | `/api/v1/test-plans/reports/{id}/analyze` | AI 分析执行报告 |
+
+完整文档：`http://localhost:8000/docs`
+
+### WebSocket 事件
+
+连接地址：`ws://localhost:8000/ws?client_id=<id>`
+
+| client_id | 事件类型 | 说明 |
+| --- | --- | --- |
+| `ui` | `execution_progress` | UI 用例执行进度 |
+| `ai_gen` | `ai_gen_progress` | AI 用例生成进度 |
+| `cases_gen` | `cases_gen_progress` | UI 用例生成进度 |
+| `cases_opt` | `cases_opt_progress` | 用例优化进度 |
+| `api_gen` | `api_gen_progress` | 接口用例 AI 生成进度 |
+| `api_exec` | `api_exec_progress` | 接口用例执行进度 |
+| `api_load` | `load_metrics` | 压测实时指标推送 |
+| `plan_<id>` | `plan_step_start` / `plan_step_done` / `plan_done` | 测试计划执行进度 |
+
+***
+
+## 当前架构与部署
+
+### 当前架构（Windows 单机）
+
+```
+浏览器 → FastAPI（8000）→ SQLite
+                         → Playwright（本机）
+                         → Claude CLI（本机）
+                         → httpx（代理 / Hosts 映射）
+```
+
+适合个人或小团队（2-3 人，不并发执行）使用。
+
+### 服务器部署（Nginx 反代）
+
+**前端打包**（已内置到 FastAPI 静态文件服务，通常无需单独配置）：
+
+```bash
+cd ui && npm run build
+```
+
+**Nginx 配置**：
 
 ```nginx
 server {
     listen 80;
     server_name your-domain.com;
 
-    # 前端静态文件
     location / {
-        root /path/to/ui/dist;
-        try_files $uri $uri/ /index.html;
-    }
-
-    # 后端API
-    location /api/ {
-        proxy_pass http://127.0.0.1:4000/api/;
+        proxy_pass http://127.0.0.1:8000;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
     }
 
-    # WebSocket
     location /ws {
-        proxy_pass http://127.0.0.1:4000/ws;
+        proxy_pass http://127.0.0.1:8000/ws;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
+        proxy_read_timeout 3600s;
     }
 }
 ```
 
-#### 方案三：Docker部署
+### 多人并发部署（扩展方向）
 
-创建 `Dockerfile`:
-```dockerfile
-FROM python:3.11-slim
+当前架构为单机设计，支持多人使用需以下改造：
 
-WORKDIR /app
+| 改造项 | 说明 |
+| --- | --- |
+| SQLite → PostgreSQL | 改一行连接字符串，SQLAlchemy 完全兼容 |
+| 浏览器隔离 | 改为 `browser.new_context()` 按请求独立 Context，避免多用户浏览器状态互扰 |
+| Claude CLI → Anthropic API | 直接调用 `anthropic.AsyncAnthropic`，去掉本机 CLI 依赖 |
+| 加认证中间件 | 基于现有 `User` 表，加 JWT 路由保护 |
+| 任务队列 | 用 asyncio.Queue 或 Celery + Redis 隔离并发执行任务 |
 
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-RUN playwright install --with-deps chromium
-
-COPY . .
-
-EXPOSE 4000
-
-CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "4000"]
-```
-
-构建并运行：
-```bash
-docker build -t uitest-agent .
-docker run -p 4000:4000 uitest-agent
-```
-
-## 📋 使用流程
-
-### 1. 创建任务
-1. 进入「任务管理」页面
-2. 点击「新建任务」
-3. 填写任务名称和目标URL
-4. 选择浏览器类型（Chrome/Firefox/WebKit）
-
-### 2. 解析页面
-1. 在任务列表中选择任务
-2. 点击「解析页面」
-3. 等待页面元素抓取完成
-
-### 3. 生成用例
-1. 切换到「用例管理」页面
-2. 选择任务
-3. 点击「生成用例」（可导入需求文档辅助生成）
-
-### 4. 执行测试
-1. 切换到「测试执行」页面
-2. 选择任务
-3. 点击「执行全部」或选择部分用例执行
-4. 实时查看执行进度
-
-### 5. 查看报告
-1. 切换到「测试报告」页面
-2. 从列表中选择报告
-3. 查看统计图表、详细结果和截图
-
-## 🔌 技能开发指南
-
-### 技能元数据规范 (metadata.yaml)
-```yaml
-name: "技能名称"
-version: "1.0.0"
-category: "技能类别"
-description: "技能描述"
-parameters:
-  param_name:
-    type: string
-    required: true
-    description: "参数说明"
-output:
-  type: object
-  properties:
-    field_name:
-      type: string
-```
-
-### 执行脚本规范 (scripts/run.py)
-```python
-async def execute(**kwargs) -> dict:
-    """
-    技能核心执行逻辑
-    
-    Returns:
-        dict: 执行结果
-    """
-    return {
-        "status": "success",
-        "data": ...
-    }
-```
-
-
-
-## 📄 许可证
-
-本项目采用 MIT 许可证，详见 LICENSE 文件。
-
-## 📞 联系方式
-
-如有问题或建议，请通过以下方式联系：
-
-- 项目地址：https://gitee.com/fxlysm/ai_uitest_agent.git
-- 微信公众号：魅力测试
-- 邮箱：fxlysm@126.com
-- 当离职状态，若深圳武汉大家有公司介绍，求推荐
----
-
-**注意**：本项目仅供学习和研究使用，生产环境使用前请进行充分测试。
-
+***
 
 ## 截图
 
 <table>
     <tr>
-        <td><img src="https://gitee.com/fxlysm/ai_uitest_agent/raw/master/image/001.png"/></td>
-        <td><img src="https://gitee.com/fxlysm/ai_uitest_agent/raw/master/image/002.png"/></td>
+        <td><img src="https://gitee.com/fxlysm/ai_test_agent/raw/master/image/001.png"/></td>
+        <td><img src="https://gitee.com/fxlysm/ai_test_agent/raw/master/image/002.png"/></td>
     </tr>
     <tr>
-                <td><img src="https://gitee.com/fxlysm/ai_uitest_agent/raw/master/image/003.png"/></td>
-        <td><img src="https://gitee.com/fxlysm/ai_uitest_agent/raw/master/image/004.png"/></td>
+        <td><img src="https://gitee.com/fxlysm/ai_test_agent/raw/master/image/003.png"/></td>
+        <td><img src="https://gitee.com/fxlysm/ai_test_agent/raw/master/image/004.png"/></td>
     </tr>
     <tr>
-              <td><img src="https://gitee.com/fxlysm/ai_uitest_agent/raw/master/image/005.png"/></td>
-        <td><img src="https://gitee.com/fxlysm/ai_uitest_agent/raw/master/image/006.png"/></td>
+        <td><img src="https://gitee.com/fxlysm/ai_test_agent/raw/master/image/005.png"/></td>
+        <td><img src="https://gitee.com/fxlysm/ai_test_agent/raw/master/image/006.png"/></td>
     </tr>
-	<tr>
-           <td><img src="https://gitee.com/fxlysm/ai_uitest_agent/raw/master/image/007.png"/></td>
-        <td><img src="https://gitee.com/fxlysm/ai_uitest_agent/raw/master/image/008.png"/></td>
-    </tr>	 
-
+    <tr>
+        <td><img src="https://gitee.com/fxlysm/ai_test_agent/raw/master/image/007.png"/></td>
+        <td><img src="https://gitee.com/fxlysm/ai_test_agent/raw/master/image/008.png"/></td>
+    </tr>
 </table>
 
+***
 
-## 捐赠支持
+## 许可证
 
-😀 你可以请作者喝杯咖啡表示鼓励
-
-- 有捐赠的小伙伴（金额不限）可以联系作者领取一份 **独家提升开发技能的文档**
-- 加QQ814380399或者邮件到 fxlysm@126.com邮箱 *注明 领取开发技能提升文档*
-- 文档宗旨在于提升测试人员的测试理论及测试开发相关技术，讲述**如何测试**，高质量测试，**如何开发测试平台**等
-
-<table>
-    <tr>
-        <td><img src="https://gitee.com/fxlysm/ai_uitest_agent/raw/master/image/0010.jpg"/></td>
-        <td><img src="https://gitee.com/fxlysm/ai_uitest_agent/raw/master/image/0011.png"/></td>
-    </tr>  
-</table>
+本项目采用 MIT 许可证，详见 [LICENSE](LICENSE) 文件。

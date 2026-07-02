@@ -1,10 +1,10 @@
 name: "文档解析器"
-version: "1.0.0"
+version: "1.1.0"
 category: "document-parsing"
-description: "解析PDF、Word等需求文档，提取测试需求信息"
+description: "解析PDF和Word等格式的产品需求文档，提取功能点、业务规则、校验逻辑等结构化信息"
 author: "UITest Agent Team"
 created_at: "2026-06-18"
-last_updated: "2026-06-18"
+last_updated: "2026-06-23"
 
 parameters:
   document_path:
@@ -12,38 +12,72 @@ parameters:
     required: true
     description: "文档文件路径"
     example: "./requirements.docx"
-  
+
   file_type:
     type: string
     required: false
     default: "auto"
-    description: "文件类型"
+    description: "文件类型（默认自动检测）"
     enum:
       - auto
       - pdf
       - docx
+      - doc
       - txt
+      - md
+      - csv
+      - xlsx
+      - xls
+      - html
+      - htm
+      - pptx
+      - json
 
 output:
   type: object
   properties:
     page_count:
       type: integer
+      description: "页数/Sheet数/幻灯片数"
     paragraph_count:
       type: integer
+      description: "段落数/行数"
     content:
       type: string
+      description: "提取的全文内容"
     metadata:
       type: object
+      description: "格式相关的元数据（encoding、tables等）"
+    structured:
+      type: object
+      description: "结构化提取结果（sections/functional_points/validation_rules/business_flows）"
 
 triggers:
   - "解析文档"
   - "导入文档"
   - "上传需求"
   - "文档分析"
+  - "解析需求"
+  - "读取文档"
 
 dependencies:
   - pypdf2
   - python-docx
+  - openpyxl
+  - python-pptx
+
+supported_formats:
+  - ".pdf"
+  - ".docx"
+  - ".doc"
+  - ".txt"
+  - ".md"
+  - ".csv"
+  - ".xlsx"
+  - ".xls"
+  - ".html"
+  - ".htm"
+  - ".pptx"
+  - ".json"
 
 risk_level: low

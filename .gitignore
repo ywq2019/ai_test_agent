@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.env
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Node
+ui/node_modules/
+ui/dist/
+
+# 数据库 & 运行时产物
+*.db
+*.sqlite
+logs/
+reports/
+screenshots/
+ai_cases/
+uploads/documents/
+
+# Windows 保留名
+nul
+
+# IDE
+.vscode/
+.idea/
+
+# 其他
+*.log

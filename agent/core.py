@@ -23,6 +23,7 @@ class AgentState:
         self.results: List[Dict[str, Any]] = []
         self.page_elements: List[Dict[str, Any]] = []
         self.document_data: Optional[Dict[str, Any]] = None
+        self.current_url: str = ""
         self.intent_history: List[Dict[str, Any]] = []
 
 
@@ -43,7 +44,7 @@ class UITestAgent:
 
     async def send_progress(self, data: Dict[str, Any]):
         if self._websocket_manager:
-            await self._websocket_manager.broadcast(data)
+            await self._websocket_manager.broadcast_all(data)
 
     async def create_task(
         self,
@@ -123,7 +124,7 @@ class UITestAgent:
         logger.info(f"Document parsed successfully")
         return document_data
 
-    async def generate_cases(self) -> List[Dict[str, Any]]:
+    async def generate_cases(self, progress_cb=None) -> List[Dict[str, Any]]:
         logger.info("Generating test cases...")
 
         self.state.current_task_status = "generating"
@@ -134,9 +135,10 @@ class UITestAgent:
         })
 
         cases = await case_generator.generate_cases(
-            url="",
+            url=self.state.current_url,
             page_elements=self.state.page_elements,
-            document_data=self.state.document_data
+            document_data=self.state.document_data,
+            progress_cb=progress_cb,
         )
 
         for idx, case in enumerate(cases):
@@ -334,15 +336,15 @@ class UITestAgent:
             return {"type": "execution_result", "results": results}
 
         elif intent["action"] == "pause":
-            test_executor.pause()
+            test_executor.pause()  # sync
             return {"type": "status", "message": "测试已暂停"}
 
         elif intent["action"] == "resume":
-            test_executor.resume()
+            test_executor.resume()  # sync
             return {"type": "status", "message": "测试已继续"}
 
         elif intent["action"] == "stop":
-            test_executor.stop()
+            test_executor.stop()  # sync
             return {"type": "status", "message": "停止指令已发送"}
 
         elif intent["action"] == "list_cases":

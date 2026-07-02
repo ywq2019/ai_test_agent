@@ -37,13 +37,14 @@ class ReportGenerator:
             "generated_at": datetime.utcnow().isoformat()
         }
 
-        report_path = self.report_dir / f"report_{task_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json"
+        ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+        report_path = self.report_dir / f"report_{task_id}_{ts}.json"
         with open(report_path, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
 
         logger.info(f"Report saved to {report_path}")
 
-        html_path = await self._generate_html_report(report, task_name)
+        html_path = await self._generate_html_report(report, task_name, ts)
 
         return {
             "report": report,
@@ -112,10 +113,12 @@ class ReportGenerator:
             })
         return details
 
-    async def _generate_html_report(self, report: Dict[str, Any], task_name: str) -> Path:
+    async def _generate_html_report(self, report: Dict[str, Any], task_name: str, ts: str = None) -> Path:
         html_content = self._build_html_template(report, task_name)
 
-        html_path = self.report_dir / f"report_{report['task_id']}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.html"
+        if ts is None:
+            ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+        html_path = self.report_dir / f"report_{report['task_id']}_{ts}.html"
         with open(html_path, "w", encoding="utf-8") as f:
             f.write(html_content)
 

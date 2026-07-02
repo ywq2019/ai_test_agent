@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Dict, List, Any, Optional, Callable
 from pathlib import Path
 from loguru import logger
-from tools.browser import BrowserTool, browser_pool
+from tools.browser import browser_pool
 from tools.config import settings
 
 
@@ -17,126 +17,6 @@ class TestExecutor:
         self.is_paused: bool = False
         self.should_stop: bool = False
         self.progress_callback: Optional[Callable] = None
-
-    def _execute_batch_sync(
-        self,
-        cases: List[Dict[str, Any]],
-        url: str,
-        browser_type: str = "chromium",
-        screenshots_dir: str = None,
-        progress_queue=None
-    ) -> List[Dict[str, Any]]:
-        """
-        同步批量执行测试用例（在单独线程中运行）
-        """
-        results = []
-        total_cases = len(cases)
-        completed_cases = 0
-        browser = None
-        
-        try:
-            browser = BrowserTool(browser_type)
-            browser._launch_sync()
-            
-            if url:
-                browser.sync_navigate(url)
-            
-            for case in cases:
-                if self.should_stop:
-                    break
-                
-                start_time = datetime.utcnow()
-                
-                try:
-                    screenshot_path = None
-                    error_message = None
-                    
-                    if case.get("element_selector"):
-                        try:
-                            selector = case["element_selector"]
-                            
-                            if "input" in case.get("name", "").lower():
-                                browser.sync_wait_for_selector(selector, timeout=5000)
-                                browser.sync_fill_input(selector, "Test123")
-                            
-                            elif "点击" in case.get("name", "") or "button" in case.get("name", "").lower():
-                                browser.sync_wait_for_selector(selector, timeout=5000)
-                                browser.sync_click_element(selector)
-                            
-                            elif "选择" in case.get("name", "") or "select" in case.get("name", "").lower():
-                                browser.sync_wait_for_selector(selector, timeout=5000)
-                                browser.sync_select_option(selector, "1")
-                            
-                            else:
-                                browser.sync_wait_for_selector(selector, timeout=5000)
-                                browser.sync_click_element(selector)
-                            
-                            import time
-                            time.sleep(0.5)
-                            
-                        except Exception as e:
-                            error_message = str(e)
-                            logger.error(f"Case execution error: {e}")
-                    
-                    if screenshots_dir and not error_message:
-                        screenshot_filename = f"case_{case.get('id', 'unknown')}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.png"
-                        screenshot_path = str(Path(screenshots_dir) / screenshot_filename)
-                        browser.sync_take_screenshot(screenshot_path)
-                    
-                    end_time = datetime.utcnow()
-                    duration = (end_time - start_time).total_seconds()
-                    
-                    status = "passed" if not error_message else "failed"
-                    
-                    result = {
-                        "case_id": case.get("id"),
-                        "case_name": case.get("name", ""),
-                        "status": status,
-                        "start_time": start_time.isoformat(),
-                        "end_time": end_time.isoformat(),
-                        "duration": duration,
-                        "error_message": error_message,
-                        "screenshot_path": screenshot_path,
-                        "logs": f"Executed case: {case.get('name')}"
-                    }
-
-                except Exception as e:
-                    logger.error(f"Test execution failed: {e}")
-                    end_time = datetime.utcnow()
-                    duration = (end_time - start_time).total_seconds()
-
-                    result = {
-                        "case_id": case.get("id"),
-                        "case_name": case.get("name", ""),
-                        "status": "failed",
-                        "start_time": start_time.isoformat(),
-                        "end_time": end_time.isoformat(),
-                        "duration": duration,
-                        "error_message": str(e),
-                        "screenshot_path": None,
-                        "logs": f"Execution failed: {str(e)}"
-                    }
-                
-                results.append(result)
-                completed_cases += 1
-                
-                if progress_queue:
-                    progress_queue.put({
-                        "type": "case_complete",
-                        "case_id": case.get("id"),
-                        "case_name": case.get("name", ""),
-                        "status": result["status"],
-                        "progress": completed_cases / total_cases * 100,
-                        "current": completed_cases,
-                        "total": total_cases
-                    })
-            
-            return results
-            
-        finally:
-            if browser:
-                browser.close()
-            self.is_running = False
 
     async def execute_batch(
         self,
@@ -152,32 +32,41 @@ class TestExecutor:
         self.progress_callback = progress_callback
         self.is_running = True
         self.should_stop = False
-        
-        import queue
-        progress_queue = queue.Queue()
-        
-        async def process_progress():
-            while self.is_running or not progress_queue.empty():
-                try:
-                    progress_data = progress_queue.get(timeout=0.5)
-                    if progress_callback:
-                        await progress_callback(progress_data)
-                except queue.Empty:
-                    await asyncio.sleep(0.1)
-        
-        progress_task = asyncio.create_task(process_progress())
-        
-        results = await asyncio.to_thread(
-            self._execute_batch_sync,
-            cases,
-            url,
-            browser_type,
-            screenshots_dir,
-            progress_queue
-        )
-        
-        await progress_task
-        
+        results = []
+        total_cases = len(cases)
+        completed_cases = 0
+
+        try:
+            for case in cases:
+                if self.should_stop:
+                    break
+
+                # 暂停等待
+                while self.is_paused and not self.should_stop:
+                    await asyncio.sleep(0.2)
+                if self.should_stop:
+                    break
+
+                result = await self.execute_case(case, url, browser_type, screenshots_dir)
+                results.append(result)
+                completed_cases += 1
+
+                if progress_callback:
+                    await progress_callback({
+                        "type": "case_complete",
+                        "case_id": result.get("case_id"),
+                        "case_name": result.get("case_name", ""),
+                        "status": result["status"],
+                        "duration": result.get("duration", 0),
+                        "error_message": result.get("error_message"),
+                        "screenshot_path": result.get("screenshot_path"),
+                        "progress": completed_cases / total_cases * 100,
+                        "current": completed_cases,
+                        "total": total_cases
+                    })
+        finally:
+            self.is_running = False
+
         return results
 
     async def execute_case(
@@ -226,10 +115,15 @@ class TestExecutor:
                     error_message = str(e)
                     logger.error(f"Case execution error: {e}")
 
-            if screenshots_dir and not error_message:
-                screenshot_filename = f"case_{case.get('id', 'unknown')}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.png"
+            if screenshots_dir:
+                status_tag = "fail" if error_message else "pass"
+                screenshot_filename = f"case_{case.get('id', 'unknown')}_{status_tag}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.png"
                 screenshot_path = str(Path(screenshots_dir) / screenshot_filename)
-                await browser.take_screenshot(screenshot_path)
+                try:
+                    await browser.take_screenshot(screenshot_path)
+                except Exception as se:
+                    logger.warning(f"Screenshot failed: {se}")
+                    screenshot_path = None
 
             end_time = datetime.utcnow()
             duration = (end_time - start_time).total_seconds()
@@ -301,6 +195,11 @@ class TestExecutor:
                     if self.should_stop:
                         break
 
+                    while self.is_paused and not self.should_stop:
+                        await asyncio.sleep(0.2)
+                    if self.should_stop:
+                        break
+
                     result = await self.execute_case(case, url, browser_type)
                     results.append(result)
                     completed_cases += 1
@@ -338,8 +237,21 @@ class TestExecutor:
         finally:
             self.is_running = False
 
-    async def stop(self):
+    def pause(self):
+        self.is_paused = True
+
+    def resume(self):
+        self.is_paused = False
+
+    def stop(self):
         self.should_stop = True
+
+    def get_status(self) -> dict:
+        return {
+            "is_running": self.is_running,
+            "is_paused": self.is_paused,
+            "should_stop": self.should_stop
+        }
 
 
 test_executor = TestExecutor()

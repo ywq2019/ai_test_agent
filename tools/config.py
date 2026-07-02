@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     PLAYWRIGHT_BROWSERS: List[str] = ["chromium", "firefox", "webkit"]
     DEFAULT_BROWSER: str = "chromium"
 
-    MAX_UPLOAD_SIZE: int = 10 * 1024 * 1024
+    MAX_UPLOAD_SIZE: int = 20 * 1024 * 1024
     DOCUMENT_TIMEOUT: int = 10
     ELEMENT_CAPTURE_TIMEOUT: int = 5
 

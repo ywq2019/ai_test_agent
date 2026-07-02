@@ -7,17 +7,50 @@ from typing import Dict, List, Any, Optional, TypedDict
 from datetime import datetime
 from loguru import logger
 
-from langchain_openai import ChatOpenAI
-from langchain.tools import BaseTool
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
-from langchain_core.output_parsers import JsonOutputParser
-from langchain_core.prompts import ChatPromptTemplate
 
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver
 
 from skills.langchain_tools import tool_registry
+
+
+def _build_llm(api_key: str, base_url: str, model_name: str, temperature: float = 0.5):
+    """根据 base_url / model_name 自动选择 Anthropic 或 OpenAI 兼容客户端"""
+    import httpx
+    is_anthropic = "anthropic.com" in base_url or model_name.startswith("claude")
+    if is_anthropic:
+        from langchain_anthropic import ChatAnthropic
+        import anthropic
+        llm = ChatAnthropic(
+            model=model_name,
+            temperature=temperature,
+            api_key=api_key,
+            base_url=base_url,
+        )
+        llm.__dict__['_client'] = anthropic.Anthropic(
+            api_key=api_key,
+            base_url=base_url,
+            http_client=httpx.Client(verify=False),
+        )
+        llm.__dict__['_async_client'] = anthropic.AsyncAnthropic(
+            api_key=api_key,
+            base_url=base_url,
+            http_client=httpx.AsyncClient(verify=False),
+        )
+    else:
+        from langchain_openai import ChatOpenAI
+        llm = ChatOpenAI(
+            model=model_name,
+            temperature=temperature,
+            api_key=api_key,
+            base_url=base_url,
+            http_client=httpx.Client(verify=False),
+            http_async_client=httpx.AsyncClient(verify=False),
+        )
+    logger.info(f"LLM built: {'Anthropic' if is_anthropic else 'OpenAI-compatible'} / {model_name}")
+    return llm
 
 
 # 定义代理状态
@@ -35,21 +68,11 @@ class AgentState(TypedDict):
 
 
 class LangGraphAgent:
-    def __init__(self, api_key: str, base_url: str, model_name: str = "deepseek-chat"):
-        """
-        初始化 LangGraph Agent
-        
-        Args:
-            api_key: 大模型 API Key
-            base_url: 大模型 API 地址
-            model_name: 模型名称
-        """
-        self.llm = ChatOpenAI(
-            model=model_name,
-            temperature=0.5,
-            api_key=api_key,
-            base_url=base_url
-        )
+    def __init__(self, api_key: str, base_url: str, model_name: str = "claude-sonnet-4-6"):
+        self.api_key = api_key
+        self.base_url = base_url
+        self.model_name = model_name
+        self.llm = _build_llm(api_key, base_url, model_name)
         
         self.tools = tool_registry.get_tools()
         self.tool_node = ToolNode(self.tools)
@@ -72,7 +95,7 @@ class LangGraphAgent:
         self.graph = self._build_graph()
         
         logger.info("LangGraph Agent 初始化完成")
-    
+
     def _build_graph(self) -> StateGraph:
         """构建状态图"""
         workflow = StateGraph(AgentState)
@@ -132,9 +155,8 @@ class LangGraphAgent:
     async def _parse_page_node(self, state: AgentState) -> AgentState:
         """解析页面节点"""
         logger.info(f"解析页面: {state['url']}")
-        
+
         from skills.page_parser.scripts.run import execute
-        
         result = await execute(
             url=state["url"],
             browser_type="chromium",
@@ -164,9 +186,8 @@ class LangGraphAgent:
     async def _generate_cases_node(self, state: AgentState) -> AgentState:
         """生成用例节点"""
         logger.info(f"生成测试用例: {len(state['page_elements'])} 个元素")
-        
+
         from skills.case_generator.scripts.run import execute
-        
         result = await execute(
             page_elements=state["page_elements"],
             url=state["url"]
@@ -195,9 +216,8 @@ class LangGraphAgent:
     async def _execute_tests_node(self, state: AgentState) -> AgentState:
         """执行测试节点"""
         logger.info(f"执行测试用例: {len(state['cases'])} 个")
-        
+
         from skills.test_executor.scripts.run import execute
-        
         result = await execute(
             cases=state["cases"],
             url=state["url"],
@@ -231,9 +251,8 @@ class LangGraphAgent:
     async def _generate_report_node(self, state: AgentState) -> AgentState:
         """生成报告节点"""
         logger.info(f"生成测试报告: 任务ID {state['task_id']}")
-        
+
         from skills.report_generator.scripts.run import execute
-        
         result = await execute(
             task_id=state["task_id"] or 0,
             task_name=state["task_name"],
@@ -344,7 +363,7 @@ class LangGraphAgent:
 uitest_langgraph_agent = None
 
 
-def init_langgraph_agent(api_key: str, base_url: str, model_name: str = "deepseek-chat"):
+def init_langgraph_agent(api_key: str, base_url: str, model_name: str = "claude-sonnet-4-6"):
     """初始化 LangGraph 代理"""
     global uitest_langgraph_agent
     uitest_langgraph_agent = LangGraphAgent(api_key, base_url, model_name)

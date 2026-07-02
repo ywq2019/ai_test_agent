@@ -22,12 +22,12 @@
         </el-table-column>
         <el-table-column prop="environment" label="环境" width="100">
           <template #default="{ row }">
-            <el-tag type="info">{{ row.environment }}</el-tag>
+            <el-tag type="info">{{ getEnvLabel(row.environment) }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column prop="status" label="状态" width="100">
           <template #default="{ row }">
-            <el-tag :type="getStatusType(row.status)">{{ row.status }}</el-tag>
+            <el-tag :type="getStatusType(row.status)">{{ getStatusLabel(row.status) }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column prop="created_at" label="创建时间" width="180">
@@ -35,17 +35,33 @@
             {{ formatDate(row.created_at) }}
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="200" fixed="right">
+        <el-table-column label="操作" width="210" fixed="right">
           <template #default="{ row }">
-            <el-button size="small" type="primary" @click="viewTask(row)">查看</el-button>
-            <el-button size="small" type="success" @click="startTest(row)">开始测试</el-button>
-            <el-button size="small" type="danger" @click="deleteTask(row)">删除</el-button>
+            <div class="action-btns">
+              <el-tooltip content="查看用例" placement="top">
+                <el-button type="primary" link size="small" @click="viewTask(row)">
+                  <el-icon><View /></el-icon>查看
+                </el-button>
+              </el-tooltip>
+              <el-divider direction="vertical" />
+              <el-tooltip content="开始执行测试" placement="top">
+                <el-button type="success" link size="small" @click="startTest(row)">
+                  <el-icon><VideoPlay /></el-icon>测试
+                </el-button>
+              </el-tooltip>
+              <el-divider direction="vertical" />
+              <el-tooltip content="删除任务" placement="top">
+                <el-button type="danger" link size="small" @click="deleteTask(row)">
+                  <el-icon><Delete /></el-icon>删除
+                </el-button>
+              </el-tooltip>
+            </div>
           </template>
         </el-table-column>
       </el-table>
     </el-card>
 
-    <el-dialog v-model="showCreateDialog" title="创建测试任务" width="600px">
+    <el-dialog v-model="showCreateDialog" title="创建测试任务" width="600px" @close="onDialogClose">
       <el-form :model="taskForm" label-width="100px">
         <el-form-item label="任务名称">
           <el-input v-model="taskForm.name" placeholder="请输入任务名称" />
@@ -58,14 +74,28 @@
             ref="uploadRef"
             :auto-upload="false"
             :limit="1"
-            accept=".pdf,.docx,.doc"
+            :accept="ACCEPTED_EXTS"
+            :before-upload="() => false"
             :on-change="handleFileChange"
+            :on-remove="handleFileRemove"
           >
-            <el-button>选择文件</el-button>
+            <el-button><el-icon><Upload /></el-icon> 选择文件</el-button>
             <template #tip>
-              <div class="el-upload__tip">支持PDF、DOC、DOCX格式</div>
+              <div class="el-upload__tip">
+                支持：PDF · Word（DOCX/DOC）· Excel（XLSX/XLS）· PowerPoint（PPTX）·
+                Markdown · 纯文本（TXT）· CSV · HTML · JSON
+                <span style="color:#f56c6c;margin-left:6px;">文件大小 ≤ 20MB</span>
+              </div>
             </template>
           </el-upload>
+          <el-alert
+            v-if="fileError"
+            :title="fileError"
+            type="error"
+            show-icon
+            :closable="false"
+            style="margin-top:8px;"
+          />
         </el-form-item>
         <el-form-item label="浏览器">
           <el-select v-model="taskForm.browser" style="width: 100%">
@@ -129,6 +159,11 @@ import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useTaskStore } from '../stores/task'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { View, VideoPlay, Delete, Plus, Upload } from '@element-plus/icons-vue'
+
+const ACCEPTED_EXTS = '.pdf,.docx,.doc,.xlsx,.xls,.pptx,.md,.txt,.csv,.html,.htm,.json'
+const ACCEPTED_SET = new Set(ACCEPTED_EXTS.split(','))
+const MAX_SIZE_MB = 20
 
 const router = useRouter()
 const taskStore = useTaskStore()
@@ -139,6 +174,7 @@ const creating = ref(false)
 const parsing = ref(false)
 const uploadRef = ref(null)
 const uploadedFile = ref(null)
+const fileError = ref('')
 
 const taskForm = reactive({
   name: '',
@@ -157,12 +193,39 @@ const getStatusType = (status) => {
   const types = {
     created: 'info',
     parsing: 'warning',
+    parsed: 'info',
     generating: 'warning',
+    generated: 'info',
     executing: 'primary',
+    reporting: 'warning',
     completed: 'success',
     failed: 'danger'
   }
   return types[status] || 'info'
+}
+
+const getStatusLabel = (status) => {
+  const labels = {
+    created: '已创建',
+    parsing: '解析中',
+    parsed: '已解析',
+    generating: '生成中',
+    generated: '已生成',
+    executing: '执行中',
+    reporting: '生成报告',
+    completed: '已完成',
+    failed: '失败'
+  }
+  return labels[status] || status
+}
+
+const getEnvLabel = (env) => {
+  const labels = {
+    test: '测试环境',
+    staging: '预发环境',
+    production: '生产环境'
+  }
+  return labels[env] || env
 }
 
 const formatDate = (dateStr) => {
@@ -171,7 +234,36 @@ const formatDate = (dateStr) => {
 }
 
 const handleFileChange = (file) => {
-  uploadedFile.value = file.raw
+  fileError.value = ''
+  const raw = file.raw
+  // 扩展名校验
+  const name = raw.name || ''
+  const ext = ('.' + name.split('.').pop()).toLowerCase()
+  if (!ACCEPTED_SET.has(ext)) {
+    fileError.value = `不支持的文件格式「${ext}」，请选择：PDF / Word / Excel / PPTX / Markdown / TXT / CSV / HTML / JSON`
+    uploadRef.value?.clearFiles()
+    uploadedFile.value = null
+    return
+  }
+  // 大小校验
+  if (raw.size > MAX_SIZE_MB * 1024 * 1024) {
+    fileError.value = `文件大小 ${(raw.size / 1024 / 1024).toFixed(1)} MB 超过限制（${MAX_SIZE_MB} MB）`
+    uploadRef.value?.clearFiles()
+    uploadedFile.value = null
+    return
+  }
+  uploadedFile.value = raw
+}
+
+const handleFileRemove = () => {
+  uploadedFile.value = null
+  fileError.value = ''
+}
+
+const onDialogClose = () => {
+  fileError.value = ''
+  uploadedFile.value = null
+  uploadRef.value?.clearFiles()
 }
 
 const createTask = async () => {
@@ -219,6 +311,8 @@ const resetForm = () => {
   taskForm.browser = 'chromium'
   taskForm.environment = 'test'
   uploadedFile.value = null
+  fileError.value = ''
+  uploadRef.value?.clearFiles()
 }
 
 const viewTask = (task) => {
@@ -274,5 +368,22 @@ onMounted(async () => {
   display: flex;
   justify-content: space-between;
   align-items: center;
+}
+
+.action-btns {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.action-btns .el-button.is-link {
+  padding: 4px 6px;
+  font-size: 13px;
+  gap: 3px;
+}
+
+.action-btns .el-divider--vertical {
+  margin: 0 2px;
+  height: 14px;
 }
 </style>

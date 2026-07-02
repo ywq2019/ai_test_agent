@@ -44,5 +44,18 @@ class WebSocketManager:
             for conn in disconnected:
                 self.active_connections[client_id].discard(conn)
 
+    async def broadcast_all(self, message: dict):
+        """广播给所有已连接的客户端"""
+        for client_id, connections in list(self.active_connections.items()):
+            disconnected = []
+            for connection in connections:
+                try:
+                    await connection.send_json(message)
+                except Exception as e:
+                    logger.error(f"Failed to broadcast_all to {client_id}: {e}")
+                    disconnected.append(connection)
+            for conn in disconnected:
+                self.active_connections[client_id].discard(conn)
+
 
 ws_manager = WebSocketManager()

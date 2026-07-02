@@ -44,6 +44,7 @@ class TestCase(Base):
     preconditions = Column(Text)
     steps = Column(Text)
     expected_results = Column(Text)
+    element_selector = Column(String(512), nullable=True, default="")
     enabled = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -82,6 +83,18 @@ class TestReport(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class AICaseFile(Base):
+    __tablename__ = "ai_case_files"
+
+    id = Column(Integer, primary_key=True, index=True)
+    task_name = Column(String(255), nullable=False)
+    case_count = Column(Integer, default=0)
+    md_path = Column(String(512), nullable=True)
+    xmind_path = Column(String(512), nullable=True)
+    cases_data = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -92,9 +105,170 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class ApiProject(Base):
+    __tablename__ = "api_projects"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), nullable=False)
+    base_url = Column(String(1024), nullable=False)
+    description = Column(Text, nullable=True)
+    auth_type = Column(String(50), default="none")  # none/bearer/api_key/basic
+    auth_config = Column(JSON, nullable=True)
+    global_headers = Column(JSON, nullable=True)
+    # 前置用例：执行正式用例前先跑这些用例刷新 token
+    # 格式：[{"project_id": 3, "case_id": 25, "label": "用户服务/登录"}]
+    setup_cases = Column(JSON, nullable=True)
+    # 鉴权失败特征：命中则自动刷新 token 并重试
+    # 格式：[{"field": "$.status.code", "value": "40042"}, {"field": "http_status", "value": "401"}]
+    auth_error_patterns = Column(JSON, nullable=True)
+    proxy_url = Column(String(512), nullable=True, default="")   # HTTP/SOCKS5 代理，留空表示直连
+    hosts_map = Column(Text, nullable=True, default="")          # hosts 映射，格式同 /etc/hosts
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ApiCase(Base):
+    __tablename__ = "api_cases"
+
+    id = Column(Integer, primary_key=True, index=True)
+    project_id = Column(Integer, nullable=False, index=True)
+    name = Column(String(255), nullable=False)
+    module = Column(String(100), default="通用")
+    method = Column(String(10), default="GET")
+    path = Column(String(1024), nullable=False, default="/")
+    headers = Column(JSON, nullable=True)
+    params = Column(JSON, nullable=True)
+    body_type = Column(String(20), default="json")   # json / form / raw / none
+    body = Column(JSON, nullable=True)
+    body_raw = Column(Text, nullable=True)           # raw 文本体
+    assertions = Column(JSON, nullable=True)
+    var_extracts = Column(JSON, nullable=True)   # [{name, path}] 变量提取规则
+    priority = Column(String(10), default="P1")
+    enabled = Column(Boolean, default=True)
+    description = Column(Text, nullable=True, default='')
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class CustomScript(Base):
+    __tablename__ = "custom_scripts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    project_id = Column(Integer, nullable=True, index=True)   # None = 全局
+    name = Column(String(100), nullable=False)
+    description = Column(String(500), default='')
+    code = Column(Text, nullable=False, default='')
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ApiLoadConfig(Base):
+    __tablename__ = "api_load_configs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    project_id = Column(Integer, nullable=False, index=True)
+    name = Column(String(255), default="压测配置")
+    concurrent_users = Column(Integer, default=10)
+    duration = Column(Integer, default=60)
+    ramp_up = Column(Integer, default=10)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ApiTestReport(Base):
+    __tablename__ = "api_test_reports"
+
+    id = Column(Integer, primary_key=True, index=True)
+    project_id = Column(Integer, nullable=False, index=True)
+    project_name = Column(String(255), default="")
+    report_type = Column(String(20), default="unit")  # unit/load
+    total = Column(Integer, default=0)
+    passed = Column(Integer, default=0)
+    failed = Column(Integer, default=0)
+    summary = Column(JSON, nullable=True)
+    details = Column(JSON, nullable=True)
+    analysis = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class GlobalVariable(Base):
+    """跨项目全局变量池，通过 {{gvar:name}} 在任意项目中引用。"""
+    __tablename__ = "global_variables"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False, unique=True, index=True)
+    value = Column(Text, nullable=True, default="")
+    description = Column(String(500), default="")
+    source_project = Column(String(255), default="")   # 最后写入来源项目名
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class TestPlan(Base):
+    """测试计划：将若干接口用例按顺序组合，共享变量上下文，生成步骤级报告。"""
+    __tablename__ = "test_plans"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True, default="")
+    project_id = Column(Integer, nullable=True, index=True)   # 关联接口项目（可选）
+    status = Column(String(50), default="pending")             # pending/running/passed/failed
+    proxy_url = Column(String(512), nullable=True, default="")  # 计划级代理，优先级高于项目代理
+    hosts_map = Column(Text, nullable=True, default="")         # 计划级 hosts 映射，覆盖项目级同名条目
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class TestPlanStep(Base):
+    """测试计划步骤：每步对应一条 ApiCase，记录排序、是否启用。"""
+    __tablename__ = "test_plan_steps"
+
+    id = Column(Integer, primary_key=True, index=True)
+    plan_id = Column(Integer, nullable=False, index=True)
+    case_id = Column(Integer, nullable=False)                  # 关联 api_cases.id
+    case_project_id = Column(Integer, nullable=True)           # 冗余，方便展示
+    sort_order = Column(Integer, default=0)
+    enabled = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class TestPlanReport(Base):
+    """测试计划执行报告：记录一次完整执行的汇总及每步结果。"""
+    __tablename__ = "test_plan_reports"
+
+    id = Column(Integer, primary_key=True, index=True)
+    plan_id = Column(Integer, nullable=False, index=True)
+    plan_name = Column(String(255), default="")
+    total = Column(Integer, default=0)
+    passed = Column(Integer, default=0)
+    failed = Column(Integer, default=0)
+    pass_rate = Column(Float, default=0)
+    # details: [{step, case_id, case_name, status, duration_ms, assertions, error, extracted_vars, ...}]
+    details = Column(JSON, nullable=True)
+    var_snapshot = Column(JSON, nullable=True)  # 执行完毕时的共享变量快照
+    analysis = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 async def init_database():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # 兼容旧库：自动补齐新增列
+        for ddl in [
+            "ALTER TABLE api_test_reports ADD COLUMN analysis TEXT",
+            "ALTER TABLE api_cases ADD COLUMN description TEXT",
+            "ALTER TABLE api_cases ADD COLUMN body_type VARCHAR(20) DEFAULT 'json'",
+            "ALTER TABLE api_cases ADD COLUMN body_raw TEXT",
+            "ALTER TABLE api_cases ADD COLUMN var_extracts JSON",
+            "ALTER TABLE global_variables ADD COLUMN source_project VARCHAR(255) DEFAULT ''",
+            "ALTER TABLE api_projects ADD COLUMN setup_cases JSON",
+            "ALTER TABLE api_projects ADD COLUMN auth_error_patterns JSON",
+            "ALTER TABLE api_projects ADD COLUMN proxy_url VARCHAR(512) DEFAULT ''",
+            "ALTER TABLE api_projects ADD COLUMN hosts_map TEXT DEFAULT ''",
+            # test_plans / test_plan_steps / test_plan_reports 由 create_all 自动建表，无需 ALTER
+            "ALTER TABLE test_plans ADD COLUMN proxy_url VARCHAR(512) DEFAULT ''",
+            "ALTER TABLE test_plans ADD COLUMN hosts_map TEXT DEFAULT ''",
+            "ALTER TABLE test_plan_reports ADD COLUMN analysis TEXT",
+        ]:
+            try:
+                await conn.execute(__import__('sqlalchemy').text(ddl))
+            except Exception:
+                pass  # 列已存在则忽略
 
 
 async def get_db():

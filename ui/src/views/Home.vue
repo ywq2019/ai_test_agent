@@ -1,7 +1,7 @@
 <template>
   <div class="home">
     <el-row :gutter="20">
-      <el-col :span="6">
+      <el-col :span="12">
         <el-card shadow="hover" class="stat-card">
           <div class="stat-icon blue">
             <el-icon size="32"><FolderOpened /></el-icon>
@@ -12,36 +12,14 @@
           </div>
         </el-card>
       </el-col>
-      <el-col :span="6">
+      <el-col :span="12">
         <el-card shadow="hover" class="stat-card">
           <div class="stat-icon green">
             <el-icon size="32"><Document /></el-icon>
           </div>
           <div class="stat-content">
-            <div class="stat-value">{{ taskStore.caseCount }}</div>
+            <div class="stat-value">{{ taskStore.totalCaseCount }}</div>
             <div class="stat-label">测试用例</div>
-          </div>
-        </el-card>
-      </el-col>
-      <el-col :span="6">
-        <el-card shadow="hover" class="stat-card">
-          <div class="stat-icon success">
-            <el-icon size="32"><CircleCheck /></el-icon>
-          </div>
-          <div class="stat-content">
-            <div class="stat-value">{{ taskStore.passedCount }}</div>
-            <div class="stat-label">通过用例</div>
-          </div>
-        </el-card>
-      </el-col>
-      <el-col :span="6">
-        <el-card shadow="hover" class="stat-card">
-          <div class="stat-icon danger">
-            <el-icon size="32"><CircleClose /></el-icon>
-          </div>
-          <div class="stat-content">
-            <div class="stat-value">{{ taskStore.failedCount }}</div>
-            <div class="stat-label">失败用例</div>
           </div>
         </el-card>
       </el-col>
@@ -105,7 +83,7 @@
               <el-timeline-item
                 v-for="task in recentTasks"
                 :key="task.id"
-                :timestamp="task.created_at"
+                :timestamp="formatTime(task.created_at)"
                 placement="top"
               >
                 {{ task.name }}
@@ -132,8 +110,22 @@ const recentTasks = computed(() => {
   return taskStore.tasks.slice(0, 5)
 })
 
+function formatTime(isoStr) {
+  if (!isoStr) return ''
+  try {
+    const d = new Date(isoStr.includes('T') ? isoStr : isoStr.replace(' ', 'T'))
+    const pad = n => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+  } catch {
+    return isoStr
+  }
+}
+
 onMounted(async () => {
-  await taskStore.fetchTasks()
+  await Promise.all([
+    taskStore.fetchTasks(),
+    taskStore.fetchTotalCaseCount()
+  ])
 })
 </script>
 

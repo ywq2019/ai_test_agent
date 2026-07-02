@@ -21,7 +21,18 @@
         <el-col :span="8">
           <el-card shadow="hover" class="report-list-card">
             <template #header>
-              <span>报告列表</span>
+              <div class="list-card-header">
+                <span>报告列表</span>
+                <el-button
+                  type="danger"
+                  size="small"
+                  :disabled="selectedIds.length === 0"
+                  @click="deleteBatch"
+                >
+                  <el-icon><Delete /></el-icon>
+                  批量删除{{ selectedIds.length > 0 ? `(${selectedIds.length})` : '' }}
+                </el-button>
+              </div>
             </template>
             <div v-if="reportsList.length === 0" class="empty-list">
               <el-empty description="暂无测试报告" />
@@ -31,14 +42,32 @@
                 v-for="r in reportsList"
                 :key="r.report_id"
                 class="report-item"
-                :class="{ active: currentReport && currentReport.report_id === r.report_id }"
+                :class="{ active: currentReport && currentReport.report_id === r.report_id, selected: selectedIds.includes(r.report_id) }"
                 @click="selectReport(r)"
               >
                 <div class="report-item-header">
-                  <span class="report-name">{{ r.task_name }}</span>
-                  <el-tag :type="r.pass_rate >= 80 ? 'success' : r.pass_rate >= 60 ? 'warning' : 'danger'" size="small">
-                    {{ r.pass_rate }}%
-                  </el-tag>
+                  <div class="report-name-row">
+                    <el-checkbox
+                      :model-value="selectedIds.includes(r.report_id)"
+                      @change="toggleSelect(r.report_id)"
+                      @click.stop
+                      size="small"
+                    />
+                    <span class="report-name">{{ r.task_name }}</span>
+                  </div>
+                  <div class="report-actions">
+                    <el-tag :type="r.pass_rate >= 80 ? 'success' : r.pass_rate >= 60 ? 'warning' : 'danger'" size="small">
+                      {{ r.pass_rate }}%
+                    </el-tag>
+                    <el-button
+                      type="danger"
+                      size="small"
+                      link
+                      @click.stop="deleteOne(r)"
+                    >
+                      <el-icon><Delete /></el-icon>
+                    </el-button>
+                  </div>
                 </div>
                 <div class="report-item-meta">
                   <span>任务ID: {{ r.task_id }}</span>
@@ -120,10 +149,16 @@
               </template>
               <el-table :data="failedCases" stripe style="width: 100%">
                 <el-table-column prop="case_name" label="用例名称" min-width="200" />
-                <el-table-column prop="error" label="错误信息" min-width="300" show-overflow-tooltip />
+                <el-table-column prop="error_message" label="错误信息" min-width="260" show-overflow-tooltip />
                 <el-table-column prop="duration" label="耗时(秒)" width="100">
                   <template #default="{ row }">
                     {{ row.duration ? row.duration.toFixed(2) : '-' }}
+                  </template>
+                </el-table-column>
+                <el-table-column label="截图" width="80">
+                  <template #default="{ row }">
+                    <el-button v-if="row.screenshot" size="small" type="danger" plain @click="viewScreenshot(row.screenshot, row.case_name)">查看</el-button>
+                    <span v-else style="color:#c0c4cc;">-</span>
                   </template>
                 </el-table-column>
               </el-table>
@@ -134,7 +169,7 @@
               <template #header>
                 <span>用例执行详情</span>
               </template>
-              <el-table :data="currentReport.details" stripe style="width: 100%;" :height="400">
+              <el-table :data="Array.isArray(currentReport.details) ? currentReport.details : []" stripe style="width: 100%;" :height="400">
                 <el-table-column prop="id" label="序号" width="60" />
                 <el-table-column prop="case_name" label="用例名称" min-width="200" show-overflow-tooltip />
                 <el-table-column prop="status" label="状态" width="80">
@@ -150,8 +185,8 @@
                 <el-table-column prop="error_message" label="错误信息" min-width="200" show-overflow-tooltip />
                 <el-table-column label="截图" width="80">
                   <template #default="{ row }">
-                    <el-button v-if="row.screenshot" size="small" @click="viewScreenshot(row.screenshot)">查看</el-button>
-                    <span v-else>-</span>
+                    <el-button v-if="row.screenshot" size="small" :type="row.status === 'failed' ? 'danger' : 'success'" plain @click="viewScreenshot(row.screenshot, row.case_name)">查看</el-button>
+                    <span v-else style="color:#c0c4cc;">-</span>
                   </template>
                 </el-table-column>
               </el-table>
@@ -163,19 +198,25 @@
       </el-row>
     </el-card>
 
-    <el-dialog v-model="showScreenshotDialog" title="截图查看" width="800px">
-      <img v-if="screenshotUrl" :src="getFullUrl(screenshotUrl)" style="width: 100%;" />
+    <el-dialog v-model="showScreenshotDialog" title="截图查看" width="820px">
+      <div v-if="screenshotUrl" class="screenshot-viewer">
+        <div v-if="screenshotTitle" class="screenshot-title">
+          <el-icon><Picture /></el-icon>
+          {{ screenshotTitle }}
+        </div>
+        <img :src="getFullUrl(screenshotUrl)" style="width: 100%; border-radius: 4px;" />
+      </div>
     </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, computed, nextTick } from 'vue'
+import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { useTaskStore } from '../stores/task'
 import { reportApi } from '../api'
 import * as echarts from 'echarts'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 
 const route = useRoute()
 const taskStore = useTaskStore()
@@ -186,18 +227,23 @@ const pieChartRef = ref(null)
 const barChartRef = ref(null)
 const showScreenshotDialog = ref(false)
 const screenshotUrl = ref('')
-
-const API_BASE = 'http://localhost:4000'
+const screenshotTitle = ref('')
+const selectedIds = ref([])
+let pieChartInstance = null
+let barChartInstance = null
 
 const failedCases = computed(() => {
-  if (!currentReport.value || !currentReport.value.details) return []
-  return currentReport.value.details.filter(d => d.status === 'failed')
+  if (!currentReport.value) return []
+  const details = currentReport.value.details
+  if (!Array.isArray(details)) return []
+  return details.filter(d => d.status === 'failed')
 })
 
 const getFullUrl = (path) => {
   if (!path) return ''
   if (path.startsWith('http')) return path
-  return API_BASE + path
+  // 使用相对路径，由 vite proxy 转发到后端 8000
+  return path.startsWith('/') ? path : '/' + path
 }
 
 const getStatusType = (status) => {
@@ -213,10 +259,55 @@ const getStatusText = (status) => {
 const formatDate = (dateStr) => {
   if (!dateStr) return ''
   try {
-    const d = new Date(dateStr)
-    return d.toLocaleString('zh-CN')
+    const utc = /[Z+]/.test(dateStr) ? dateStr : dateStr + 'Z'
+    return new Date(utc).toLocaleString('zh-CN', { hour12: false })
   } catch {
     return dateStr
+  }
+}
+
+const toggleSelect = (id) => {
+  const idx = selectedIds.value.indexOf(id)
+  if (idx === -1) selectedIds.value.push(id)
+  else selectedIds.value.splice(idx, 1)
+}
+
+const deleteOne = async (report) => {
+  try {
+    await ElMessageBox.confirm(`确认删除报告「${report.task_name}」？`, '删除确认', {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      confirmButtonClass: 'el-button--danger'
+    })
+    await reportApi.delete(report.report_id)
+    ElMessage.success('删除成功')
+    if (currentReport.value?.report_id === report.report_id) currentReport.value = null
+    selectedIds.value = selectedIds.value.filter(id => id !== report.report_id)
+    await fetchReports()
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error('删除失败: ' + e.message)
+  }
+}
+
+const deleteBatch = async () => {
+  if (selectedIds.value.length === 0) return
+  try {
+    await ElMessageBox.confirm(`确认批量删除 ${selectedIds.value.length} 条报告？此操作不可恢复。`, '批量删除确认', {
+      type: 'warning',
+      confirmButtonText: '全部删除',
+      cancelButtonText: '取消',
+      confirmButtonClass: 'el-button--danger'
+    })
+    await reportApi.deleteBatch(selectedIds.value)
+    ElMessage.success(`已删除 ${selectedIds.value.length} 条报告`)
+    if (currentReport.value && selectedIds.value.includes(currentReport.value.report_id)) {
+      currentReport.value = null
+    }
+    selectedIds.value = []
+    await fetchReports()
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error('批量删除失败: ' + e.message)
   }
 }
 
@@ -248,36 +339,43 @@ const renderCharts = () => {
   if (!currentReport.value) return
 
   if (pieChartRef.value) {
-    const pieChart = echarts.init(pieChartRef.value)
-    const pieData = [
-      { value: currentReport.value.passed, name: '通过' },
-      { value: currentReport.value.failed, name: '失败' },
-      { value: currentReport.value.skipped, name: '跳过' }
+    if (pieChartInstance) pieChartInstance.dispose()
+    pieChartInstance = echarts.init(pieChartRef.value)
+    const allPieData = [
+      { value: currentReport.value.passed, name: '通过', color: '#52c41a' },
+      { value: currentReport.value.failed, name: '失败', color: '#ff4d4f' },
+      { value: currentReport.value.skipped, name: '跳过', color: '#faad14' }
     ]
-    pieChart.setOption({
-      tooltip: { trigger: 'item' },
-      legend: { bottom: '5%', left: 'center' },
+    // 过滤掉 0 值，避免空扇形标签重叠
+    const pieData = allPieData.filter(item => item.value > 0)
+    pieChartInstance.setOption({
+      tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
+      legend: { orient: 'horizontal', bottom: 0, left: 'center' },
       series: [{
         type: 'pie',
-        radius: ['40%', '70%'],
-        avoidLabelOverlap: false,
-        itemStyle: { borderRadius: 10, borderColor: '#fff', borderWidth: 2 },
-        label: { show: true, formatter: '{b}: {c} ({d}%)' },
-        data: pieData.map((item, idx) => ({
+        radius: ['35%', '60%'],
+        center: ['50%', '45%'],
+        avoidLabelOverlap: true,
+        itemStyle: { borderRadius: 6, borderColor: '#fff', borderWidth: 2 },
+        label: { show: true, formatter: '{b}\n{c}个 ({d}%)', fontSize: 12 },
+        labelLine: { length: 10, length2: 10 },
+        data: pieData.map(item => ({
           value: item.value,
           name: item.name,
-          itemStyle: { color: ['#52c41a', '#ff4d4f', '#faad14'][idx] }
+          itemStyle: { color: item.color }
         }))
       }]
     })
   }
 
   if (barChartRef.value) {
-    const barChart = echarts.init(barChartRef.value)
-    barChart.setOption({
+    if (barChartInstance) barChartInstance.dispose()
+    barChartInstance = echarts.init(barChartRef.value)
+    barChartInstance.setOption({
       tooltip: { trigger: 'axis' },
+      grid: { left: '10%', right: '5%', top: '10%', bottom: '15%' },
       xAxis: { type: 'category', data: ['通过', '失败', '跳过'] },
-      yAxis: { type: 'value' },
+      yAxis: { type: 'value', minInterval: 1 },
       series: [{
         type: 'bar',
         data: [
@@ -286,30 +384,43 @@ const renderCharts = () => {
           { value: currentReport.value.skipped, itemStyle: { color: '#faad14' } }
         ],
         barWidth: '50%',
-        itemStyle: { borderRadius: [4, 4, 0, 0] }
+        itemStyle: { borderRadius: [4, 4, 0, 0] },
+        label: { show: true, position: 'top' }
       }]
     })
   }
 }
 
-const exportReport = () => {
-  if (currentReport.value && currentReport.value.html_path) {
-    window.open(getFullUrl(currentReport.value.html_path), '_blank')
-  } else {
-    ElMessage.warning('报告路径不可用')
-  }
+const handleResize = () => {
+  pieChartInstance?.resize()
+  barChartInstance?.resize()
 }
 
-const viewScreenshot = (path) => {
+const exportReport = () => {
+  if (!currentReport.value) return
+  const reportId = currentReport.value.report_id
+  // 通过后端 /api/v1/reports/{id}/export 提供下载，避免服务器本地路径 404
+  window.open(`/api/v1/reports/${reportId}/export`, '_blank')
+}
+
+const viewScreenshot = (path, title = '') => {
   screenshotUrl.value = path
+  screenshotTitle.value = title
   showScreenshotDialog.value = true
 }
 
 onMounted(async () => {
+  window.addEventListener('resize', handleResize)
   await fetchReports()
   if (route.query.reportId) {
     await selectReport({ report_id: parseInt(route.query.reportId) })
   }
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', handleResize)
+  pieChartInstance?.dispose()
+  barChartInstance?.dispose()
 })
 </script>
 
@@ -359,6 +470,12 @@ onMounted(async () => {
   background: #ecf5ff;
 }
 
+.list-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
 .report-item-header {
   display: flex;
   justify-content: space-between;
@@ -366,10 +483,33 @@ onMounted(async () => {
   margin-bottom: 8px;
 }
 
+.report-name-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
 .report-name {
   font-weight: 600;
   font-size: 14px;
   color: #303133;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.report-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.report-item.selected {
+  border-color: #f56c6c;
+  background: #fff5f5;
 }
 
 .report-item-meta {
@@ -428,4 +568,24 @@ onMounted(async () => {
   font-size: 14px;
   opacity: 0.9;
 }
+
+.screenshot-viewer {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.screenshot-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: #303133;
+  background: #f5f7fa;
+  border-left: 4px solid #409eff;
+  padding: 8px 14px;
+  border-radius: 0 6px 6px 0;
+}
+
 </style>

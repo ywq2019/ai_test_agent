@@ -6,6 +6,7 @@ export const useTaskStore = defineStore('task', () => {
   const tasks = ref([])
   const currentTask = ref(null)
   const cases = ref([])
+  const totalCaseCount = ref(0)
   const executionResults = ref([])
   const reportPath = ref('')
   const isExecuting = ref(false)
@@ -68,6 +69,12 @@ export const useTaskStore = defineStore('task', () => {
     return data
   }
 
+  async function fetchTotalCaseCount() {
+    const data = await api.default.get('/cases/count')
+    totalCaseCount.value = data.count || 0
+    return data.count
+  }
+
   async function fetchCases(taskId) {
     const data = await api.caseApi.list(taskId)
     cases.value = data
@@ -97,17 +104,14 @@ export const useTaskStore = defineStore('task', () => {
   async function executeCases(taskId, caseIds = null, browser = 'chromium') {
     isExecuting.value = true
     executionResults.value = []
-    try {
-      const data = await api.executeApi.execute({
-        task_id: taskId,
-        case_ids: caseIds,
-        browser
-      })
-      executionResults.value = data.results || []
-      return data
-    } finally {
-      isExecuting.value = false
-    }
+    // 后端立即返回 {report_id, status, total}，执行通过 WebSocket 推送进度
+    // isExecuting 由调用方在收到 execution_completed 事件后重置
+    const data = await api.executeApi.execute({
+      task_id: taskId,
+      case_ids: caseIds,
+      browser
+    })
+    return data
   }
 
   async function pauseExecution() {
@@ -171,6 +175,7 @@ export const useTaskStore = defineStore('task', () => {
     tasks,
     currentTask,
     cases,
+    totalCaseCount,
     executionResults,
     reportPath,
     isExecuting,
@@ -181,6 +186,7 @@ export const useTaskStore = defineStore('task', () => {
     passedCount,
     failedCount,
     fetchTasks,
+    fetchTotalCaseCount,
     getTask,
     createTask,
     deleteTask,
