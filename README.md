@@ -619,20 +619,36 @@ server {
 
 <table>
     <tr>
-        <td><img src="https://gitee.com/fxlysm/ai_test_agent/raw/master/image/001.png"/></td>
-        <td><img src="https://gitee.com/fxlysm/ai_test_agent/raw/master/image/002.png"/></td>
+        <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/1.png"/></td>
+        <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/2.png"/></td>
     </tr>
     <tr>
-        <td><img src="https://gitee.com/fxlysm/ai_test_agent/raw/master/image/003.png"/></td>
-        <td><img src="https://gitee.com/fxlysm/ai_test_agent/raw/master/image/004.png"/></td>
+        <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/3.png"/></td>
+        <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/4.png"/></td>
     </tr>
     <tr>
-        <td><img src="https://gitee.com/fxlysm/ai_test_agent/raw/master/image/005.png"/></td>
-        <td><img src="https://gitee.com/fxlysm/ai_test_agent/raw/master/image/006.png"/></td>
+        <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/5.png"/></td>
+        <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/6.png"/></td>
     </tr>
     <tr>
-        <td><img src="https://gitee.com/fxlysm/ai_test_agent/raw/master/image/007.png"/></td>
-        <td><img src="https://gitee.com/fxlysm/ai_test_agent/raw/master/image/008.png"/></td>
+        <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/7.png"/></td>
+        <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/8.png"/></td>
+    </tr>
+    <tr>
+        <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/9.png"/></td>
+        <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/10.png"/></td>
+    </tr>
+    <tr>
+        <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/11.png"/></td>
+        <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/12.png"/></td>
+    </tr>
+    <tr>
+        <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/13.png"/></td>
+        <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/14.png"/></td>
+    </tr>
+    <tr>
+        <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/15.png"/></td>
+        <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/16.png"/></td>
     </tr>
 </table>
 
