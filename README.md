@@ -670,6 +670,50 @@ server {
 | 加认证中间件 | 基于现有 `User` 表，加 JWT 路由保护，隔离多用户数据 |
 | 任务队列 | 用 Celery + Redis 隔离并发执行任务，支持水平扩展 |
 
+### Docker 一键部署（服务器）
+
+项目已内置 `Dockerfile` + `docker-compose.yml`，支持一键部署到任意 Linux 服务器。
+
+**前提条件**：服务器已安装 Docker 和 Docker Compose
+
+```bash
+# 1. 克隆项目
+git clone https://github.com/ywq2019/ai_test_agent.git
+cd ai_test_agent
+
+# 2. 配置环境变量（复制模板后按需修改）
+cp .env.docker .env.docker.local
+# AI_API_KEY 等敏感配置可部署后在平台大模型配置页填写，无需在此配置
+
+# 3. 一键构建并启动
+docker compose up -d
+
+# 4. 查看启动状态
+docker compose logs -f
+```
+
+启动成功后访问 `http://服务器IP:4000`，进入**大模型配置**页填写 API Key 即可使用。
+
+**后续维护**：
+
+```bash
+# 更新代码
+git pull && docker compose up -d --build
+
+# 查看日志
+docker compose logs -f
+
+# 停止服务
+docker compose down
+
+# 重启（数据不丢失）
+docker compose restart
+```
+
+**数据持久化**：数据库、报告、截图、日志均挂载到 Docker Volume，容器重启或重建后数据不丢失。
+
+**规模扩展**：5 人以内 SQLite 够用；10 人以上建议在 `docker-compose.yml` 中加入 PostgreSQL 服务，改一行 `DATABASE_URL` 即可，代码无需修改。
+
 ***
 
 ## 截图
