@@ -2,6 +2,20 @@
 
 基于 **Claude AI + LangGraph + Playwright** 的智能化零代码全场景自动化测试平台，覆盖 UI 自动化与接口自动化双引擎。
 
+---
+
+<div align="center">
+
+## 🎬 平台演示
+
+<img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/AI%E5%B9%B3%E5%8F%B0%E6%BC%94%E7%A4%BA%E8%A7%86%E9%A2%91_1904w.gif" width="90%" alt="AI 测试平台演示"/>
+
+> ⏳ **提示**：演示中包含 AI 生成测试用例的完整过程，AI 推理需要一定时间，请耐心观看。
+
+</div>
+
+---
+
 ## 项目简介
 
 AI 测试工具平台是一款面向测试工程师的智能测试平台，核心理念是让测试人员**无需编写代码**，通过 AI 大模型完成从需求文档解析、测试用例设计、自动化执行到报告生成的完整测试闭环。
