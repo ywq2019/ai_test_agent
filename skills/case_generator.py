@@ -508,54 +508,64 @@ class CaseGenerator:
         return ""
 
     # ==================================================================
-    # Claude CLI subprocess
+    # LLM 调用（统一入口，支持 Anthropic / OpenAI 兼容格式）
     # ==================================================================
     async def _run_claude_subprocess(
         self, system_prompt: str, prompt: str, timeout_secs: int = 90
     ) -> str:
-        import shutil
-        claude_bin = shutil.which("claude") or shutil.which("claude.cmd")
-        if not claude_bin:
-            npm_bin = os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "npm")
-            for name in ("claude.cmd", "claude"):
-                candidate = os.path.join(npm_bin, name)
-                if os.path.exists(candidate):
-                    claude_bin = candidate
-                    break
-        if not claude_bin:
-            raise RuntimeError("找不到 claude 命令")
+        """调用 LLM API，自动根据模型类型选择 Anthropic 或 OpenAI 兼容格式。"""
+        import httpx
+        from tools.config import settings
 
-        env = os.environ.copy()
-        proc = await asyncio.create_subprocess_exec(
-            claude_bin,
-            "--output-format", "text",
-            "--no-session-persistence",
-            "--input-format", "text",
-            "--system-prompt", system_prompt,
-            "-p",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-        )
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(input=prompt.encode("utf-8")),
-                timeout=timeout_secs,
-            )
-        except asyncio.TimeoutError:
-            try:
-                proc.kill()
-                await asyncio.wait_for(proc.communicate(), timeout=5)
-            except Exception:
-                pass
-            raise RuntimeError(f"claude CLI 调用超时（{timeout_secs}s）")
+        api_key  = settings.AI_API_KEY
+        base_url = (settings.AI_API_URL or "").rstrip("/")
+        model    = settings.AI_MODEL or "claude-sonnet-4-6"
 
-        if proc.returncode != 0:
-            err = stderr.decode("utf-8", errors="replace").strip()
-            raise RuntimeError(f"claude CLI 错误 (code {proc.returncode}): {err[:300]}")
+        if not api_key or not base_url:
+            raise RuntimeError("未配置 AI_API_KEY 或 AI_API_URL，请在大模型配置页填写后重试")
 
-        raw = stdout.decode("utf-8", errors="replace").strip()
+        is_anthropic = "anthropic.com" in base_url or model.startswith("claude")
+
+        if is_anthropic:
+            url     = f"{base_url}/v1/messages"
+            headers = {
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            }
+            payload = {
+                "model": model,
+                "max_tokens": 8192,
+                "system": system_prompt,
+                "messages": [{"role": "user", "content": prompt}],
+            }
+        else:
+            url     = f"{base_url}/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "content-type": "application/json",
+            }
+            payload = {
+                "model": model,
+                "max_tokens": 8192,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user",   "content": prompt},
+                ],
+            }
+
+        logger.info(f"Calling LLM API: {url}, model={model}")
+        async with httpx.AsyncClient(verify=False, timeout=timeout_secs) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+
+        if is_anthropic:
+            raw = data["content"][0]["text"]
+        else:
+            raw = data["choices"][0]["message"]["content"]
+
+        raw = raw.strip()
         if "```json" in raw:
             raw = raw.split("```json", 1)[1].split("```", 1)[0].strip()
         elif "```" in raw:

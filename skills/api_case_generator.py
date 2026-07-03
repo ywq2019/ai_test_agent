@@ -575,32 +575,54 @@ class ApiCaseGenerator:
 
     async def _call_api(self, system_prompt: str, user_prompt: str) -> str:
         import httpx
-        cfg = _get_llm_config()
-        api_key = cfg["api_key"]
+        cfg      = _get_llm_config()
+        api_key  = cfg["api_key"]
         base_url = cfg["base_url"].rstrip("/")
-        model = cfg["model"]
+        model    = cfg["model"]
 
-        headers = {
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        }
-        payload = {
-            "model": model,
-            "max_tokens": 8192,
-            "system": system_prompt,
-            "messages": [{"role": "user", "content": user_prompt}],
-        }
-        url = f"{base_url}/v1/messages"
+        is_anthropic = "anthropic.com" in base_url or model.startswith("claude")
+
+        if is_anthropic:
+            url     = f"{base_url}/v1/messages"
+            headers = {
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            }
+            payload = {
+                "model": model,
+                "max_tokens": 8192,
+                "system": system_prompt,
+                "messages": [{"role": "user", "content": user_prompt}],
+            }
+        else:
+            url     = f"{base_url}/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "content-type": "application/json",
+            }
+            payload = {
+                "model": model,
+                "max_tokens": 8192,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user",   "content": user_prompt},
+                ],
+            }
+
         logger.info(f"Calling API: {url}, model={model}")
-
         async with httpx.AsyncClient(verify=False, timeout=120) as client:
             resp = await client.post(url, json=payload, headers=headers)
             resp.raise_for_status()
             data = resp.json()
+
+        if is_anthropic:
             text = data["content"][0]["text"]
-            logger.info(f"API response received, len={len(text)}")
-            return text
+        else:
+            text = data["choices"][0]["message"]["content"]
+
+        logger.info(f"API response received, len={len(text)}")
+        return text
 
     # ─── JSON 解析 ────────────────────────────────────────────────────────────
 
