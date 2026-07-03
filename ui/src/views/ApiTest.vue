@@ -1481,7 +1481,8 @@ const analysisHtml = computed(() => analysisResult.value ? marked.parse(analysis
 let ws = null
 const connectWs = (clientId) => {
   disconnectWs()
-  ws = new WebSocket(`ws://${window.location.hostname}:8000/ws?client_id=${clientId}`)
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+  ws = new WebSocket(`${proto}://${window.location.host}/ws?client_id=${clientId}`)
   ws.onmessage = (e) => {
     try { handleWsMsg(JSON.parse(e.data)) } catch {}
   }

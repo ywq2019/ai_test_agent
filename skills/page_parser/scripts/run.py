@@ -29,11 +29,12 @@ async def execute(
     # 延迟导入以避免启动时的依赖问题
     from tools.browser import browser_pool
 
+    bt = None
     try:
-        browser = await browser_pool.get_browser(browser_type, headless=headless)
-        await browser.navigate(url)
-        elements = await browser.capture_elements()
-        
+        bt = await browser_pool.acquire(browser_type)
+        await bt.navigate(url)
+        elements = await bt.capture_elements()
+
         result = {
             "status": "success",
             "url": url,
@@ -41,10 +42,10 @@ async def execute(
             "elements": elements,
             "message": f"成功抓取 {len(elements)} 个页面元素"
         }
-        
+
         logger.info(f"页面解析完成: {len(elements)} 个元素")
         return result
-        
+
     except Exception as e:
         logger.error(f"页面解析失败: {str(e)}")
         return {
@@ -54,6 +55,10 @@ async def execute(
             "elements": [],
             "message": f"页面解析失败: {str(e)}"
         }
+    finally:
+        if bt:
+            await bt.close()
+            browser_pool.release(bt)
 
 
 def get_metadata() -> Dict[str, Any]:

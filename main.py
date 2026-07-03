@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from loguru import logger
 
 from api.routes import router as api_router
@@ -115,12 +116,21 @@ if os.path.exists(settings.SCREENSHOT_DIR):
 if os.path.exists(settings.REPORT_OUTPUT_DIR):
     app.mount("/reports", StaticFiles(directory=settings.REPORT_OUTPUT_DIR), name="reports")
 
+# 挂载前端构建产物
+_dist_dir = os.path.join(os.path.dirname(__file__), "ui", "dist")
+if os.path.exists(_dist_dir):
+    app.mount("/assets", StaticFiles(directory=os.path.join(_dist_dir, "assets")), name="assets")
+
 app.include_router(api_router, prefix="/api/v1")
 app.websocket("/ws")(websocket_endpoint)
 
 
 @app.get("/")
 async def root():
+    """返回前端页面"""
+    index_file = os.path.join(_dist_dir, "index.html")
+    if os.path.exists(index_file):
+        return FileResponse(index_file)
     return {"message": "自动化UI测试Agent API", "version": "1.0.0"}
 
 
@@ -129,6 +139,20 @@ async def health_check():
     return {"status": "healthy"}
 
 
+@app.get("/{full_path:path}")
+async def catch_all(full_path: str):
+    """Vue Router history 模式支持：所有非 API 路径返回 index.html"""
+    # API / WS / 静态资源路径不拦截
+    if full_path.startswith(("api/", "ws", "screenshots/", "reports/", "assets/")):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404)
+    index_file = os.path.join(_dist_dir, "index.html")
+    if os.path.exists(index_file):
+        return FileResponse(index_file)
+    from fastapi import HTTPException
+    raise HTTPException(status_code=404)
+
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run("main:app", host=settings.HOST, port=settings.PORT, reload=False)

@@ -933,7 +933,8 @@ let wsDestroyed = false   // 组件卸载后阻止重连
 function initWs() {
   if (wsDestroyed) return
   if (ws && ws.readyState === WebSocket.OPEN) return
-  const url = `ws://${window.location.hostname}:8000/ws?client_id=plan_${Date.now()}`
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+  const url = `${proto}://${window.location.host}/ws?client_id=plan_${Date.now()}`
   ws = new WebSocket(url)
   ws.onmessage = (evt) => {
     try {

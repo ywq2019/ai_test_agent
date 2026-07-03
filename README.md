@@ -592,13 +592,32 @@ socks5://user:pass@host:1080
 ### 当前架构（Windows 单机）
 
 ```
-浏览器 → FastAPI（8000）→ SQLite
-                         → Playwright（本机）
+浏览器 → FastAPI（4000）→ SQLite
+                         → Playwright（独立 Context，并发隔离）
                          → httpx LLM API（任意大模型）
                          → httpx（代理 / Hosts 映射）
 ```
 
-适合个人或小团队（2-3 人，不并发执行）使用。
+适合个人或小团队（局域网共享，最多 3 个浏览器并发）使用。
+
+### 局域网共享（团队使用）
+
+无需额外配置，启动后端后团队成员直接通过内网 IP 访问：
+
+```bash
+# 查看本机内网 IP
+ipconfig   # Windows
+# 找到以太网 IPv4 地址，如 10.96.41.42
+
+# 团队成员访问
+http://10.96.41.42:4000
+```
+
+**前提**：开放 Windows 防火墙入站端口：
+
+```powershell
+New-NetFirewallRule -DisplayName "AI测试平台 4000" -Direction Inbound -Protocol TCP -LocalPort 4000 -Action Allow
+```
 
 ### 服务器部署（Nginx 反代）
 
@@ -631,16 +650,25 @@ server {
 }
 ```
 
-### 多人并发部署（扩展方向）
+### 多人并发部署（已实施）
 
-当前架构为单机设计，支持多人使用需以下改造：
+以下改造已完成，当前版本已支持多人并发使用：
+
+| 改造项 | 状态 | 说明 |
+| --- | --- | --- |
+| 浏览器 Context 隔离 | ✅ 已完成 | `BrowserPool` 改为共享 Browser + 每请求独立 Context，`Semaphore(3)` 限制并发，超出排队等待 |
+| Agent 状态隔离 | ✅ 已完成 | `AgentState` 按 `task_id` 字典隔离，多用户并发操作互不干扰 |
+| 执行状态隔离 | ✅ 已完成 | `TestExecutor` 执行状态按 `task_id` 独立管理，暂停/停止精确控制单个任务 |
+| 前端静态托管 | ✅ 已完成 | `ui/dist` 挂载到 FastAPI，无需单独启动前端服务 |
+| WebSocket 端口自适应 | ✅ 已完成 | WS 地址改为 `location.host`，任何端口访问均正常推送进度 |
+
+**待扩展（大规模部署）**：
 
 | 改造项 | 说明 |
 | --- | --- |
-| SQLite → PostgreSQL | 改一行连接字符串，SQLAlchemy 完全兼容 |
-| 浏览器隔离 | 改为 `browser.new_context()` 按请求独立 Context，避免多用户浏览器状态互扰 |
-| 加认证中间件 | 基于现有 `User` 表，加 JWT 路由保护 |
-| 任务队列 | 用 asyncio.Queue 或 Celery + Redis 隔离并发执行任务 |
+| SQLite → PostgreSQL | 改一行连接字符串，SQLAlchemy 完全兼容，适合 10 人以上并发写入 |
+| 加认证中间件 | 基于现有 `User` 表，加 JWT 路由保护，隔离多用户数据 |
+| 任务队列 | 用 Celery + Redis 隔离并发执行任务，支持水平扩展 |
 
 ***
 

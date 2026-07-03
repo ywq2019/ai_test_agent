@@ -373,18 +373,17 @@ async def generate_cases(
         if not task.page_elements:
             raise HTTPException(status_code=400, detail="No page elements found for this task")
 
-        uitest_agent.state.page_elements = task.page_elements
-        uitest_agent.state.current_task_id = task_id
-        uitest_agent.state.current_url = task.url or ""
-        uitest_agent.state.document_data = None
+        uitest_agent._get_state(task_id).page_elements = task.page_elements
+        uitest_agent._get_state(task_id).current_url = task.url or ""
+        uitest_agent._get_state(task_id).document_data = None
 
         if task.document_path:
             doc_path = _resolve_doc_path(task.document_path)
             if doc_path:
                 logger.info(f"Parsing document: {doc_path}")
                 try:
-                    document_data = await uitest_agent.parse_document(str(doc_path))
-                    uitest_agent.state.document_data = document_data
+                    document_data = await uitest_agent.parse_document(str(doc_path), task_id=task_id)
+                    uitest_agent._get_state(task_id).document_data = document_data
                 except Exception as doc_err:
                     logger.warning(f"Document parsing failed, proceeding without it: {doc_err}")
             else:
@@ -608,11 +607,12 @@ async def _run_execution_bg(report_id: int, task_id: int, task_name: str,
     """后台执行测试，通过 WebSocket 推送进度，完成后写回数据库"""
     from tools.database import async_session_maker
     try:
-        uitest_agent.state.cases = case_dicts
+        uitest_agent._get_state(task_id).cases = case_dicts
         results = await uitest_agent.execute_cases(
             case_ids=case_ids,
             browser_type=browser,
-            url=task_url
+            url=task_url,
+            task_id=task_id,
         )
 
         for r in results:
