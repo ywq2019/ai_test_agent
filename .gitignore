@@ -32,3 +32,6 @@ nul
 
 # 其他
 *.log
+
+# Docker 敏感配置（模板 .env.docker 保留进仓库）
+.env.docker.local

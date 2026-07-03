@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai-test-agent
+    ports:
+      - "4000:4000"
+    environment:
+      # 数据目录统一挂载到 /data
+      - DATABASE_URL=sqlite+aiosqlite:////data/uitest_agent.db
+      - REPORT_OUTPUT_DIR=/data/reports
+      - SCREENSHOT_DIR=/data/screenshots
+      - LOG_DIR=/data/logs
+    env_file:
+      - .env.docker        # 服务器上的配置文件（含 API Key 等敏感信息）
+    volumes:
+      - app_data:/data     # 数据库、报告、截图、日志持久化
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  app_data:
+    driver: local

@@ -59,6 +59,7 @@ async def lifespan(app: FastAPI):
     # 创建必要目录
     os.makedirs(settings.SCREENSHOT_DIR, exist_ok=True)
     os.makedirs(settings.REPORT_OUTPUT_DIR, exist_ok=True)
+    os.makedirs(os.path.join(settings.UPLOAD_DIR, "documents"), exist_ok=True)
 
     # 注册 LangChain 工具
     tool_registry.register_all()

@@ -186,7 +186,7 @@ async def upload_document(file: UploadFile = File(...)):
     # 按内容哈希去重：相同文件只存一份
     import hashlib
     file_hash = hashlib.sha256(raw).hexdigest()[:16]
-    upload_dir = Path("./uploads/documents")
+    upload_dir = Path(settings.UPLOAD_DIR) / "documents"
     upload_dir.mkdir(parents=True, exist_ok=True)
     filename = f"{file_hash}{ext}"
     file_path = upload_dir / filename

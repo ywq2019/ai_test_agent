@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     REPORT_OUTPUT_DIR: str = "./reports"
     SCREENSHOT_DIR: str = "./screenshots"
     LOG_DIR: str = "./logs"
+    UPLOAD_DIR: str = "./uploads"
 
     class Config:
         env_file = ".env"

@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Node
+ui/node_modules/
+ui/dist/
+
+# 数据文件（服务器上走 Volume，不打包进镜像）
+*.db
+*.sqlite
+logs/
+reports/
+screenshots/
+ai_cases/
+uploads/
+
+# 开发配置
+.env
+.env.docker
+.vscode/
+.idea/
+
+# Git
+.git/
+.gitignore
+
+# 图片资源
+image/
+
+# 其他
+nul
+*.log
