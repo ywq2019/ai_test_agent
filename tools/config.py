@@ -19,9 +19,10 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite+aiosqlite:///./uitest_agent.db"
 
     AI_API_KEY: str = ""
-    AI_API_URL: str = "https://api.deepseek.com/v1"
-    AI_MODEL: str = "deepseek-chat"
-    AI_MODEL_NAME: str = "DeepSeek Chat"
+    AI_API_URL: str = "https://api.deepseek.com"
+    AI_MODEL: str = "deepseek-v4-flash"
+    AI_MODEL_NAME: str = "DeepSeek V4 Flash"
+    AI_TEMPERATURE: float = 0.5
 
     PLAYWRIGHT_BROWSERS: List[str] = ["chromium", "firefox", "webkit"]
     DEFAULT_BROWSER: str = "chromium"

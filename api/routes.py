@@ -1090,7 +1090,7 @@ async def get_llm_models():
         {"id": "moonshot-v1-8k",      "name": "Moonshot 8K",         "provider": "Moonshot"},
         {"id": "moonshot-v1-32k",     "name": "Moonshot 32K",        "provider": "Moonshot"},
         {"id": "moonshot-v1-128k",    "name": "Moonshot 128K",       "provider": "Moonshot"},
-        {"id": "deepseek-chat",       "name": "DeepSeek Chat",       "provider": "DeepSeek"},
+        {"id": "deepseek-v4-flash",    "name": "DeepSeek V4 Flash",   "provider": "DeepSeek"},
         {"id": "deepseek-reasoner",   "name": "DeepSeek Reasoner",   "provider": "DeepSeek"},
         {"id": "qwen-turbo",          "name": "Qwen Turbo",          "provider": "Alibaba"},
         {"id": "qwen-plus",           "name": "Qwen Plus",           "provider": "Alibaba"},
@@ -2190,7 +2190,7 @@ async def ai_generate_script(data: dict):
 
     api_key  = settings.AI_API_KEY
     base_url = (settings.AI_API_URL or "").rstrip("/")
-    model    = settings.AI_MODEL or "claude-sonnet-4-6"
+    model    = settings.AI_MODEL or "deepseek-v4-flash"
     temperature = float(getattr(settings, "AI_TEMPERATURE", 0.3))
 
     if not api_key:
@@ -2547,26 +2547,49 @@ async def _ai_analyze_report(report: dict) -> str:
             "请输出：\n1. 性能评估（吞吐量、延迟、错误率分析）\n2. 潜在瓶颈分析\n3. 优化建议"
         )
 
-    api_key = settings.AI_API_KEY
+    api_key  = settings.AI_API_KEY
     base_url = (settings.AI_API_URL or "").rstrip("/")
-    model = settings.AI_MODEL or "claude-sonnet-4-6"
+    model    = settings.AI_MODEL or "deepseek-v4-flash"
 
-    headers = {
-        "x-api-key": api_key,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
-    payload = {
-        "model": model,
-        "max_tokens": 2048,
-        "system": "你是一名资深测试工程师，擅长分析接口测试报告，给出精准、可操作的建议。用中文回答，分点清晰。",
-        "messages": [{"role": "user", "content": prompt}],
-    }
-    url = f"{base_url}/v1/messages"
+    is_anthropic = "anthropic.com" in base_url or model.startswith("claude")
+
+    if is_anthropic:
+        url     = f"{base_url}/v1/messages"
+        headers = {
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+        payload = {
+            "model": model,
+            "max_tokens": 2048,
+            "system": "你是一名资深测试工程师，擅长分析接口测试报告，给出精准、可操作的建议。用中文回答，使用 Markdown 格式输出，结构要求：用 ## 作为一级标题，### 作为二级标题，重点内容用 **加粗**，列表用 - 开头，不要使用 --- 分隔线，不要过度嵌套，保持简洁清晰。",
+            "messages": [{"role": "user", "content": prompt}],
+        }
+    else:
+        url     = f"{base_url}/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "content-type": "application/json",
+        }
+        payload = {
+            "model": model,
+            "max_tokens": 2048,
+            "messages": [
+                {"role": "system", "content": "你是一名资深测试工程师，擅长分析接口测试报告，给出精准、可操作的建议。用中文回答，使用 Markdown 格式输出，结构要求：用 ## 作为一级标题，### 作为二级标题，重点内容用 **加粗**，列表用 - 开头，不要使用 --- 分隔线，不要过度嵌套，保持简洁清晰。"},
+                {"role": "user",   "content": prompt},
+            ],
+        }
+
     async with httpx.AsyncClient(verify=False, timeout=60) as client:
         resp = await client.post(url, json=payload, headers=headers)
         resp.raise_for_status()
-        return resp.json()["content"][0]["text"]
+        data = resp.json()
+
+    if is_anthropic:
+        return data["content"][0]["text"]
+    else:
+        return data["choices"][0]["message"]["content"]
 
 
 @router.delete("/api-test/reports/batch")
@@ -3302,26 +3325,49 @@ async def _ai_analyze_plan_report(report: dict) -> str:
         "3. 测试质量总结"
     )
 
-    api_key = settings.AI_API_KEY
+    api_key  = settings.AI_API_KEY
     base_url = (settings.AI_API_URL or "").rstrip("/")
-    model = settings.AI_MODEL or "claude-sonnet-4-6"
+    model    = settings.AI_MODEL or "deepseek-v4-flash"
 
-    headers = {
-        "x-api-key": api_key,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
-    payload = {
-        "model": model,
-        "max_tokens": 2048,
-        "system": "你是一名资深测试工程师，擅长分析接口测试报告，给出精准、可操作的建议。用中文回答，分点清晰。",
-        "messages": [{"role": "user", "content": prompt}],
-    }
-    url = f"{base_url}/v1/messages"
+    is_anthropic = "anthropic.com" in base_url or model.startswith("claude")
+
+    if is_anthropic:
+        url     = f"{base_url}/v1/messages"
+        headers = {
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+        payload = {
+            "model": model,
+            "max_tokens": 2048,
+            "system": "你是一名资深测试工程师，擅长分析接口测试报告，给出精准、可操作的建议。用中文回答，使用 Markdown 格式输出，结构要求：用 ## 作为一级标题，### 作为二级标题，重点内容用 **加粗**，列表用 - 开头，不要使用 --- 分隔线，不要过度嵌套，保持简洁清晰。",
+            "messages": [{"role": "user", "content": prompt}],
+        }
+    else:
+        url     = f"{base_url}/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "content-type": "application/json",
+        }
+        payload = {
+            "model": model,
+            "max_tokens": 2048,
+            "messages": [
+                {"role": "system", "content": "你是一名资深测试工程师，擅长分析接口测试报告，给出精准、可操作的建议。用中文回答，使用 Markdown 格式输出，结构要求：用 ## 作为一级标题，### 作为二级标题，重点内容用 **加粗**，列表用 - 开头，不要使用 --- 分隔线，不要过度嵌套，保持简洁清晰。"},
+                {"role": "user",   "content": prompt},
+            ],
+        }
+
     async with httpx.AsyncClient(verify=False, timeout=90) as client:
         resp = await client.post(url, json=payload, headers=headers)
         resp.raise_for_status()
-        return resp.json()["content"][0]["text"]
+        data = resp.json()
+
+    if is_anthropic:
+        return data["content"][0]["text"]
+    else:
+        return data["choices"][0]["message"]["content"]
 
 
 @router.delete("/test-plans/reports/{report_id}")

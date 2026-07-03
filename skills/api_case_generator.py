@@ -49,7 +49,7 @@ def _get_llm_config():
     return {
         "api_key": settings.AI_API_KEY,
         "base_url": settings.AI_API_URL,
-        "model": settings.AI_MODEL or "claude-sonnet-4-6",
+        "model": settings.AI_MODEL or "deepseek-v4-flash",
     }
 
 

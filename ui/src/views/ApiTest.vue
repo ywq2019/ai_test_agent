@@ -2913,18 +2913,19 @@ watch(activeTab, (tab) => {
 .live-chip-err .live-chip-val { color: #f56c6c; }
 
 .analysis-result {
-  background: #f8fafc;
+  background: #ffffff;
   border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  padding: 18px 22px;
-  max-height: 460px;
+  border-radius: 10px;
+  padding: 20px 24px;
+  max-height: 520px;
   overflow-y: auto;
+  box-shadow: 0 1px 4px rgba(0,0,0,.04);
 }
 
 .analysis-result :deep(.analysis-markdown) {
   font-size: 13.5px;
-  line-height: 1.85;
-  color: #2d3748;
+  line-height: 1.9;
+  color: #374151;
 }
 
 .analysis-result :deep(h1),
@@ -2932,61 +2933,73 @@ watch(activeTab, (tab) => {
 .analysis-result :deep(h3),
 .analysis-result :deep(h4) {
   font-weight: 600;
-  color: #1a202c;
-  margin: 16px 0 8px;
+  color: #111827;
   line-height: 1.4;
 }
 
-.analysis-result :deep(h1) { font-size: 16px; padding-bottom: 6px; border-bottom: 2px solid #e2e8f0; }
-.analysis-result :deep(h2) { font-size: 15px; padding-bottom: 4px; border-bottom: 1px solid #edf2f7; }
-.analysis-result :deep(h3) { font-size: 14px; }
-.analysis-result :deep(h4) { font-size: 13.5px; }
+.analysis-result :deep(h2) {
+  font-size: 15px;
+  margin: 20px 0 10px;
+  padding: 8px 12px;
+  background: linear-gradient(90deg, #eff6ff, transparent);
+  border-left: 3px solid #3b82f6;
+  border-radius: 0 6px 6px 0;
+}
+
+.analysis-result :deep(h3) {
+  font-size: 13.5px;
+  margin: 14px 0 6px;
+  color: #1d4ed8;
+}
+
+.analysis-result :deep(h4) { font-size: 13px; margin: 10px 0 4px; }
 
 .analysis-result :deep(p) {
   margin: 6px 0;
-  color: #4a5568;
+  color: #4b5563;
 }
 
 .analysis-result :deep(ul),
 .analysis-result :deep(ol) {
-  padding-left: 22px;
-  margin: 6px 0 10px;
+  padding-left: 20px;
+  margin: 4px 0 10px;
 }
 
 .analysis-result :deep(li) {
-  margin: 4px 0;
-  color: #4a5568;
+  margin: 5px 0;
+  color: #4b5563;
+  line-height: 1.7;
 }
 
 .analysis-result :deep(li::marker) {
-  color: #718096;
+  color: #3b82f6;
 }
 
 .analysis-result :deep(strong),
 .analysis-result :deep(b) {
   font-weight: 600;
-  color: #1a202c;
+  color: #111827;
 }
 
 .analysis-result :deep(em) {
-  color: #667eea;
+  color: #6366f1;
   font-style: normal;
 }
 
 .analysis-result :deep(code) {
-  background: #edf2f7;
-  color: #e53e3e;
-  padding: 1px 6px;
+  background: #f1f5f9;
+  color: #dc2626;
+  padding: 2px 6px;
   border-radius: 4px;
   font-family: 'SFMono-Regular', Consolas, monospace;
   font-size: 12px;
 }
 
 .analysis-result :deep(pre) {
-  background: #2d3748;
+  background: #1e293b;
   color: #e2e8f0;
-  padding: 12px 16px;
-  border-radius: 6px;
+  padding: 14px 18px;
+  border-radius: 8px;
   overflow-x: auto;
   margin: 10px 0;
 }
@@ -2999,18 +3012,18 @@ watch(activeTab, (tab) => {
 }
 
 .analysis-result :deep(blockquote) {
-  border-left: 3px solid #667eea;
-  padding: 6px 14px;
+  border-left: 3px solid #6366f1;
+  padding: 8px 14px;
   margin: 10px 0;
-  background: #ebf4ff;
+  background: #f5f3ff;
   border-radius: 0 6px 6px 0;
-  color: #4a5568;
+  color: #4b5563;
 }
 
 .analysis-result :deep(hr) {
   border: none;
-  border-top: 1px solid #e2e8f0;
-  margin: 12px 0;
+  border-top: 1px solid #f1f5f9;
+  margin: 14px 0;
 }
 
 .analysis-result :deep(table) {
@@ -3021,16 +3034,22 @@ watch(activeTab, (tab) => {
 }
 
 .analysis-result :deep(th) {
-  background: #edf2f7;
+  background: #f8fafc;
   font-weight: 600;
-  padding: 6px 10px;
+  padding: 7px 12px;
   border: 1px solid #e2e8f0;
   text-align: left;
+  color: #374151;
 }
 
 .analysis-result :deep(td) {
-  padding: 5px 10px;
+  padding: 6px 12px;
   border: 1px solid #e2e8f0;
+  color: #4b5563;
+}
+
+.analysis-result :deep(tr:nth-child(even) td) {
+  background: #f8fafc;
 }
 
 /* 断言结果列表 */

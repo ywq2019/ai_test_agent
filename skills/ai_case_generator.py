@@ -185,7 +185,7 @@ class AICaseGenerator:
 
         api_key  = settings.AI_API_KEY
         base_url = (settings.AI_API_URL or "").rstrip("/")
-        model    = settings.AI_MODEL or "claude-sonnet-4-6"
+        model    = settings.AI_MODEL or "deepseek-v4-flash"
 
         if not api_key or not base_url:
             raise RuntimeError("未配置 AI_API_KEY 或 AI_API_URL，请在大模型配置页填写后重试")
@@ -570,7 +570,7 @@ class AICaseGenerator:
 
         api_key  = settings.AI_API_KEY
         base_url = (settings.AI_API_URL or "").rstrip("/")
-        model    = settings.AI_MODEL or "claude-sonnet-4-6"
+        model    = settings.AI_MODEL or "deepseek-v4-flash"
 
         if not api_key or not base_url:
             raise RuntimeError("未配置 AI_API_KEY 或 AI_API_URL，请在大模型配置页填写后重试")

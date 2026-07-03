@@ -137,9 +137,27 @@
                     <el-icon color="#67c23a"><FolderOpened /></el-icon>
                     <span>{{ mod.name }}</span>
                     <el-badge :value="mod.cases ? mod.cases.length : 0" type="primary" class="mod-badge" />
+                    <el-button
+                      v-if="selectedCases[mi] && selectedCases[mi].length > 0"
+                      size="small"
+                      type="danger"
+                      plain
+                      style="margin-left:10px"
+                      @click.stop="batchDeleteCases(mi, mod.name)"
+                    >
+                      <el-icon><Delete /></el-icon>
+                      删除选中 ({{ selectedCases[mi].length }})
+                    </el-button>
                   </div>
                 </template>
-                <el-table :data="mod.cases || []" stripe size="small" style="width:100%">
+                <el-table
+                  :data="mod.cases || []"
+                  stripe
+                  size="small"
+                  style="width:100%"
+                  @selection-change="(rows) => onSelectionChange(mi, rows)"
+                >
+                  <el-table-column type="selection" width="40" />
                   <el-table-column prop="id" label="编号" width="80" />
                   <el-table-column prop="name" label="用例名称" min-width="180" show-overflow-tooltip />
                   <el-table-column prop="priority" label="优先级" width="80">
@@ -898,7 +916,39 @@ const deleteCaseItem = async (row, moduleName) => {
   }
 }
 
-// ---------- 工具 ----------
+// ---------- 模块用例多选 ----------
+const selectedCases = ref({})  // { [moduleIndex]: row[] }
+
+const onSelectionChange = (moduleIndex, rows) => {
+  selectedCases.value = { ...selectedCases.value, [moduleIndex]: rows }
+}
+
+const batchDeleteCases = async (moduleIndex, moduleName) => {
+  const rows = selectedCases.value[moduleIndex] || []
+  if (!rows.length) return
+  try {
+    await ElMessageBox.confirm(
+      `确认删除「${moduleName}」中选中的 ${rows.length} 条用例？此操作不可恢复。`,
+      '批量删除确认',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消', confirmButtonClass: 'el-button--danger' }
+    )
+    let result
+    for (const row of rows) {
+      result = await aiCaseApi.deleteCase(current.value.id, row.id)
+    }
+    ElMessage.success(`已删除 ${rows.length} 条用例`)
+    selectedCases.value = { ...selectedCases.value, [moduleIndex]: [] }
+    if (result) {
+      current.value = result
+      const idx = records.value.findIndex(r => r.id === result.id)
+      if (idx !== -1) records.value[idx] = result
+    }
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error(e.response?.data?.detail || e.message || '删除失败')
+  }
+}
+
+
 const formatDate = (str) => {
   if (!str) return ''
   try {

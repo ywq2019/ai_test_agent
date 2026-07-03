@@ -97,7 +97,7 @@
 
             <!-- API URL -->
             <el-form-item label="API URL">
-              <el-input v-model="form.apiUrl" placeholder="https://api.example.com/v1" clearable />
+              <el-input v-model="form.apiUrl" placeholder="https://api.example.com（不需要加 /v1）" clearable />
             </el-form-item>
 
             <!-- API Key -->
@@ -222,13 +222,13 @@ const form = reactive({
 })
 
 const providers = [
-  { name: 'DeepSeek',   url: 'https://api.deepseek.com/v1' },
-  { name: 'OpenAI',     url: 'https://api.openai.com/v1' },
-  { name: 'Anthropic',  url: 'https://api.anthropic.com/v1' },
-  { name: 'Moonshot',   url: 'https://api.moonshot.cn/v1' },
-  { name: 'Alibaba',    url: 'https://dashscope.aliyuncs.com/compatible-mode/v1' },
-  { name: 'Google',     url: 'https://generativelanguage.googleapis.com/v1' },
-  { name: '01AI',       url: 'https://api.01.ai/v1' },
+  { name: 'DeepSeek',   url: 'https://api.deepseek.com' },
+  { name: 'OpenAI',     url: 'https://api.openai.com' },
+  { name: 'Anthropic',  url: 'https://api.anthropic.com' },
+  { name: 'Moonshot',   url: 'https://api.moonshot.cn' },
+  { name: 'Alibaba',    url: 'https://dashscope.aliyuncs.com/compatible-mode' },
+  { name: 'Google',     url: 'https://generativelanguage.googleapis.com' },
+  { name: '01AI',       url: 'https://api.01.ai' },
   { name: '自定义',      url: '' },
 ]
 
