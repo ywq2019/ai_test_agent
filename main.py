@@ -142,7 +142,7 @@ async def root():
     index_file = os.path.join(_dist_dir, "index.html")
     if os.path.exists(index_file):
         return FileResponse(index_file)
-    return {"message": "自动化UI测试Agent API", "version": "1.0.0"}
+    return {"message": "AI 测试工具平台 API", "version": settings.APP_VERSION}
 
 
 @app.get("/health")
