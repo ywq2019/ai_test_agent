@@ -14,6 +14,10 @@
           text-color="#bfcbd9"
           active-text-color="#409eff"
         >
+          <el-menu-item index="/ai-cases">
+            <el-icon><MagicStick /></el-icon>
+            <span>AI用例生成</span>
+          </el-menu-item>
           <el-sub-menu index="webui-group">
             <template #title>
               <el-icon><Monitor /></el-icon>
@@ -40,10 +44,6 @@
               <span>报告查看</span>
             </el-menu-item>
           </el-sub-menu>
-          <el-menu-item index="/ai-cases">
-            <el-icon><MagicStick /></el-icon>
-            <span>AI用例生成</span>
-          </el-menu-item>
           <el-sub-menu index="api-group">
             <template #title>
               <el-icon><Connection /></el-icon>
