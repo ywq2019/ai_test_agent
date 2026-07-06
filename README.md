@@ -307,9 +307,15 @@ cd ..
 复制并编辑 `.env`：
 
 ```ini
+# 应用信息
+APP_NAME=AI 测试工具平台
+APP_VERSION=1.0.0
+
 # 服务配置
 HOST=0.0.0.0
-PORT=8000
+PORT=4000
+DEBUG=True
+CORS_ORIGINS=["*"]
 
 # 数据库
 DATABASE_URL=sqlite+aiosqlite:///./uitest_agent.db
@@ -320,6 +326,15 @@ AI_API_URL=https://api.deepseek.com       # 不要加 /v1，代码自动拼接
 AI_MODEL=deepseek-v4-flash
 AI_MODEL_NAME=DeepSeek V4 Flash
 AI_TEMPERATURE=0.5
+
+# 浏览器
+DEFAULT_BROWSER=chromium
+
+# 数据目录
+REPORT_OUTPUT_DIR=./reports
+SCREENSHOT_DIR=./screenshots
+LOG_DIR=./logs
+UPLOAD_DIR=./uploads
 ```
 
 > 也可以在平台启动后进入**大模型配置**页面直接修改，支持 DeepSeek / Claude / GPT / Gemini / Moonshot / Ollama 等任意 OpenAI 兼容接口。
