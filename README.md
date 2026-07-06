@@ -693,17 +693,12 @@ server {
 
 ```bash
 # 1. 克隆项目
-git clone https://github.com/ywq2019/ai_test_agent.git
-cd ai_test_agent
+git clone https://github.com/ywq2019/ai_test_agent.git && cd ai_test_agent
 
-# 2. 配置环境变量（复制模板后按需修改）
-cp .env.docker .env.docker.local
-# AI_API_KEY 等敏感配置可部署后在平台大模型配置页填写，无需在此配置
-
-# 3. 一键构建并启动
+# 2. 一键构建并启动
 docker compose up -d
 
-# 4. 查看启动状态
+# 3. 查看启动状态
 docker compose logs -f
 ```
 
