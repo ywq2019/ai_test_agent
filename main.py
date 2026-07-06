@@ -97,9 +97,19 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="自动化UI测试Agent",
-    description="智能化、零代码的Web UI自动化测试工具",
-    version="1.0.0",
+    title="AI 测试工具平台",
+    description=(
+        "基于 AI 大模型 + LangGraph + Playwright 的智能化零代码全场景自动化测试平台。\n\n"
+        "**核心能力：**\n"
+        "- **AI 用例生成**：上传需求文档，分段调用大模型按功能模块并行生成测试用例，支持导出 Markdown / XMind\n"
+        "- **WebUI 自动化**：解析页面元素，AI 生成可直接被 Playwright 执行的 UI 自动化测试用例\n"
+        "- **接口自动化**：支持 AI 生成接口用例、断言、变量提取、前置依赖、压力测试与全局变量池\n"
+        "- **测试计划**：跨项目接口用例编排，共享变量上下文，实现端到端链路测试\n"
+        "- **多模型支持**：兼容 Claude / DeepSeek / GPT / Gemini / Ollama 等任意 OpenAI 兼容接口\n"
+        "- **实时推送**：所有耗时操作通过 WebSocket 实时推送进度，无需轮询\n\n"
+        "**GitHub**：https://github.com/ywq2019/ai_test_agent"
+    ),
+    version=settings.APP_VERSION,
     lifespan=lifespan
 )
 
