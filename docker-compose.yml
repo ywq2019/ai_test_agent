@@ -24,12 +24,6 @@ services:
     container_name: ai-test-agent
     ports:
       - "4000:4000"
-    environment:
-      - DATABASE_URL=postgresql+asyncpg://uitest:uitest123456@db:5432/uitest
-      - REPORT_OUTPUT_DIR=/data/reports
-      - SCREENSHOT_DIR=/data/screenshots
-      - LOG_DIR=/data/logs
-      - UPLOAD_DIR=/data/uploads
     env_file:
       - .env.docker
     volumes:

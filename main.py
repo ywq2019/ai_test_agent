@@ -57,9 +57,17 @@ async def lifespan(app: FastAPI):
     logger.info("Database initialized")
 
     # 创建必要目录
+    os.makedirs(settings.LOG_DIR, exist_ok=True)
     os.makedirs(settings.SCREENSHOT_DIR, exist_ok=True)
     os.makedirs(settings.REPORT_OUTPUT_DIR, exist_ok=True)
     os.makedirs(os.path.join(settings.UPLOAD_DIR, "documents"), exist_ok=True)
+
+    # 静态文件目录创建后再挂载（确保目录存在）
+    if not app.routes or not any(getattr(r, 'name', None) == 'screenshots' for r in app.routes):
+        if os.path.exists(settings.SCREENSHOT_DIR):
+            app.mount("/screenshots", StaticFiles(directory=settings.SCREENSHOT_DIR), name="screenshots")
+        if os.path.exists(settings.REPORT_OUTPUT_DIR):
+            app.mount("/reports", StaticFiles(directory=settings.REPORT_OUTPUT_DIR), name="reports")
 
     # 注册 LangChain 工具
     tool_registry.register_all()
@@ -121,13 +129,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-if os.path.exists(settings.SCREENSHOT_DIR):
-    app.mount("/screenshots", StaticFiles(directory=settings.SCREENSHOT_DIR), name="screenshots")
-
-if os.path.exists(settings.REPORT_OUTPUT_DIR):
-    app.mount("/reports", StaticFiles(directory=settings.REPORT_OUTPUT_DIR), name="reports")
-
-# 挂载前端构建产物
+# 挂载前端构建产物（模块级，目录固定存在）
 _dist_dir = os.path.join(os.path.dirname(__file__), "ui", "dist")
 if os.path.exists(_dist_dir):
     app.mount("/assets", StaticFiles(directory=os.path.join(_dist_dir, "assets")), name="assets")
