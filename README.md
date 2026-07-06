@@ -679,11 +679,11 @@ server {
 
 **待扩展（大规模部署）**：
 
-| 改造项 | 说明 |
-| --- | --- |
-| SQLite → PostgreSQL | 改一行连接字符串，SQLAlchemy 完全兼容，适合 10 人以上并发写入 |
-| 加认证中间件 | 基于现有 `User` 表，加 JWT 路由保护，隔离多用户数据 |
-| 任务队列 | 用 Celery + Redis 隔离并发执行任务，支持水平扩展 |
+| 改造项 | 状态 | 说明 |
+| --- | --- | --- |
+| SQLite → PostgreSQL | ✅ docker-compose 已集成 | 通过 Docker 部署自动使用 PostgreSQL，适合 10 人以上并发写入 |
+| 加认证中间件 | 🔲 待实现 | 基于现有 `User` 表，加 JWT 路由保护，隔离多用户数据 |
+| 任务队列 | 🔲 待实现 | 用 Celery + Redis 隔离并发执行任务，支持水平扩展 |
 
 ### Docker 一键部署（服务器）
 
@@ -704,6 +704,13 @@ docker compose logs -f
 
 启动成功后访问 `http://服务器IP:4000`，进入**大模型配置**页填写 API Key 即可使用。
 
+**包含服务**：
+
+| 服务 | 说明 |
+| --- | --- |
+| `app` | FastAPI 后端 + 前端静态文件，监听 4000 端口 |
+| `db` | PostgreSQL 15，自动建表，数据持久化到 Volume |
+
 **后续维护**：
 
 ```bash
@@ -720,9 +727,14 @@ docker compose down
 docker compose restart
 ```
 
-**数据持久化**：数据库、报告、截图、日志均挂载到 Docker Volume，容器重启或重建后数据不丢失。
+**数据持久化**：数据库（PostgreSQL Volume）、报告、截图、日志均挂载到 Docker Volume，容器重启或重建后数据不丢失。
 
-**规模扩展**：5 人以内 SQLite 够用；10 人以上建议在 `docker-compose.yml` 中加入 PostgreSQL 服务，改一行 `DATABASE_URL` 即可，代码无需修改。
+**本机开发 vs 服务器部署**：
+
+| 环境 | 数据库 | 说明 |
+| --- | --- | --- |
+| 本机 Windows 开发 | SQLite | 零配置，直接 `python main.py` |
+| 服务器 Docker 部署 | PostgreSQL | 自动启动，支持多人并发 |
 
 ***
 
