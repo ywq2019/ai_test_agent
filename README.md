@@ -224,9 +224,15 @@ skills/
 
 ```
 ai_test_agent/
-├── main.py                    # 应用入口（Uvicorn 8000，Windows 异步策略）
+├── main.py                    # 应用入口（Uvicorn，前端静态托管，Vue Router 支持）
+├── Dockerfile                 # 多阶段构建（前端 + 后端一体）
+├── docker-compose.yml         # 一键部署（app + PostgreSQL）
+├── .env                       # 本机开发配置（SQLite）
+├── .env.docker                # Docker 部署配置（PostgreSQL）
+├── .dockerignore              # Docker 构建排除文件
+├── requirements.txt           # Python 依赖（含 asyncpg）
 ├── agent/
-│   ├── core.py                # UITestAgent 主控（单例）
+│   ├── core.py                # UITestAgent 主控（状态按 task_id 隔离）
 │   └── langgraph_agent.py     # LangGraph 对话代理
 ├── api/
 │   ├── routes.py              # 全部 REST + AI 端点
@@ -234,16 +240,16 @@ ai_test_agent/
 │   ├── websocket.py           # WebSocket 端点
 │   └── websocket_manager.py   # WS 连接管理（按 client_id 分组广播）
 ├── skills/                    # 技能与 AI 核心逻辑
-│   ├── ai_case_generator.py   # AI 文档驱动用例生成
-│   ├── case_generator.py      # UI 用例生成
-│   ├── api_case_generator.py  # 接口用例 AI 生成
+│   ├── ai_case_generator.py   # AI 文档驱动用例生成（统一 HTTP API）
+│   ├── case_generator.py      # UI 用例生成（统一 HTTP API）
+│   ├── api_case_generator.py  # 接口用例 AI 生成（统一 HTTP API）
 │   ├── api_executor.py        # 接口用例执行引擎（含代理 / Hosts 映射）
 │   ├── api_load_tester.py     # 压力测试引擎
 │   └── param_resolver.py      # 参数解析（变量 / 函数 / 脚本）
 ├── tools/
-│   ├── browser.py             # Playwright 浏览器封装（BrowserPool）
+│   ├── browser.py             # Playwright 浏览器封装（BrowserPool，独立 Context 并发隔离）
 │   ├── config.py              # 环境变量（pydantic-settings）
-│   ├── database.py            # SQLAlchemy 模型（Task/Case/Result/Report/ApiProject/ApiCase/TestPlan/TestPlanStep/TestPlanReport 等）
+│   ├── database.py            # SQLAlchemy 模型，兼容 SQLite / PostgreSQL
 │   └── document_parser.py     # PDF / Word / Excel / HTML 解析
 ├── ui/
 │   ├── src/
@@ -251,13 +257,14 @@ ai_test_agent/
 │   │   ├── router/            # Vue Router
 │   │   ├── stores/task.js     # Pinia 状态
 │   │   └── views/
-│   │       ├── Home.vue       # 首页 / 任务管理
-│   │       ├── Cases.vue      # 用例管理（AI生成 + 优化 + 覆盖度）
 │   │       ├── AiCases.vue    # AI 用例生成（文档驱动）
-│   │       ├── ApiTest.vue    # 接口测试（项目/用例/执行/压测/报告）
-│   │       ├── TestPlan.vue   # 测试计划（编排 + 执行 + 报告 + AI 分析）
+│   │       ├── Home.vue       # 首页
+│   │       ├── Tasks.vue      # 任务管理
+│   │       ├── Cases.vue      # 用例管理（AI生成 + 优化 + 覆盖度）
 │   │       ├── Execution.vue  # UI 测试执行（实时 WS）
 │   │       ├── Reports.vue    # UI 测试报告
+│   │       ├── ApiTest.vue    # 接口测试（项目/用例/执行/压测/报告）
+│   │       ├── TestPlan.vue   # 测试计划（编排 + 执行 + 报告 + AI 分析）
 │   │       ├── LLM.vue        # 大模型配置
 │   │       └── Skills.vue     # 技能管理
 │   └── dist/                  # 构建产物（FastAPI 静态文件服务）
@@ -265,10 +272,7 @@ ai_test_agent/
 ├── ai_cases/                  # AI 生成的 MD / XMind 文件
 ├── screenshots/               # 执行截图
 ├── reports/                   # HTML 报告
-├── logs/                      # 运行日志
-├── .env                       # 环境变量配置
-├── requirements.txt           # Python 依赖
-└── uitest_agent.db            # SQLite 数据库
+└── logs/                      # 运行日志
 ```
 
 ***
