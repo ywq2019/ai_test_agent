@@ -2,6 +2,7 @@
 API路由定义
 """
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, BackgroundTasks
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional
 from pathlib import Path
@@ -304,7 +305,8 @@ async def list_cases(task_id: int, db: AsyncSession = Depends(get_db)):
             steps=c.steps,
             expected_results=c.expected_results,
             element_selector=getattr(c, 'element_selector', '') or '',
-            enabled=c.enabled
+            enabled=c.enabled,
+            deprecated=getattr(c, 'deprecated', False) or False,
         )
         for c in cases
     ]
@@ -338,7 +340,8 @@ async def create_case(
         preconditions=case.preconditions,
         steps=case.steps,
         expected_results=case.expected_results,
-        enabled=case.enabled
+        enabled=case.enabled,
+        deprecated=getattr(case, 'deprecated', False) or False,
     )
 
 
@@ -396,6 +399,14 @@ async def generate_cases(
             )
 
         cases = await uitest_agent.generate_cases(progress_cb=_progress)
+
+        # ── 保存文档快照（用于后续增量更新的 Diff 分析） ──────────────────
+        if uitest_agent._get_state(task_id).document_data:
+            _snap = uitest_agent._get_state(task_id).document_data.get("content", "")
+            if _snap:
+                from skills.case_generator import case_generator as _cg
+                task.doc_snapshot = _snap[:20000]
+                task.doc_hash     = _cg.compute_doc_hash(_snap)
 
         for case in cases:
             db_case = TestCase(
@@ -542,6 +553,7 @@ async def get_coverage(
                 "element_selector": getattr(c, "element_selector", "") or "",
             }
             for c in db_cases
+            if not getattr(c, 'deprecated', False)  # 过滤废弃用例；用户禁用用例仍计入覆盖率
         ]
         page_elements = task.page_elements or []
 
@@ -552,6 +564,256 @@ async def get_coverage(
     except Exception as e:
         logger.error(f"Error getting coverage: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WebUI 用例 — 文档变更检测（Diff 分析，只读，不修改数据库）
+# ─────────────────────────────────────────────────────────────────────────────
+
+class WebUIDiffCheckRequest(BaseModel):
+    new_content: Optional[str] = None
+    new_document_path: Optional[str] = None
+
+
+@router.post("/cases/doc-diff-check/{task_id}")
+async def webui_doc_diff_check(
+    task_id: int,
+    request: WebUIDiffCheckRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    对比新旧需求文档，返回变更模块清单（不修改数据库，只分析）。
+    前端用来展示 Diff 预览，用户确认后再调 incremental-update。
+    """
+    from sqlalchemy import select
+    from skills.case_generator import case_generator as cg
+
+    result = await db.execute(select(TestTask).where(TestTask.id == task_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    # 取新文档内容
+    if not request.new_content and not request.new_document_path:
+        raise HTTPException(status_code=400, detail="请提供新版文档路径或文本内容")
+
+    if request.new_document_path:
+        try:
+            document_data = await uitest_agent.parse_document(request.new_document_path)
+            new_content = document_data.get("content", "")
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"新文档解析失败: {e}")
+    else:
+        new_content = request.new_content or ""
+
+    if not new_content.strip():
+        raise HTTPException(status_code=400, detail="新文档内容为空")
+
+    new_hash = cg.compute_doc_hash(new_content)
+    old_hash = task.doc_hash or ""
+
+    if old_hash and new_hash == old_hash:
+        return {
+            "has_change": False,
+            "new_doc_hash": new_hash,
+            "old_doc_hash": old_hash,
+            "diff": None,
+            "message": "文档内容未发生变化，无需更新用例",
+        }
+
+    old_content = task.doc_snapshot or ""
+    if not old_content:
+        return {
+            "has_change": True,
+            "new_doc_hash": new_hash,
+            "old_doc_hash": old_hash,
+            "diff": None,
+            "message": "旧版文档快照未保存（在上次生成用例前请确保已关联文档），建议直接重新生成用例",
+        }
+
+    try:
+        diff_result = await cg.analyze_doc_diff(
+            old_doc_content=old_content,
+            new_doc_content=new_content,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {
+        "has_change": True,
+        "new_doc_hash": new_hash,
+        "old_doc_hash": old_hash,
+        "diff": diff_result,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WebUI 用例 — 增量更新（文档变更后只重生成 changed/added 模块）
+# ─────────────────────────────────────────────────────────────────────────────
+
+class WebUIIncrementalUpdateRequest(BaseModel):
+    new_content: Optional[str] = None
+    new_document_path: Optional[str] = None
+    diff: Optional[dict] = None
+    reparse_page: bool = False
+
+
+@router.post("/cases/incremental-update/{task_id}")
+async def webui_incremental_update(
+    task_id: int,
+    request: WebUIIncrementalUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    WebUI 自动化测试用例增量更新：
+    1. 解析新文档；若未传 diff 则重新做 Diff 分析
+    2. 只对 changed/added 模块重新生成用例
+    3. unchanged 模块保留旧用例，removed 模块用例打 deprecated 标记
+    4. 清空旧用例，写入合并后的完整用例集（active + deprecated）
+    5. 更新 task.doc_snapshot / doc_hash
+    """
+    from sqlalchemy import select, delete as sql_delete
+    from skills.case_generator import case_generator as cg
+
+    result = await db.execute(select(TestTask).where(TestTask.id == task_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    # ── 1. 获取新文档内容 ────────────────────────────────────────────────
+    if not request.new_content and not request.new_document_path:
+        raise HTTPException(status_code=400, detail="请提供新版文档路径或文本内容")
+
+    if request.new_document_path:
+        try:
+            document_data = await uitest_agent.parse_document(request.new_document_path)
+            new_content = document_data.get("content", "")
+            # 解析完删除临时文件
+            from pathlib import Path as _Path
+            p = _Path(request.new_document_path)
+            if "uploads" in p.parts and "documents" in p.parts:
+                p.unlink(missing_ok=True)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"新文档解析失败: {e}")
+    else:
+        new_content = request.new_content or ""
+
+    if not new_content.strip():
+        raise HTTPException(status_code=400, detail="新文档内容为空")
+
+    # ── 2. 可选：重新抓取页面元素 ─────────────────────────────────────────
+    if request.reparse_page and task.url:
+        try:
+            await ws_manager.broadcast(
+                {"type": "cases_gen_progress", "percent": 5, "stage": "重新抓取页面元素..."},
+                client_id="cases_gen",
+            )
+            elements = await uitest_agent.parse_page(task.url, task.browser or "chromium")
+            task.page_elements = elements
+            logger.info(f"重新抓取页面元素: task_id={task_id}，共 {len(elements)} 个")
+        except Exception as e:
+            logger.warning(f"页面重新抓取失败，使用旧元素: {e}")
+
+    # ── 3. 获取 diff 结果 ────────────────────────────────────────────────
+    diff_result = request.diff
+    if not diff_result:
+        old_content = task.doc_snapshot or ""
+        if not old_content:
+            raise HTTPException(
+                status_code=400,
+                detail="旧版文档快照未保存，无法做精确 Diff。请直接重新生成用例。"
+            )
+        try:
+            diff_result = await cg.analyze_doc_diff(
+                old_doc_content=old_content,
+                new_doc_content=new_content,
+            )
+        except RuntimeError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    has_changes = bool(
+        diff_result.get("changed") or diff_result.get("added") or diff_result.get("removed")
+    )
+    if not has_changes:
+        raise HTTPException(status_code=400, detail="Diff 分析未发现任何模块变更，无需更新")
+
+    # ── 4. 读取已有用例 ──────────────────────────────────────────────────
+    case_result = await db.execute(select(TestCase).where(TestCase.task_id == task_id))
+    existing_db_cases = case_result.scalars().all()
+    existing_cases = [
+        {
+            "id":               f"TC{c.id:03d}",
+            "name":             c.name,
+            "module":           c.module or "通用",
+            "priority":         c.priority,
+            "preconditions":    c.preconditions or "",
+            "steps":            c.steps or "",
+            "expected_results": c.expected_results or "",
+            "element_selector": getattr(c, "element_selector", "") or "",
+        }
+        for c in existing_db_cases
+    ]
+
+    # ── 5. 执行增量更新 ───────────────────────────────────────────────────
+    async def _progress(pct: int, stage: str):
+        await ws_manager.broadcast(
+            {"type": "cases_gen_progress", "percent": pct, "stage": stage},
+            client_id="cases_gen",
+        )
+
+    try:
+        upd = await cg.incremental_update(
+            url           = task.url or "",
+            page_elements = task.page_elements or [],
+            existing_cases= existing_cases,
+            diff_result   = diff_result,
+            new_doc_content= new_content,
+            progress_cb   = _progress,
+        )
+    except Exception as e:
+        logger.exception("WebUI 增量更新失败: {}", repr(e))
+        raise HTTPException(status_code=500, detail=f"增量更新失败: {e}")
+
+    # ── 6. 清空旧用例，写入新完整集合 ────────────────────────────────────
+    await db.execute(sql_delete(TestCase).where(TestCase.task_id == task_id))
+
+    all_cases = upd["retained_cases"] + upd["new_cases"] + upd["deprecated_cases"]
+    for case in all_cases:
+        db_case = TestCase(
+            task_id         = task_id,
+            name            = case.get("name", "未命名"),
+            module          = case.get("module", "通用"),
+            priority        = case.get("priority", "P1"),
+            preconditions   = case.get("preconditions", ""),
+            steps           = case.get("steps", ""),
+            expected_results= case.get("expected_results", ""),
+            element_selector= case.get("element_selector", ""),
+            enabled         = True,   # enabled 只由用户手动控制，不受废弃影响
+            deprecated      = (case.get("status") == "deprecated"),
+        )
+        db.add(db_case)
+
+    # ── 7. 更新 task 文档快照 ─────────────────────────────────────────────
+    task.doc_snapshot = new_content[:20000]
+    task.doc_hash     = cg.compute_doc_hash(new_content)
+    task.status       = "cases_updated"
+
+    await db.commit()
+
+    active_count     = len(upd["retained_cases"]) + len(upd["new_cases"])
+    deprecated_count = len(upd["deprecated_cases"])
+
+    logger.info(
+        f"WebUI 增量更新完成: task_id={task_id}，"
+        f"active={active_count} deprecated={deprecated_count}，"
+        f"摘要: {upd['diff_summary']}"
+    )
+    return {
+        "active_count":     active_count,
+        "deprecated_count": deprecated_count,
+        "diff_summary":     upd["diff_summary"],
+        "message":          f"增量更新成功！有效用例 {active_count} 条，废弃 {deprecated_count} 条",
+    }
 
 
 @router.put("/cases/{case_id}", response_model=CaseResponse)
@@ -583,7 +845,8 @@ async def update_case(
         preconditions=case.preconditions,
         steps=case.steps,
         expected_results=case.expected_results,
-        enabled=case.enabled
+        enabled=case.enabled,
+        deprecated=getattr(case, 'deprecated', False) or False,
     )
 
 
@@ -713,6 +976,9 @@ async def execute_cases(
 
     if request.case_ids:
         cases = [c for c in cases if c.id in request.case_ids]
+
+    # 废弃用例（需求变更标记的）不参与执行；用户禁用（enabled=False）由 case_ids 控制
+    cases = [c for c in cases if not getattr(c, 'deprecated', False)]
 
     case_dicts = [
         {
@@ -1301,6 +1567,29 @@ class AICaseFileResponse(_BaseModel):
     has_xmind: bool
     modules: _List[_Dict[str, _Any]] = []
     created_at: str = ""
+    # 文档变更追踪字段
+    doc_hash: _Optional[str] = None
+    parent_id: _Optional[int] = None
+    diff_summary: _Optional[str] = None
+    record_status: str = "active"
+
+
+def _ai_case_response(record) -> AICaseFileResponse:
+    """统一构建 AICaseFileResponse，避免在每个端点重复写相同字段。"""
+    modules = (record.cases_data or {}).get("modules", [])
+    return AICaseFileResponse(
+        id=record.id,
+        task_name=record.task_name,
+        case_count=record.case_count,
+        has_md=bool(record.md_path),
+        has_xmind=bool(record.xmind_path),
+        modules=modules,
+        created_at=record.created_at.isoformat() if record.created_at else "",
+        doc_hash=record.doc_hash,
+        parent_id=record.parent_id,
+        diff_summary=record.diff_summary,
+        record_status=getattr(record, "record_status", "active") or "active",
+    )
 
 
 @router.post("/ai-cases/generate", response_model=AICaseFileResponse)
@@ -1345,21 +1634,14 @@ async def generate_ai_cases(
         md_path=result["files"].get("md"),
         xmind_path=result["files"].get("xmind"),
         cases_data=result.get("cases_data"),
+        doc_hash=result.get("doc_hash"),
+        doc_content=result.get("doc_content"),
     )
     db.add(record)
     await db.commit()
     await db.refresh(record)
 
-    modules = (record.cases_data or {}).get("modules", [])
-    return AICaseFileResponse(
-        id=record.id,
-        task_name=record.task_name,
-        case_count=record.case_count,
-        has_md=bool(record.md_path),
-        has_xmind=bool(record.xmind_path),
-        modules=modules,
-        created_at=record.created_at.isoformat() if record.created_at else "",
-    )
+    return _ai_case_response(record)
 
 
 @router.get("/ai-cases", response_model=List[AICaseFileResponse])
@@ -1371,18 +1653,7 @@ async def list_ai_cases(db: AsyncSession = Depends(get_db)):
         select(AICaseFile).order_by(AICaseFile.created_at.desc())
     )
     rows = result.scalars().all()
-    return [
-        AICaseFileResponse(
-            id=r.id,
-            task_name=r.task_name,
-            case_count=r.case_count,
-            has_md=bool(r.md_path),
-            has_xmind=bool(r.xmind_path),
-            modules=(r.cases_data or {}).get("modules", []),
-            created_at=r.created_at.isoformat() if r.created_at else "",
-        )
-        for r in rows
-    ]
+    return [_ai_case_response(r) for r in rows]
 
 
 @router.get("/ai-cases/{record_id}", response_model=AICaseFileResponse)
@@ -1397,16 +1668,7 @@ async def get_ai_case(record_id: int, db: AsyncSession = Depends(get_db)):
     if not record:
         raise HTTPException(status_code=404, detail="记录不存在")
 
-    modules = (record.cases_data or {}).get("modules", [])
-    return AICaseFileResponse(
-        id=record.id,
-        task_name=record.task_name,
-        case_count=record.case_count,
-        has_md=bool(record.md_path),
-        has_xmind=bool(record.xmind_path),
-        modules=modules,
-        created_at=record.created_at.isoformat() if record.created_at else "",
-    )
+    return _ai_case_response(record)
 
 
 @router.get("/ai-cases/{record_id}/download")
@@ -1507,15 +1769,7 @@ async def optimize_ai_cases(
     await db.refresh(record)
 
     modules = (record.cases_data or {}).get("modules", [])
-    return AICaseFileResponse(
-        id=record.id,
-        task_name=record.task_name,
-        case_count=record.case_count,
-        has_md=bool(record.md_path),
-        has_xmind=bool(record.xmind_path),
-        modules=modules,
-        created_at=record.created_at.isoformat() if record.created_at else "",
-    )
+    return _ai_case_response(record)
 
 
 @router.get("/ai-cases/{record_id}/coverage")
@@ -1531,10 +1785,14 @@ async def get_ai_case_coverage(record_id: int, db: AsyncSession = Depends(get_db
 
     modules_data = (record.cases_data or {}).get("modules", [])
 
-    # 展平所有用例
+    # 只统计有效用例，过滤掉废弃用例（status='deprecated'）
     all_cases = []
     for mod in modules_data:
+        if all(c.get("status") == "deprecated" for c in mod.get("cases", []) if mod.get("cases")):
+            continue  # 整个模块都废弃，跳过
         for case in mod.get("cases", []):
+            if case.get("status") == "deprecated":
+                continue  # 单条废弃用例跳过
             all_cases.append({**case, "_module": mod.get("name", "通用")})
 
     total = len(all_cases)
@@ -1687,6 +1945,10 @@ async def add_ai_case_item(record_id: int, data: dict, db: AsyncSession = Depend
         has_xmind=bool(record.xmind_path),
         modules=(record.cases_data or {}).get("modules", []),
         created_at=record.created_at.isoformat() if record.created_at else "",
+        doc_hash=record.doc_hash,
+        parent_id=record.parent_id,
+        diff_summary=record.diff_summary,
+        record_status=getattr(record, "record_status", "active") or "active",
     )
 
 
@@ -1756,6 +2018,10 @@ async def update_ai_case_item(record_id: int, case_id: str, data: dict, db: Asyn
         has_xmind=bool(record.xmind_path),
         modules=(record.cases_data or {}).get("modules", []),
         created_at=record.created_at.isoformat() if record.created_at else "",
+        doc_hash=record.doc_hash,
+        parent_id=record.parent_id,
+        diff_summary=record.diff_summary,
+        record_status=getattr(record, "record_status", "active") or "active",
     )
 
 
@@ -1804,6 +2070,10 @@ async def delete_ai_case_item(record_id: int, case_id: str, db: AsyncSession = D
         has_xmind=bool(record.xmind_path),
         modules=(record.cases_data or {}).get("modules", []),
         created_at=record.created_at.isoformat() if record.created_at else "",
+        doc_hash=record.doc_hash,
+        parent_id=record.parent_id,
+        diff_summary=record.diff_summary,
+        record_status=getattr(record, "record_status", "active") or "active",
     )
 
 
@@ -1831,6 +2101,265 @@ async def delete_ai_case(record_id: int, db: AsyncSession = Depends(get_db)):
     await db.execute(sql_delete(AICaseFile).where(AICaseFile.id == record_id))
     await db.commit()
     return {"message": "删除成功"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AI 用例 — 文档变更检测与 Diff 分析
+# ─────────────────────────────────────────────────────────────────────────────
+
+class DiffCheckRequest(_BaseModel):
+    new_content: _Optional[str] = None      # 直接粘贴的新文档文本
+    new_document_path: _Optional[str] = None  # 已上传的新文档路径
+
+
+@router.post("/ai-cases/{record_id}/diff-check")
+async def diff_check_ai_case(
+    record_id: int,
+    request: DiffCheckRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    对比新旧需求文档，返回变更摘要（不修改数据库，只分析）。
+
+    前端上传新文档后先调此接口展示变更预览，
+    用户确认后再调 /ai-cases/{id}/incremental-update 执行增量更新。
+
+    返回：
+    {
+        "has_change": true,
+        "new_doc_hash": "abc123",
+        "old_doc_hash": "def456",
+        "diff": {
+            "changed": [...],
+            "added": [...],
+            "removed": [...],
+            "unchanged": [...],
+            "impact_level": "high",
+            "diff_summary": "..."
+        }
+    }
+    """
+    from sqlalchemy import select
+    from tools.database import AICaseFile
+    from skills.ai_case_generator import ai_case_generator
+
+    # ── 1. 取旧记录 ──────────────────────────────────────────────────────
+    result = await db.execute(select(AICaseFile).where(AICaseFile.id == record_id))
+    record = result.scalar_one_or_none()
+    if not record:
+        raise HTTPException(status_code=404, detail="记录不存在")
+
+    # ── 2. 取新文档内容 ──────────────────────────────────────────────────
+    if not request.new_content and not request.new_document_path:
+        raise HTTPException(status_code=400, detail="请提供新版文档路径或文本内容")
+
+    if request.new_document_path:
+        try:
+            from tools.document_parser import document_parser
+            parsed = await document_parser.parse(request.new_document_path)
+            new_content = parsed.get("content", "")
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"新文档解析失败: {e}")
+    else:
+        new_content = request.new_content or ""
+
+    if not new_content.strip():
+        raise HTTPException(status_code=400, detail="新文档内容为空")
+
+    # ── 3. 哈希快速判断是否有变更 ─────────────────────────────────────────
+    new_doc_hash = ai_case_generator._compute_doc_hash(new_content)
+    old_doc_hash = record.doc_hash or ""
+
+    if old_doc_hash and new_doc_hash == old_doc_hash:
+        return {
+            "has_change": False,
+            "new_doc_hash": new_doc_hash,
+            "old_doc_hash": old_doc_hash,
+            "diff": None,
+            "message": "文档内容未发生变化，无需更新用例",
+        }
+
+    # ── 4. 有变更：调 AI 做 Diff 分析 ────────────────────────────────────
+    old_content = record.doc_content or ""
+    if not old_content:
+        return {
+            "has_change": True,
+            "new_doc_hash": new_doc_hash,
+            "old_doc_hash": old_doc_hash,
+            "diff": None,
+            "message": "旧版文档内容未保存，无法做精确 Diff，可直接重新生成",
+        }
+
+    # 从旧用例数据中提取实际模块名，传给 Diff 分析做强约束
+    existing_module_names = [
+        m.get("name", "") for m in (record.cases_data or {}).get("modules", [])
+        if m.get("name") and "废弃" not in m.get("name", "")
+    ]
+
+    try:
+        diff_result = await ai_case_generator.analyze_document_diff(
+            old_doc_content=old_content,
+            new_doc_content=new_content,
+            existing_module_names=existing_module_names,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {
+        "has_change": True,
+        "new_doc_hash": new_doc_hash,
+        "old_doc_hash": old_doc_hash,
+        "diff": diff_result,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AI 用例 — 增量更新（文档变更后只重生成 changed/added 模块）
+# ─────────────────────────────────────────────────────────────────────────────
+
+class IncrementalUpdateRequest(_BaseModel):
+    new_content: _Optional[str] = None          # 新文档文本（与 new_document_path 二选一）
+    new_document_path: _Optional[str] = None    # 已上传的新文档路径
+    diff: _Optional[_Dict[str, _Any]] = None    # 前端传回 diff-check 的结果，省略则重新分析
+
+
+@router.post("/ai-cases/{record_id}/incremental-update", response_model=AICaseFileResponse)
+async def incremental_update_ai_case(
+    record_id: int,
+    request: IncrementalUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    文档变更后的增量更新：
+    1. 如果 request.diff 已由前端 diff-check 获取，直接用；否则重新分析
+    2. 只对 changed/added 模块重新调用 LLM 生成用例
+    3. unchanged 模块保留旧用例，removed 模块打 deprecated 标记
+    4. 旧记录标记为 deprecated，新记录 parent_id 指向旧记录
+    """
+    from sqlalchemy import select
+    from tools.database import AICaseFile
+    from skills.ai_case_generator import ai_case_generator
+    from api.websocket_manager import ws_manager
+
+    # ── 1. 取旧记录 ──────────────────────────────────────────────────────
+    result = await db.execute(select(AICaseFile).where(AICaseFile.id == record_id))
+    old_record = result.scalar_one_or_none()
+    if not old_record:
+        raise HTTPException(status_code=404, detail="记录不存在")
+
+    # ── 2. 取新文档内容 ──────────────────────────────────────────────────
+    if not request.new_content and not request.new_document_path:
+        raise HTTPException(status_code=400, detail="请提供新版文档路径或文本内容")
+
+    if request.new_document_path:
+        try:
+            from tools.document_parser import document_parser
+            parsed = await document_parser.parse(request.new_document_path)
+            new_content = parsed.get("content", "")
+            # 解析完删除临时文件
+            from pathlib import Path as _Path
+            p = _Path(request.new_document_path)
+            if "uploads" in p.parts and "documents" in p.parts:
+                p.unlink(missing_ok=True)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"新文档解析失败: {e}")
+    else:
+        new_content = request.new_content or ""
+
+    if not new_content.strip():
+        raise HTTPException(status_code=400, detail="新文档内容为空")
+
+    # ── 3. 获取 diff（复用前端已分析的结果，或重新分析） ─────────────────
+    diff_result = request.diff
+
+    # 从旧用例数据中提取实际模块名（无论是否重新分析都需要，用于后续名字校正）
+    existing_module_names = [
+        m.get("name", "") for m in (old_record.cases_data or {}).get("modules", [])
+        if m.get("name") and "废弃" not in m.get("name", "")
+    ]
+
+    if not diff_result:
+        old_content = old_record.doc_content or ""
+        if not old_content:
+            raise HTTPException(
+                status_code=400,
+                detail="旧版文档内容未保存，无法做精确 Diff。请直接重新生成（/ai-cases/generate）。"
+            )
+        try:
+            diff_result = await ai_case_generator.analyze_document_diff(
+                old_doc_content=old_content,
+                new_doc_content=new_content,
+                existing_module_names=existing_module_names,
+            )
+        except RuntimeError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # ── 4. 判断是否实际有变更 ─────────────────────────────────────────────
+    has_changes = bool(diff_result.get("changed") or diff_result.get("added") or diff_result.get("removed"))
+    if not has_changes:
+        raise HTTPException(status_code=400, detail="Diff 分析未发现任何模块变更，无需更新")
+
+    # ── 5. WebSocket 进度回调 ─────────────────────────────────────────────
+    async def _progress(pct: int, stage: str):
+        await ws_manager.broadcast(
+            {"type": "ai_gen_progress", "percent": pct, "stage": stage},
+            client_id="ai_gen",
+        )
+
+    # ── 6. 执行增量更新 ───────────────────────────────────────────────────
+    formats = []
+    if old_record.md_path:
+        formats.append("md")
+    if old_record.xmind_path:
+        formats.append("xmind")
+    if not formats:
+        formats = ["md", "xmind"]
+
+    try:
+        upd_result = await ai_case_generator.incremental_update(
+            task_name      = old_record.task_name,
+            old_cases_data = old_record.cases_data or {},
+            new_doc_content= new_content,
+            diff_result    = diff_result,
+            formats        = formats,
+            progress_cb    = _progress,
+        )
+    except RuntimeError as e:
+        await ws_manager.broadcast(
+            {"type": "ai_gen_progress", "percent": 0, "stage": f"增量更新失败: {e}", "error": True},
+            client_id="ai_gen",
+        )
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("增量更新失败: {}", repr(e))
+        raise HTTPException(status_code=500, detail=f"增量更新失败: {type(e).__name__}: {e}")
+
+    # ── 7. 旧记录标记为 deprecated ────────────────────────────────────────
+    old_record.record_status = "deprecated"
+    await db.flush()
+
+    # ── 8. 创建新记录，parent_id 指向旧记录 ──────────────────────────────
+    new_record = AICaseFile(
+        task_name     = old_record.task_name,
+        case_count    = upd_result.get("case_count", 0),
+        md_path       = upd_result["files"].get("md"),
+        xmind_path    = upd_result["files"].get("xmind"),
+        cases_data    = upd_result.get("cases_data"),
+        doc_hash      = upd_result.get("doc_hash"),
+        doc_content   = upd_result.get("doc_content"),
+        parent_id     = old_record.id,
+        diff_summary  = upd_result.get("diff_summary"),
+        record_status = "active",
+    )
+    db.add(new_record)
+    await db.commit()
+    await db.refresh(new_record)
+
+    logger.info(
+        f"增量更新完成: 旧记录 #{old_record.id} → 新记录 #{new_record.id}，"
+        f"用例 {new_record.case_count} 条，摘要: {new_record.diff_summary}"
+    )
+    return _ai_case_response(new_record)
 
 
 # ─────────────────────────────────────────────

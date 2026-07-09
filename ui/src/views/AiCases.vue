@@ -49,6 +49,16 @@
                       <el-icon><MagicStick /></el-icon>
                     </el-button>
                   </el-tooltip>
+                  <el-tooltip content="文档变更·增量更新" placement="top">
+                    <el-button
+                      size="small"
+                      type="warning"
+                      link
+                      @click.stop="openDiffDialog(r)"
+                    >
+                      <el-icon><Refresh /></el-icon>
+                    </el-button>
+                  </el-tooltip>
                   <el-button size="small" type="danger" link @click.stop="deleteRecord(r)">
                     <el-icon><Delete /></el-icon>
                   </el-button>
@@ -57,6 +67,8 @@
               <div class="record-meta">
                 <el-tag size="small" type="success" v-if="r.has_md">MD</el-tag>
                 <el-tag size="small" type="warning" v-if="r.has_xmind">XMind</el-tag>
+                <el-tag size="small" type="info" v-if="r.parent_id">增量更新</el-tag>
+                <el-tag size="small" effect="plain" type="danger" v-if="r.record_status === 'deprecated'">已废弃</el-tag>
                 <span class="record-count">{{ r.case_count }} 条用例</span>
                 <span class="record-date">{{ formatDate(r.created_at) }}</span>
               </div>
@@ -69,110 +81,149 @@
       <el-col :span="16">
         <el-card v-if="current" shadow="hover">
           <template #header>
-            <div class="card-header">
+            <div class="detail-header">
+              <!-- 第一行：标题 + 版本标签 -->
               <div class="detail-title">
-                <el-icon color="#409eff"><MagicStick /></el-icon>
-                <span>{{ current.task_name }}</span>
-                <el-tag size="small">{{ current.case_count }} 条用例</el-tag>
+                <el-icon color="#409eff" :size="18"><MagicStick /></el-icon>
+                <span class="detail-task-name">{{ current.task_name }}</span>
+                <el-tag size="small" type="primary" effect="plain">{{ current.case_count }} 条用例</el-tag>
+                <el-tag v-if="current.parent_id" size="small" type="warning" effect="plain">增量更新版本</el-tag>
               </div>
-              <div class="download-btns">
-                <el-button
-                  type="primary"
-                  size="small"
-                  plain
-                  @click="openAddCase"
-                >
-                  <el-icon><Plus /></el-icon>
-                  新建用例
-                </el-button>
-                <el-button
-                  type="success"
-                  size="small"
-                  @click="openOptimizeDialog(current)"
-                  :loading="optimizing && optimizeTarget?.id === current.id"
-                >
-                  <el-icon><MagicStick /></el-icon>
-                  覆盖度优化
-                </el-button>
-                <el-button
-                  type="info"
-                  size="small"
-                  @click="showCoverage(current)"
-                  :loading="loadingCoverage && coverageTarget?.id === current.id"
-                >
-                  <el-icon><DataAnalysis /></el-icon>
-                  覆盖度分析
-                </el-button>
-                <el-button
-                  v-if="current.has_md"
-                  type="primary"
-                  size="small"
-                  @click="download(current.id, 'md')"
-                >
-                  <el-icon><Download /></el-icon>
-                  下载 Markdown
-                </el-button>
-                <el-button
-                  v-if="current.has_xmind"
-                  type="warning"
-                  size="small"
-                  @click="download(current.id, 'xmind')"
-                >
-                  <el-icon><Download /></el-icon>
-                  下载 XMind
-                </el-button>
+              <!-- 第二行：操作按钮分组 -->
+              <div class="detail-actions">
+                <!-- 编辑组 -->
+                <div class="btn-group">
+                  <el-button type="primary" size="small" plain @click="openAddCase">
+                    <el-icon><Plus /></el-icon>新建用例
+                  </el-button>
+                </div>
+                <!-- AI 操作组 -->
+                <div class="btn-group">
+                  <el-button type="warning" size="small" plain @click="openDiffDialog(current)">
+                    <el-icon><Refresh /></el-icon>文档变更更新
+                  </el-button>
+                  <el-button
+                    type="success" size="small"
+                    @click="openOptimizeDialog(current)"
+                    :loading="optimizing && optimizeTarget?.id === current.id"
+                  >
+                    <el-icon><MagicStick /></el-icon>覆盖度优化
+                  </el-button>
+                  <el-button
+                    type="info" size="small"
+                    @click="showCoverage(current)"
+                    :loading="loadingCoverage && coverageTarget?.id === current.id"
+                  >
+                    <el-icon><DataAnalysis /></el-icon>覆盖度分析
+                  </el-button>
+                </div>
+                <!-- 下载组 -->
+                <div class="btn-group" v-if="current.has_md || current.has_xmind">
+                  <el-button v-if="current.has_md" size="small" @click="download(current.id, 'md')">
+                    <el-icon><Download /></el-icon>MD
+                  </el-button>
+                  <el-button v-if="current.has_xmind" size="small" type="warning" plain @click="download(current.id, 'xmind')">
+                    <el-icon><Download /></el-icon>XMind
+                  </el-button>
+                </div>
               </div>
             </div>
           </template>
 
+          <!-- diff_summary 提示条 -->
+          <el-alert
+            v-if="current.diff_summary"
+            :title="`本版本变更：${current.diff_summary}`"
+            type="warning"
+            show-icon
+            :closable="false"
+            style="margin-bottom:12px"
+          />
+
           <div v-if="current.modules && current.modules.length" class="modules-preview">
-            <el-collapse v-model="openModules" accordion>
-              <el-collapse-item
-                v-for="(mod, mi) in current.modules"
-                :key="mi"
-                :name="mi"
-              >
-                <template #title>
-                  <div class="mod-title">
-                    <el-icon color="#67c23a"><FolderOpened /></el-icon>
-                    <span>{{ mod.name }}</span>
-                    <el-badge :value="mod.cases ? mod.cases.length : 0" type="primary" class="mod-badge" />
-                    <el-button
-                      v-if="selectedCases[mi] && selectedCases[mi].length > 0"
-                      size="small"
-                      type="danger"
-                      plain
-                      style="margin-left:10px"
-                      @click.stop="batchDeleteCases(mi, mod.name)"
-                    >
-                      <el-icon><Delete /></el-icon>
-                      删除选中 ({{ selectedCases[mi].length }})
-                    </el-button>
-                  </div>
-                </template>
-                <el-table
-                  :data="mod.cases || []"
-                  stripe
-                  size="small"
-                  style="width:100%"
-                  @selection-change="(rows) => onSelectionChange(mi, rows)"
+            <!-- 废弃用例开关 -->
+            <div class="modules-toolbar">
+              <span class="modules-stat">
+                共 {{ activeCaseCount }} 条有效用例
+                <span v-if="deprecatedCaseCount > 0" style="color:#909399">
+                  ，{{ deprecatedCaseCount }} 条已废弃
+                </span>
+              </span>
+              <el-switch
+                v-if="deprecatedCaseCount > 0"
+                v-model="showDeprecated"
+                active-text="显示废弃用例"
+                inactive-text=""
+                size="small"
+                style="margin-left:12px"
+              />
+            </div>
+
+            <el-collapse v-model="openModules">
+              <template v-for="(mod, mi) in current.modules" :key="mi">
+                <!-- 废弃模块：只在 showDeprecated=true 时显示，且样式不同 -->
+                <el-collapse-item
+                  v-if="!isDeprecatedModule(mod) || showDeprecated"
+                  :name="mi"
+                  :class="{ 'deprecated-module': isDeprecatedModule(mod) }"
                 >
-                  <el-table-column type="selection" width="40" />
-                  <el-table-column prop="id" label="编号" width="80" />
-                  <el-table-column prop="name" label="用例名称" min-width="180" show-overflow-tooltip />
-                  <el-table-column prop="priority" label="优先级" width="80">
-                    <template #default="{ row }">
+                  <template #title>
+                    <div class="mod-title">
+                      <el-icon :color="isDeprecatedModule(mod) ? '#c0c4cc' : '#67c23a'">
+                        <FolderOpened />
+                      </el-icon>
+                      <span :class="{ 'text-deprecated': isDeprecatedModule(mod) }">{{ mod.name }}</span>
                       <el-tag
-                        size="small"
-                        :type="row.priority === 'P0' ? 'danger' : row.priority === 'P1' ? 'warning' : 'info'"
-                      >{{ row.priority }}</el-tag>
-                    </template>
-                  </el-table-column>
-                  <el-table-column prop="type" label="类型" width="90" />
-                  <el-table-column prop="test_method" label="测试方法" width="110" show-overflow-tooltip>
-                    <template #default="{ row }">
-                      <el-tag v-if="row.test_method" size="small" type="success">{{ row.test_method }}</el-tag>
-                      <span v-else>-</span>
+                        v-if="isDeprecatedModule(mod)"
+                        size="small" type="danger" effect="plain"
+                        style="margin-left:6px"
+                      >已废弃</el-tag>
+                      <el-badge
+                        v-else
+                        :value="activeModCaseCount(mod)"
+                        :type="activeModCaseCount(mod) > 0 ? 'primary' : 'info'"
+                        class="mod-badge"
+                      />
+                      <el-button
+                        v-if="selectedCases[mi] && selectedCases[mi].length > 0"
+                        size="small" type="danger" plain
+                        style="margin-left:10px"
+                        @click.stop="batchDeleteCases(mi, mod.name)"
+                      >
+                        <el-icon><Delete /></el-icon>
+                        删除选中 ({{ selectedCases[mi].length }})
+                      </el-button>
+                    </div>
+                  </template>
+                  <el-table
+                    :data="visibleCases(mod)"
+                    stripe size="small" style="width:100%"
+                    :row-class-name="({ row }) => row.status === 'deprecated' ? 'row-deprecated' : ''"
+                    @selection-change="(rows) => onSelectionChange(mi, rows)"
+                  >
+                    <el-table-column type="selection" width="40" />
+                    <el-table-column prop="id" label="编号" width="80" />
+                    <el-table-column prop="name" label="用例名称" min-width="180" show-overflow-tooltip>
+                      <template #default="{ row }">
+                        <span :class="{ 'case-deprecated': row.status === 'deprecated' }">{{ row.name }}</span>
+                        <el-tag v-if="row.is_new" size="small" type="success" effect="dark" style="margin-left:4px">NEW</el-tag>
+                        <el-tag v-else-if="row.is_updated" size="small" type="warning" effect="dark" style="margin-left:4px">更新</el-tag>
+                        <el-tag v-else-if="row.status === 'deprecated'" size="small" type="danger" effect="plain" style="margin-left:4px">废弃</el-tag>
+                      </template>
+                    </el-table-column>
+                    <el-table-column prop="priority" label="优先级" width="80">
+                      <template #default="{ row }">
+                        <el-tag
+                          size="small"
+                          :type="row.priority === 'P0' ? 'danger' : row.priority === 'P1' ? 'warning' : 'info'"
+                        >{{ row.priority }}</el-tag>
+                      </template>
+                    </el-table-column>
+                    <el-table-column prop="type" label="类型" width="90" />
+                    <el-table-column prop="test_method" label="测试方法" width="110" show-overflow-tooltip>
+                      <template #default="{ row }">
+                        <el-tag v-if="row.test_method" size="small" type="success">{{ row.test_method }}</el-tag>
+                        <span v-else>-</span>
                     </template>
                   </el-table-column>
                   <el-table-column label="操作" width="140">
@@ -184,6 +235,7 @@
                   </el-table-column>
                 </el-table>
               </el-collapse-item>
+              </template>
             </el-collapse>
           </div>
           <el-empty v-else description="暂无用例数据" />
@@ -329,11 +381,20 @@
       </div>
 
       <template #footer>
-        <el-button @click="optimizeDialogVisible = false" :disabled="optimizing">取消</el-button>
+        <el-button
+          v-if="optimizing"
+          type="danger"
+          plain
+          @click="cancelOptimize"
+        >
+          取消优化
+        </el-button>
+        <el-button v-else @click="optimizeDialogVisible = false">取消</el-button>
         <el-button
           type="primary"
           :loading="optimizing"
           @click="doOptimize"
+          :disabled="optimizing"
         >
           {{ optimizing ? '优化中...' : '开始优化' }}
         </el-button>
@@ -414,13 +475,21 @@
           style="margin-top:8px"
         />
         <div style="font-size:11px;color:#909399;margin-top:6px;text-align:center">
-          大文件解析 + AI 生成约需 1-3 分钟，请勿关闭弹窗
+          大文件解析 + AI 生成约需 1-3 分钟，点「取消生成」可中止
         </div>
       </div>
 
       <template #footer>
-        <el-button @click="genDialogVisible = false" :disabled="generating">取消</el-button>
-        <el-button type="primary" :loading="generating" @click="doGenerate">
+        <el-button
+          v-if="generating"
+          type="danger"
+          plain
+          @click="cancelGenerate"
+        >
+          取消生成
+        </el-button>
+        <el-button v-else @click="genDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="generating" @click="doGenerate" :disabled="generating">
           {{ generating ? '生成中...' : '开始生成' }}
         </el-button>
       </template>
@@ -544,6 +613,190 @@
       </template>
     </el-dialog>
 
+    <!-- ============================================================
+         文档变更：Step-1 上传新文档 + Diff 预览对话框
+         ============================================================ -->
+    <el-dialog
+      v-model="diffDialogVisible"
+      title="文档变更 · 增量更新"
+      width="640px"
+      :close-on-click-modal="false"
+    >
+      <!-- Step 1: 上传新文档 -->
+      <div v-if="diffStep === 1">
+        <el-alert
+          title="上传新版需求文档后，AI 将自动对比变更范围，仅对发生变化的模块重新生成用例，未变更模块保留原有用例。"
+          type="info"
+          show-icon
+          :closable="false"
+          style="margin-bottom:16px"
+        />
+        <el-form label-width="80px">
+          <el-form-item label="需求来源">
+            <el-radio-group v-model="diffForm.sourceType">
+              <el-radio value="file">上传文档</el-radio>
+              <el-radio value="text">手动输入</el-radio>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item v-if="diffForm.sourceType === 'file'" label="新文档">
+            <el-upload
+              ref="diffUploadRef"
+              :auto-upload="false"
+              :limit="1"
+              :on-change="handleDiffFileChange"
+              :on-remove="() => { diffForm.document_path = ''; diffUploadedFile = null }"
+              accept=".pdf,.docx,.doc,.xlsx,.xls,.txt,.md,.html,.htm,.csv,.json,.pptx"
+              drag
+            >
+              <el-icon size="40" color="#c0c4cc"><UploadFilled /></el-icon>
+              <div style="font-size:14px;color:#606266;margin-top:8px">
+                拖拽新版文档到此处，或 <em style="color:#409eff">点击上传</em>
+              </div>
+            </el-upload>
+            <el-alert v-if="diffUploadError" :title="diffUploadError" type="error" show-icon :closable="false" style="margin-top:8px" />
+          </el-form-item>
+          <el-form-item v-else label="新文档内容">
+            <el-input
+              v-model="diffForm.content"
+              type="textarea"
+              :rows="8"
+              placeholder="粘贴新版需求文档内容..."
+            />
+          </el-form-item>
+        </el-form>
+
+        <!-- Diff 分析进度 -->
+        <div v-if="diffChecking" class="generating-tip">
+          <div class="gen-progress-header">
+            <el-icon class="spin"><Loading /></el-icon>
+            <span class="gen-stage-text">AI 正在对比文档差异，请稍候...</span>
+          </div>
+          <el-progress :percentage="50" status="striped" striped striped-flow :duration="4" :show-text="false" style="margin-top:8px" />
+        </div>
+      </div>
+
+      <!-- Step 2: Diff 结果预览 -->
+      <div v-else-if="diffStep === 2 && diffResult">
+        <el-alert
+          :title="diffResult.diff_summary || '需求文档已变更'"
+          :type="diffResult.impact_level === 'high' ? 'error' : diffResult.impact_level === 'medium' ? 'warning' : 'info'"
+          show-icon
+          :closable="false"
+          style="margin-bottom:14px"
+        />
+
+        <el-row :gutter="12" style="margin-bottom:12px">
+          <el-col :span="6">
+            <div class="diff-stat-box diff-changed">
+              <div class="diff-stat-num">{{ diffResult.changed?.length || 0 }}</div>
+              <div class="diff-stat-label">变更模块</div>
+            </div>
+          </el-col>
+          <el-col :span="6">
+            <div class="diff-stat-box diff-added">
+              <div class="diff-stat-num">{{ diffResult.added?.length || 0 }}</div>
+              <div class="diff-stat-label">新增模块</div>
+            </div>
+          </el-col>
+          <el-col :span="6">
+            <div class="diff-stat-box diff-removed">
+              <div class="diff-stat-num">{{ diffResult.removed?.length || 0 }}</div>
+              <div class="diff-stat-label">删除模块</div>
+            </div>
+          </el-col>
+          <el-col :span="6">
+            <div class="diff-stat-box diff-unchanged">
+              <div class="diff-stat-num">{{ diffResult.unchanged?.length || 0 }}</div>
+              <div class="diff-stat-label">未变更</div>
+            </div>
+          </el-col>
+        </el-row>
+
+        <el-collapse>
+          <el-collapse-item v-if="diffResult.changed?.length" name="changed">
+            <template #title>
+              <el-icon color="#e6a23c"><Warning /></el-icon>
+              <span style="margin-left:6px;font-weight:600">变更模块（将重新生成用例）</span>
+            </template>
+            <div v-for="m in diffResult.changed" :key="m.module" class="diff-module-row diff-changed-row">
+              <strong>{{ m.module }}</strong>：{{ m.summary }}
+            </div>
+          </el-collapse-item>
+          <el-collapse-item v-if="diffResult.added?.length" name="added">
+            <template #title>
+              <el-icon color="#67c23a"><CircleCheck /></el-icon>
+              <span style="margin-left:6px;font-weight:600">新增模块（将生成全新用例）</span>
+            </template>
+            <div v-for="m in diffResult.added" :key="m.module" class="diff-module-row diff-added-row">
+              <strong>{{ m.module }}</strong>：{{ m.summary }}
+            </div>
+          </el-collapse-item>
+          <el-collapse-item v-if="diffResult.removed?.length" name="removed">
+            <template #title>
+              <el-icon color="#f56c6c"><CircleClose /></el-icon>
+              <span style="margin-left:6px;font-weight:600">删除模块（旧用例将标记废弃）</span>
+            </template>
+            <div v-for="name in diffResult.removed" :key="name" class="diff-module-row diff-removed-row">
+              {{ name }}
+            </div>
+          </el-collapse-item>
+          <el-collapse-item v-if="diffResult.unchanged?.length" name="unchanged">
+            <template #title>
+              <el-icon color="#909399"><Document /></el-icon>
+              <span style="margin-left:6px;font-weight:600">未变更模块（直接保留）</span>
+            </template>
+            <div v-for="name in diffResult.unchanged" :key="name" class="diff-module-row">
+              {{ name }}
+            </div>
+          </el-collapse-item>
+        </el-collapse>
+
+        <!-- 增量更新进度 -->
+        <div v-if="incrementalUpdating" class="generating-tip" style="margin-top:14px">
+          <div class="gen-progress-header">
+            <el-icon class="spin"><Loading /></el-icon>
+            <span class="gen-stage-text">{{ genStage }}</span>
+            <span class="gen-pct">{{ genPercent }}%</span>
+          </div>
+          <el-progress
+            :percentage="genPercent"
+            :stroke-width="10"
+            :show-text="false"
+            status="striped"
+            striped
+            striped-flow
+            :duration="6"
+            style="margin-top:8px"
+          />
+          <div style="font-size:11px;color:#909399;margin-top:6px;text-align:center">
+            仅重生成变更模块，速度比全量生成快
+          </div>
+        </div>
+      </div>
+
+      <template #footer>
+        <!-- Step 1 -->
+        <template v-if="diffStep === 1">
+          <el-button @click="diffDialogVisible = false" :disabled="diffChecking">取消</el-button>
+          <el-button type="primary" :loading="diffChecking" @click="doDiffCheck">
+            {{ diffChecking ? '分析中...' : '分析变更范围' }}
+          </el-button>
+        </template>
+        <!-- Step 2 -->
+        <template v-else-if="diffStep === 2">
+          <el-button @click="diffStep = 1" :disabled="incrementalUpdating">重新上传</el-button>
+          <el-button @click="diffDialogVisible = false" :disabled="incrementalUpdating">取消</el-button>
+          <el-button
+            type="warning"
+            :loading="incrementalUpdating"
+            @click="doIncrementalUpdate"
+          >
+            {{ incrementalUpdating ? '更新中...' : '确认增量更新' }}
+          </el-button>
+        </template>
+      </template>
+    </el-dialog>
+
   </div>
 </template>
 
@@ -551,6 +804,147 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { aiCaseApi, documentApi } from '../api'
+
+// ============================================================
+// Diff / 增量更新状态
+// ============================================================
+const diffDialogVisible  = ref(false)
+const diffStep           = ref(1)           // 1=上传 2=预览
+const diffChecking       = ref(false)       // Diff 分析中
+const incrementalUpdating = ref(false)      // 增量更新中
+const diffResult         = ref(null)        // analyze_document_diff 返回
+const diffUploadRef      = ref(null)
+const diffUploadedFile   = ref(null)
+const diffUploadError    = ref('')
+const diffTarget         = ref(null)        // 正在操作哪条记录
+const diffNewContent     = ref('')          // 解析后的新文档文本
+
+const diffForm = ref({
+  sourceType: 'file',
+  document_path: '',
+  content: '',
+})
+
+const handleDiffFileChange = (file) => {
+  const maxMB = 20
+  const ext = '.' + file.name.split('.').pop().toLowerCase()
+  const allowed = new Set(['.pdf','.docx','.doc','.xlsx','.xls','.txt','.md','.html','.htm','.csv','.json','.pptx'])
+  if (!allowed.has(ext)) {
+    diffUploadError.value = `不支持的格式 ${ext}`
+    diffUploadRef.value?.clearFiles()
+    return
+  }
+  if (file.size > maxMB * 1024 * 1024) {
+    diffUploadError.value = `文件超过 ${maxMB}MB`
+    diffUploadRef.value?.clearFiles()
+    return
+  }
+  diffUploadError.value = ''
+  diffUploadedFile.value = file.raw
+}
+
+const openDiffDialog = (r) => {
+  diffTarget.value = r
+  diffStep.value = 1
+  diffResult.value = null
+  diffNewContent.value = ''
+  diffUploadedFile.value = null
+  diffUploadError.value = ''
+  diffForm.value = { sourceType: 'file', document_path: '', content: '' }
+  diffDialogVisible.value = true
+}
+
+/** Step-1：上传文档 + 调 diff-check 接口 */
+const doDiffCheck = async () => {
+  if (!diffTarget.value) return
+
+  let docPath = ''
+  let inlineContent = ''
+
+  if (diffForm.value.sourceType === 'file') {
+    if (!diffUploadedFile.value) {
+      ElMessage.warning('请先上传新版需求文档')
+      return
+    }
+    diffChecking.value = true
+    try {
+      const uploadResult = await documentApi.upload(diffUploadedFile.value)
+      docPath = uploadResult.file_path || uploadResult.path || ''
+    } catch (e) {
+      ElMessage.error('文档上传失败: ' + (e.response?.data?.detail || e.message))
+      diffChecking.value = false
+      return
+    }
+  } else {
+    inlineContent = diffForm.value.content
+    if (!inlineContent.trim()) {
+      ElMessage.warning('请输入新版需求文档内容')
+      return
+    }
+    diffChecking.value = true
+  }
+
+  try {
+    const res = await aiCaseApi.diffCheck(diffTarget.value.id, {
+      new_document_path: docPath || undefined,
+      new_content: inlineContent || undefined,
+    })
+
+    if (!res.has_change) {
+      ElMessage.info(res.message || '文档内容未发生变化，无需更新用例')
+      diffDialogVisible.value = false
+      return
+    }
+
+    // 无旧文档内容时后端会返回 diff=null，提示直接重新生成
+    if (!res.diff) {
+      ElMessage.warning(res.message || '旧版文档内容未保存，建议直接重新生成')
+      diffDialogVisible.value = false
+      return
+    }
+
+    // 保存新文档内容，用于后续增量更新
+    diffNewContent.value = inlineContent || ''
+    diffForm.value.document_path = docPath
+    diffResult.value = res.diff
+    diffStep.value = 2
+  } catch (e) {
+    ElMessage.error('Diff 分析失败: ' + (e.response?.data?.detail || e.message))
+  } finally {
+    diffChecking.value = false
+  }
+}
+
+/** Step-2：确认增量更新 */
+const doIncrementalUpdate = async () => {
+  if (!diffTarget.value || !diffResult.value) return
+  incrementalUpdating.value = true
+  genPercent.value = 0
+  genStage.value = '正在连接 AI...'
+  connectGenWS()
+  try {
+    const payload = {
+      diff: diffResult.value,
+      ...(diffForm.value.document_path
+        ? { new_document_path: diffForm.value.document_path }
+        : { new_content: diffNewContent.value || diffForm.value.content }),
+    }
+    const result = await aiCaseApi.incrementalUpdate(diffTarget.value.id, payload)
+    genPercent.value = 100
+    genStage.value = `增量更新完成！共 ${result.case_count} 条有效用例`
+    await new Promise(r => setTimeout(r, 600))
+    ElMessage.success(`增量更新成功！共 ${result.case_count} 条有效用例`)
+    diffDialogVisible.value = false
+    await fetchRecords()
+    const found = records.value.find(r => r.id === result.id)
+    if (found) current.value = found
+  } catch (e) {
+    ElMessage.error('增量更新失败: ' + (e.response?.data?.detail || e.message))
+  } finally {
+    incrementalUpdating.value = false
+    disconnectGenWS()
+  }
+}
 
 const records = ref([])
 const current = ref(null)
@@ -563,6 +957,42 @@ const coverageTarget = ref(null)
 const loadingCoverage = ref(false)
 
 const scoreColor = (s) => s >= 70 ? '#67c23a' : s >= 40 ? '#e6a23c' : '#f56c6c'
+
+// ── 废弃用例显示控制 ──────────────────────────────────────────────────
+const showDeprecated = ref(false)   // 默认隐藏废弃用例
+
+/** 判断整个模块是否全部废弃（所有用例都有 status=deprecated） */
+const isDeprecatedModule = (mod) => {
+  const cases = mod.cases || []
+  return cases.length > 0 && cases.every(c => c.status === 'deprecated')
+}
+
+/** 模块内有效（非废弃）用例数 */
+const activeModCaseCount = (mod) => {
+  return (mod.cases || []).filter(c => c.status !== 'deprecated').length
+}
+
+/** 根据 showDeprecated 过滤模块内用例 */
+const visibleCases = (mod) => {
+  if (showDeprecated.value) return mod.cases || []
+  return (mod.cases || []).filter(c => c.status !== 'deprecated')
+}
+
+/** 当前记录有效用例总数 */
+const activeCaseCount = computed(() => {
+  if (!current.value?.modules) return 0
+  return current.value.modules.reduce((sum, mod) => {
+    return sum + (mod.cases || []).filter(c => c.status !== 'deprecated').length
+  }, 0)
+})
+
+/** 当前记录废弃用例总数 */
+const deprecatedCaseCount = computed(() => {
+  if (!current.value?.modules) return 0
+  return current.value.modules.reduce((sum, mod) => {
+    return sum + (mod.cases || []).filter(c => c.status === 'deprecated').length
+  }, 0)
+})
 
 const showCoverage = async (r) => {
   coverageTarget.value = r
@@ -596,6 +1026,22 @@ const genForm = ref({
 const genRules = {
   task_name: [{ required: true, message: '请输入任务名称', trigger: 'blur' }],
   content: [{ required: false }],
+}
+
+// 用于取消正在进行的 AI 请求
+let _genAbortController = null
+
+const cancelGenerate = () => {
+  if (_genAbortController) {
+    _genAbortController.abort()
+    _genAbortController = null
+  }
+  generating.value = false
+  genPercent.value = 0
+  genStage.value = '准备中...'
+  disconnectGenWS()
+  ElMessage.info('已取消生成')
+  genDialogVisible.value = false
 }
 
 // 用例详情
@@ -710,6 +1156,7 @@ const doGenerate = async () => {
   generating.value = true
   genPercent.value = 0
   genStage.value = '准备中...'
+  _genAbortController = new AbortController()
   connectGenWS()
 
   try {
@@ -735,7 +1182,7 @@ const doGenerate = async () => {
         : { content: genForm.value.content }),
     }
 
-    const result = await aiCaseApi.generate(payload)
+    const result = await aiCaseApi.generate(payload, _genAbortController.signal)
     genPercent.value = 100
     genStage.value = `完成！共 ${result.case_count} 条用例`
     await new Promise(r => setTimeout(r, 600))
@@ -745,10 +1192,13 @@ const doGenerate = async () => {
     const found = records.value.find(r => r.id === result.id)
     if (found) current.value = found
   } catch (e) {
+    // AbortError 是用户主动取消，不显示错误
+    if (e.name === 'CanceledError' || e.name === 'AbortError' || e.code === 'ERR_CANCELED') return
     const msg = e.response?.data?.detail || e.message || '生成失败'
     ElMessage.error(msg)
   } finally {
     generating.value = false
+    _genAbortController = null
     disconnectGenWS()
   }
 }
@@ -765,14 +1215,30 @@ const openOptimizeDialog = (r) => {
   optimizeDialogVisible.value = true
 }
 
+let _optAbortController = null
+
+const cancelOptimize = () => {
+  if (_optAbortController) {
+    _optAbortController.abort()
+    _optAbortController = null
+  }
+  optimizing.value = false
+  genPercent.value = 0
+  genStage.value = '准备中...'
+  disconnectGenWS()
+  ElMessage.info('已取消优化')
+  optimizeDialogVisible.value = false
+}
+
 const doOptimize = async () => {
   if (!optimizeTarget.value) return
   optimizing.value = true
   genPercent.value = 0
   genStage.value = '正在连接 AI...'
+  _optAbortController = new AbortController()
   connectGenWS()
   try {
-    const result = await aiCaseApi.optimize(optimizeTarget.value.id)
+    const result = await aiCaseApi.optimize(optimizeTarget.value.id, _optAbortController.signal)
     genPercent.value = 100
     genStage.value = `优化完成！共 ${result.case_count} 条用例`
     await new Promise(r => setTimeout(r, 600))
@@ -783,10 +1249,12 @@ const doOptimize = async () => {
     const found = records.value.find(r => r.id === result.id)
     if (found) current.value = found
   } catch (e) {
+    if (e.name === 'CanceledError' || e.name === 'AbortError' || e.code === 'ERR_CANCELED') return
     const msg = e.response?.data?.detail || e.message || '优化失败'
     ElMessage.error(msg)
   } finally {
     optimizing.value = false
+    _optAbortController = null
     disconnectGenWS()
   }
 }
@@ -1012,9 +1480,62 @@ onUnmounted(disconnectGenWS)
 .record-count { font-size: 12px; color: #409eff; }
 .record-date { font-size: 12px; color: #909399; margin-left: auto; }
 
-/* 右侧详情 */
-.detail-title { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 600; }
-.download-btns { display: flex; gap: 8px; }
+/* 模块统计工具栏 */
+.modules-toolbar {
+  display: flex;
+  align-items: center;
+  padding: 6px 4px 10px;
+  font-size: 13px;
+  color: #606266;
+}
+.modules-stat { flex: 1; }
+
+/* 废弃模块折叠项整体置灰 */
+.deprecated-module { opacity: 0.65; }
+.text-deprecated { text-decoration: line-through; color: #c0c4cc; }
+
+/* 废弃行背景 */
+:deep(.row-deprecated td) {
+  background: #fafafa !important;
+  color: #c0c4cc;
+}
+
+/* 右侧详情头：两行布局 */
+.detail-header {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.detail-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+.detail-task-name {
+  font-size: 15px;
+  color: #303133;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 400px;
+}
+.detail-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.btn-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.btn-group + .btn-group {
+  padding-left: 12px;
+  border-left: 1px solid #e4e7ed;
+}
 .modules-preview { max-height: 560px; overflow-y: auto; }
 .mod-title { display: flex; align-items: center; gap: 8px; font-weight: 600; }
 .mod-badge { margin-left: 4px; }
@@ -1073,4 +1594,31 @@ onUnmounted(disconnectGenWS)
   border-radius: 4px; padding: 10px 14px;
   font-size: 13px; color: #67c23a;
 }
+/* 用例变更标记 */
+.case-deprecated { text-decoration: line-through; color: #c0c4cc; }
+
+/* Diff 统计卡片 */
+.diff-stat-box {
+  text-align: center;
+  padding: 10px 6px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+}
+.diff-stat-num  { font-size: 24px; font-weight: 700; }
+.diff-stat-label { font-size: 12px; margin-top: 2px; }
+.diff-changed   { background: #fdf6ec; border-color: #f5dab1; color: #e6a23c; }
+.diff-added     { background: #f0f9eb; border-color: #b3e19d; color: #67c23a; }
+.diff-removed   { background: #fef0f0; border-color: #fbc4c4; color: #f56c6c; }
+.diff-unchanged { background: #f5f7fa; border-color: #dcdfe6; color: #909399; }
+
+/* Diff 模块列表行 */
+.diff-module-row {
+  padding: 5px 8px;
+  font-size: 13px;
+  border-radius: 4px;
+  margin-bottom: 4px;
+}
+.diff-changed-row  { background: #fdf6ec; }
+.diff-added-row    { background: #f0f9eb; }
+.diff-removed-row  { background: #fef0f0; text-decoration: line-through; color: #c0c4cc; }
 </style>

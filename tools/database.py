@@ -32,6 +32,12 @@ class TestTask(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+    # ── 需求文档快照（用于文档变更后的 Diff 分析） ─────────────────────────
+    # 上次解析的需求文档文本（截断保存前 20000 字），供 incremental-update 对比
+    doc_snapshot = Column(Text, nullable=True)
+    # 上次解析文档的 MD5 哈希（16位），快速判断文档是否变更
+    doc_hash = Column(String(64), nullable=True)
+
 
 class TestCase(Base):
     __tablename__ = "test_cases"
@@ -45,7 +51,8 @@ class TestCase(Base):
     steps = Column(Text)
     expected_results = Column(Text)
     element_selector = Column(String(512), nullable=True, default="")
-    enabled = Column(Boolean, default=True)
+    enabled = Column(Boolean, default=True)       # 用户手动启用/禁用（禁用不执行但用例有效）
+    deprecated = Column(Boolean, default=False)   # 需求变更废弃（不参与执行和覆盖率统计）
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -93,6 +100,18 @@ class AICaseFile(Base):
     xmind_path = Column(String(512), nullable=True)
     cases_data = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    # ── 文档变更追踪字段 ────────────────────────────────────────────────
+    # 需求文档内容的 MD5 哈希，用于检测文档是否发生变更
+    doc_hash = Column(String(64), nullable=True, index=True)
+    # 需求文档原始文本（用于后续 Diff 分析，截断保存前 20000 字）
+    doc_content = Column(Text, nullable=True)
+    # 上一版本的 AICaseFile.id；初次生成时为 None，增量更新后指向父版本
+    parent_id = Column(Integer, nullable=True, index=True)
+    # 本次相对上一版本的变更摘要（AI 生成的一句话描述）
+    diff_summary = Column(Text, nullable=True)
+    # 记录状态：active（当前有效版本） / deprecated（已被新版本替代）
+    record_status = Column(String(20), default="active", nullable=False)
 
 
 class User(Base):
@@ -264,6 +283,17 @@ async def init_database():
             "ALTER TABLE test_plans ADD COLUMN proxy_url VARCHAR(512) DEFAULT ''",
             "ALTER TABLE test_plans ADD COLUMN hosts_map TEXT DEFAULT ''",
             "ALTER TABLE test_plan_reports ADD COLUMN analysis TEXT",
+            # ai_case_files 文档变更追踪字段（兼容旧库）
+            "ALTER TABLE ai_case_files ADD COLUMN doc_hash VARCHAR(64)",
+            "ALTER TABLE ai_case_files ADD COLUMN doc_content TEXT",
+            "ALTER TABLE ai_case_files ADD COLUMN parent_id INTEGER",
+            "ALTER TABLE ai_case_files ADD COLUMN diff_summary TEXT",
+            "ALTER TABLE ai_case_files ADD COLUMN record_status VARCHAR(20) DEFAULT 'active'",
+            # test_tasks 文档快照字段（兼容旧库）
+            "ALTER TABLE test_tasks ADD COLUMN doc_snapshot TEXT",
+            "ALTER TABLE test_tasks ADD COLUMN doc_hash VARCHAR(64)",
+            # test_cases 废弃字段（兼容旧库）
+            "ALTER TABLE test_cases ADD COLUMN deprecated BOOLEAN DEFAULT 0",
         ]:
             try:
                 await conn.execute(__import__('sqlalchemy').text(ddl))

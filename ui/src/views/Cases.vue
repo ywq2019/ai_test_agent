@@ -17,6 +17,9 @@
             <el-button type="success" @click="generateCases" :loading="generating">
               <el-icon><MagicStick /></el-icon>AI生成用例
             </el-button>
+            <el-button type="warning" @click="openDocDiffDialog" :disabled="!filterTaskId">
+              <el-icon><Refresh /></el-icon>文档变更更新
+            </el-button>
             <el-button type="warning" @click="optimizeCases" :loading="optimizing" :disabled="!filterTaskId">
               <el-icon><Cpu /></el-icon>优化用例
             </el-button>
@@ -39,7 +42,14 @@
       <el-table ref="tableRef" :data="filteredCases" stripe style="width: 100%" @selection-change="handleSelectionChange">
         <el-table-column type="selection" width="50" />
         <el-table-column prop="id" label="ID" width="70" />
-        <el-table-column prop="name" label="用例名称" min-width="150" show-overflow-tooltip />
+        <el-table-column prop="name" label="用例名称" min-width="150" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span :class="{ 'case-deprecated': row.deprecated }">{{ row.name }}</span>
+            <el-tag v-if="row.deprecated" size="small" type="danger" effect="plain" style="margin-left:4px">废弃</el-tag>
+            <el-tag v-else-if="row.is_new" size="small" type="success" effect="dark" style="margin-left:4px">NEW</el-tag>
+            <el-tag v-else-if="row.is_updated" size="small" type="warning" effect="dark" style="margin-left:4px">更新</el-tag>
+          </template>
+        </el-table-column>
         <el-table-column prop="module" label="模块" width="120" show-overflow-tooltip />
         <el-table-column prop="priority" label="优先级" width="80">
           <template #default="{ row }">
@@ -48,9 +58,10 @@
         </el-table-column>
         <el-table-column prop="steps" label="测试步骤" min-width="200" show-overflow-tooltip />
         <el-table-column prop="expected_results" label="预期结果" min-width="150" show-overflow-tooltip />
-        <el-table-column prop="enabled" label="状态" width="80">
+        <el-table-column prop="enabled" label="状态" width="90">
           <template #default="{ row }">
-            <el-tag :type="row.enabled ? 'success' : 'info'" size="small">{{ row.enabled ? '启用' : '禁用' }}</el-tag>
+            <el-tag v-if="row.deprecated" type="danger" size="small" effect="plain">已废弃</el-tag>
+            <el-tag v-else :type="row.enabled ? 'success' : 'info'" size="small">{{ row.enabled ? '启用' : '禁用' }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="168" fixed="right" align="center">
@@ -200,6 +211,156 @@
         <el-button type="primary" @click="saveCase" :loading="saving">保存</el-button>
       </template>
     </el-dialog>
+
+    <!-- ============================================================
+         文档变更 · 增量更新（两步 Dialog）
+         ============================================================ -->
+    <el-dialog
+      v-model="docDiffDialogVisible"
+      title="文档变更 · 增量更新"
+      width="640px"
+      :close-on-click-modal="false"
+    >
+      <!-- Step 1: 上传新文档 -->
+      <div v-if="docDiffStep === 1">
+        <el-alert
+          title="上传新版需求文档后，AI 将自动对比变更范围，仅对发生变化的模块重新生成用例，未变更模块保留原有用例。"
+          type="info"
+          show-icon
+          :closable="false"
+          style="margin-bottom:16px"
+        />
+        <el-form label-width="80px">
+          <el-form-item label="需求来源">
+            <el-radio-group v-model="docDiffForm.sourceType">
+              <el-radio value="file">上传文档</el-radio>
+              <el-radio value="text">手动输入</el-radio>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item v-if="docDiffForm.sourceType === 'file'" label="新文档">
+            <el-upload
+              ref="docDiffUploadRef"
+              :auto-upload="false"
+              :limit="1"
+              :on-change="handleDocDiffFileChange"
+              :on-remove="() => { docDiffUploadedFile = null; docDiffUploadError = '' }"
+              accept=".pdf,.docx,.doc,.xlsx,.xls,.txt,.md,.html,.htm,.csv,.json,.pptx"
+              drag
+            >
+              <el-icon size="40" color="#c0c4cc"><UploadFilled /></el-icon>
+              <div style="font-size:14px;color:#606266;margin-top:8px">
+                拖拽新版文档到此处，或 <em style="color:#409eff">点击上传</em>
+              </div>
+            </el-upload>
+            <el-alert v-if="docDiffUploadError" :title="docDiffUploadError" type="error" show-icon :closable="false" style="margin-top:8px" />
+          </el-form-item>
+          <el-form-item v-else label="新文档内容">
+            <el-input v-model="docDiffForm.content" type="textarea" :rows="8" placeholder="粘贴新版需求文档内容..." />
+          </el-form-item>
+          <el-form-item label="页面元素">
+            <el-checkbox v-model="docDiffForm.reparseElements">同时重新抓取页面元素（页面 UI 也发生了变化时勾选）</el-checkbox>
+          </el-form-item>
+        </el-form>
+        <div v-if="docDiffChecking" class="progress-body" style="margin-top:12px">
+          <el-progress :percentage="50" status="striped" striped striped-flow :duration="4" :show-text="false" />
+          <p class="progress-stage">AI 正在对比文档差异，请稍候...</p>
+        </div>
+      </div>
+
+      <!-- Step 2: Diff 预览 + 确认 -->
+      <div v-else-if="docDiffStep === 2 && docDiffResult">
+        <el-alert
+          :title="docDiffResult.diff_summary || '需求文档已变更'"
+          :type="docDiffResult.impact_level === 'high' ? 'error' : docDiffResult.impact_level === 'medium' ? 'warning' : 'info'"
+          show-icon
+          :closable="false"
+          style="margin-bottom:14px"
+        />
+        <el-row :gutter="12" style="margin-bottom:12px">
+          <el-col :span="6">
+            <div class="diff-stat-box diff-changed">
+              <div class="diff-stat-num">{{ docDiffResult.changed?.length || 0 }}</div>
+              <div class="diff-stat-label">变更模块</div>
+            </div>
+          </el-col>
+          <el-col :span="6">
+            <div class="diff-stat-box diff-added">
+              <div class="diff-stat-num">{{ docDiffResult.added?.length || 0 }}</div>
+              <div class="diff-stat-label">新增模块</div>
+            </div>
+          </el-col>
+          <el-col :span="6">
+            <div class="diff-stat-box diff-removed">
+              <div class="diff-stat-num">{{ docDiffResult.removed?.length || 0 }}</div>
+              <div class="diff-stat-label">删除模块</div>
+            </div>
+          </el-col>
+          <el-col :span="6">
+            <div class="diff-stat-box diff-unchanged">
+              <div class="diff-stat-num">{{ docDiffResult.unchanged?.length || 0 }}</div>
+              <div class="diff-stat-label">未变更</div>
+            </div>
+          </el-col>
+        </el-row>
+
+        <el-collapse>
+          <el-collapse-item v-if="docDiffResult.changed?.length" name="changed">
+            <template #title>
+              <el-icon color="#e6a23c"><Warning /></el-icon>
+              <span style="margin-left:6px;font-weight:600">变更模块（将重新生成用例）</span>
+            </template>
+            <div v-for="m in docDiffResult.changed" :key="m.module" class="diff-module-row diff-changed-row">
+              <strong>{{ m.module }}</strong>：{{ m.summary }}
+            </div>
+          </el-collapse-item>
+          <el-collapse-item v-if="docDiffResult.added?.length" name="added">
+            <template #title>
+              <el-icon color="#67c23a"><CircleCheck /></el-icon>
+              <span style="margin-left:6px;font-weight:600">新增模块（将生成全新用例）</span>
+            </template>
+            <div v-for="m in docDiffResult.added" :key="m.module" class="diff-module-row diff-added-row">
+              <strong>{{ m.module }}</strong>：{{ m.summary }}
+            </div>
+          </el-collapse-item>
+          <el-collapse-item v-if="docDiffResult.removed?.length" name="removed">
+            <template #title>
+              <el-icon color="#f56c6c"><CircleClose /></el-icon>
+              <span style="margin-left:6px;font-weight:600">删除模块（旧用例将禁用）</span>
+            </template>
+            <div v-for="name in docDiffResult.removed" :key="name" class="diff-module-row diff-removed-row">{{ name }}</div>
+          </el-collapse-item>
+          <el-collapse-item v-if="docDiffResult.unchanged?.length" name="unchanged">
+            <template #title>
+              <el-icon color="#909399"><Document /></el-icon>
+              <span style="margin-left:6px;font-weight:600">未变更模块（直接保留）</span>
+            </template>
+            <div v-for="name in docDiffResult.unchanged" :key="name" class="diff-module-row">{{ name }}</div>
+          </el-collapse-item>
+        </el-collapse>
+
+        <div v-if="docDiffUpdating" class="progress-body" style="margin-top:14px">
+          <el-progress :percentage="progressPct" :stroke-width="10" :show-text="false"
+            status="striped" striped striped-flow :duration="6" />
+          <p class="progress-stage">{{ progressStage }}</p>
+        </div>
+      </div>
+
+      <template #footer>
+        <template v-if="docDiffStep === 1">
+          <el-button @click="docDiffDialogVisible = false" :disabled="docDiffChecking">取消</el-button>
+          <el-button type="primary" :loading="docDiffChecking" @click="doDocDiffCheck">
+            {{ docDiffChecking ? '分析中...' : '分析变更范围' }}
+          </el-button>
+        </template>
+        <template v-else-if="docDiffStep === 2">
+          <el-button @click="docDiffStep = 1" :disabled="docDiffUpdating">重新上传</el-button>
+          <el-button @click="docDiffDialogVisible = false" :disabled="docDiffUpdating">取消</el-button>
+          <el-button type="warning" :loading="docDiffUpdating" @click="doDocIncrementalUpdate">
+            {{ docDiffUpdating ? '更新中...' : '确认增量更新' }}
+          </el-button>
+        </template>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -207,7 +368,7 @@
 import { ref, reactive, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useTaskStore } from '../stores/task'
-import { caseApi } from '../api/index'
+import { caseApi, documentApi } from '../api/index'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 const route = useRoute()
@@ -456,6 +617,142 @@ const resetForm = () => {
   caseForm.preconditions = ''; caseForm.steps = ''; caseForm.expected_results = ''
   caseForm.enabled = true; editingCase.value = null
 }
+
+// ══════════════════════════════════════════════════════════════════
+// 文档变更 · 增量更新
+// ══════════════════════════════════════════════════════════════════
+const docDiffDialogVisible = ref(false)
+const docDiffStep          = ref(1)
+const docDiffChecking      = ref(false)
+const docDiffUpdating      = ref(false)
+const docDiffResult        = ref(null)
+const docDiffUploadRef     = ref(null)
+const docDiffUploadedFile  = ref(null)
+const docDiffUploadError   = ref('')
+const docDiffNewContent    = ref('')   // 保留解析后的文本供后续步骤使用
+
+const docDiffForm = reactive({
+  sourceType:      'file',
+  content:         '',
+  reparseElements: false,
+})
+
+const handleDocDiffFileChange = (file) => {
+  const maxMB = 20
+  const ext = '.' + file.name.split('.').pop().toLowerCase()
+  const allowed = new Set(['.pdf','.docx','.doc','.xlsx','.xls','.txt','.md','.html','.htm','.csv','.json','.pptx'])
+  if (!allowed.has(ext)) {
+    docDiffUploadError.value = `不支持的格式 ${ext}`
+    docDiffUploadRef.value?.clearFiles()
+    return
+  }
+  if (file.size > maxMB * 1024 * 1024) {
+    docDiffUploadError.value = `文件超过 ${maxMB}MB`
+    docDiffUploadRef.value?.clearFiles()
+    return
+  }
+  docDiffUploadError.value = ''
+  docDiffUploadedFile.value = file.raw
+}
+
+const openDocDiffDialog = () => {
+  if (!filterTaskId.value) { ElMessage.warning('请先选择任务'); return }
+  docDiffStep.value          = 1
+  docDiffResult.value        = null
+  docDiffNewContent.value    = ''
+  docDiffUploadedFile.value  = null
+  docDiffUploadError.value   = ''
+  docDiffForm.sourceType     = 'file'
+  docDiffForm.content        = ''
+  docDiffForm.reparseElements = false
+  docDiffDialogVisible.value = true
+}
+
+/** Step-1：上传文档并调 diff-check 接口 */
+const doDocDiffCheck = async () => {
+  let docPath = ''
+  let inlineContent = ''
+
+  if (docDiffForm.sourceType === 'file') {
+    if (!docDiffUploadedFile.value) { ElMessage.warning('请先上传新版需求文档'); return }
+    docDiffChecking.value = true
+    try {
+      const uploadResult = await documentApi.upload(docDiffUploadedFile.value)
+      docPath = uploadResult.file_path || uploadResult.path || ''
+    } catch (e) {
+      ElMessage.error('文档上传失败: ' + (e.response?.data?.detail || e.message))
+      docDiffChecking.value = false
+      return
+    }
+  } else {
+    inlineContent = docDiffForm.content
+    if (!inlineContent.trim()) { ElMessage.warning('请输入新版需求文档内容'); return }
+    docDiffChecking.value = true
+  }
+
+  try {
+    const res = await caseApi.docDiffCheck(filterTaskId.value, {
+      new_document_path: docPath || undefined,
+      new_content:       inlineContent || undefined,
+    })
+
+    if (!res.has_change) {
+      ElMessage.info(res.message || '文档内容未发生变化，无需更新用例')
+      docDiffDialogVisible.value = false
+      return
+    }
+
+    if (!res.diff) {
+      ElMessage.warning(res.message || '旧版文档快照未保存，建议直接重新生成用例')
+      docDiffDialogVisible.value = false
+      return
+    }
+
+    // 保存新文档路径/内容备用
+    docDiffNewContent.value        = inlineContent || ''
+    docDiffForm._uploadedDocPath   = docPath
+    docDiffResult.value            = res.diff
+    docDiffStep.value              = 2
+  } catch (e) {
+    ElMessage.error('Diff 分析失败: ' + (e.response?.data?.detail || e.message))
+  } finally {
+    docDiffChecking.value = false
+  }
+}
+
+/** Step-2：确认执行增量更新 */
+const doDocIncrementalUpdate = async () => {
+  if (!docDiffResult.value) return
+  docDiffUpdating.value = true
+  progressTitle.value   = '文档变更 · 增量更新'
+  progressPct.value     = 0
+  progressStage.value   = '正在连接 AI...'
+  connectWs('cases_gen')
+
+  try {
+    const payload = {
+      diff:          docDiffResult.value,
+      reparse_page:  docDiffForm.reparseElements,
+      ...(docDiffForm._uploadedDocPath
+        ? { new_document_path: docDiffForm._uploadedDocPath }
+        : { new_content: docDiffNewContent.value || docDiffForm.content }),
+    }
+    const res = await caseApi.incrementalUpdate(filterTaskId.value, payload)
+    progressPct.value   = 100
+    progressStage.value = res.message || '增量更新完成'
+    await new Promise(r => setTimeout(r, 600))
+    ElMessage.success(res.message || '增量更新成功')
+    docDiffDialogVisible.value = false
+    // 刷新用例列表
+    await taskStore.fetchCases(filterTaskId.value)
+    taskStore.fetchTotalCaseCount()
+  } catch (e) {
+    ElMessage.error('增量更新失败: ' + (e.response?.data?.detail || e.message))
+  } finally {
+    docDiffUpdating.value = false
+    connectWs('cases_gen')
+  }
+}
 </script>
 
 <style scoped>
@@ -504,4 +801,22 @@ const resetForm = () => {
 .suggestions li { line-height: 1.8; color: #606266; font-size: 13px; }
 .zero-warn { color: #f56c6c; font-weight: 600; }
 .coverage-empty { display: flex; justify-content: center; align-items: center; height: 200px; }
+
+/* 废弃用例 */
+.case-deprecated { text-decoration: line-through; color: #c0c4cc; }
+
+/* Diff 统计卡片 */
+.diff-stat-box   { text-align:center; padding:10px 6px; border-radius:8px; border:1px solid transparent; }
+.diff-stat-num   { font-size:24px; font-weight:700; }
+.diff-stat-label { font-size:12px; margin-top:2px; }
+.diff-changed    { background:#fdf6ec; border-color:#f5dab1; color:#e6a23c; }
+.diff-added      { background:#f0f9eb; border-color:#b3e19d; color:#67c23a; }
+.diff-removed    { background:#fef0f0; border-color:#fbc4c4; color:#f56c6c; }
+.diff-unchanged  { background:#f5f7fa; border-color:#dcdfe6; color:#909399; }
+
+/* Diff 模块列表行 */
+.diff-module-row         { padding:5px 8px; font-size:13px; border-radius:4px; margin-bottom:4px; }
+.diff-changed-row        { background:#fdf6ec; }
+.diff-added-row          { background:#f0f9eb; }
+.diff-removed-row        { background:#fef0f0; text-decoration:line-through; color:#c0c4cc; }
 </style>

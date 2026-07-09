@@ -2,6 +2,7 @@
 AI 测试用例生成器 — 通过本地 claude CLI 调用大模型生成 Markdown / XMind 格式用例文件
 """
 import asyncio
+import hashlib
 import json
 import zipfile
 import uuid
@@ -61,6 +62,9 @@ class AICaseGenerator:
         if not doc_text:
             raise ValueError("未提供需求内容（文档路径或文本均为空）")
 
+        # 计算文档哈希，供调用方写入数据库做变更检测
+        doc_hash = self._compute_doc_hash(doc_text)
+
         pro_max = self._load_pro_max_skill()
 
         if pro_max:
@@ -109,9 +113,117 @@ class AICaseGenerator:
         result["case_count"] = sum(
             len(m.get("cases", [])) for m in cases_data.get("modules", [])
         )
+        # 将文档哈希和截断内容一并返回，由 routes.py 写入数据库
+        result["doc_hash"] = doc_hash
+        result["doc_content"] = doc_text[:20000]   # 最多保存 2 万字，够 Diff 分析用
         await _p(100, f"完成！共生成 {result['case_count']} 条用例")
         logger.info(f"AI 用例生成完成: {result['case_count']} 条，文件: {result['files']}")
         return result
+
+    # ------------------------------------------------------------------
+    # 文档哈希计算（MD5，16 位短哈希，用于快速判断文档是否变更）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _compute_doc_hash(text: str) -> str:
+        """计算需求文档内容的 MD5 哈希（16 位十六进制），用于变更检测。"""
+        return hashlib.md5(text.encode("utf-8")).hexdigest()[:16]
+
+    # ------------------------------------------------------------------
+    # AI Diff 分析：对比新旧文档，识别变更模块清单
+    # ------------------------------------------------------------------
+    async def analyze_document_diff(
+        self,
+        old_doc_content: str,
+        new_doc_content: str,
+        existing_module_names: Optional[List[str]] = None,   # 旧用例的实际模块名列表
+    ) -> Dict[str, Any]:
+        """
+        调用 LLM 对比新旧需求文档，返回结构化变更清单。
+        existing_module_names: 传入旧用例的真实模块名列表，
+                               强制 AI 使用这些名字，防止自创新名导致模块找不到。
+        """
+        old_snip = old_doc_content[:6000]
+        new_snip = new_doc_content[:6000]
+
+        # 如果有旧模块名列表，注入到 prompt 里作为强约束
+        module_names_hint = ""
+        if existing_module_names:
+            names_str = "\n".join(f"  - {n}" for n in existing_module_names)
+            module_names_hint = f"""
+## 重要约束：旧用例的实际模块名列表
+以下是旧测试用例中真实存在的模块名（必须用这些原始名字，不能自创新名称）：
+{names_str}
+
+在 changed / removed / unchanged 中填写模块名时，**必须从上面列表中选取**，不得使用其他名称。
+如果某个旧模块的需求在新文档里发生了变更，用列表中的原名，在 summary 字段描述变更内容。
+"""
+
+        system_prompt = (
+            "You are a senior QA analyst. Your task is to compare two versions of a requirements document "
+            "and produce a COMPLETE classification of every functional module that existed in the old version. "
+            "EVERY module from the old document MUST appear in exactly one of: changed, removed, or unchanged. "
+            "CRITICAL: When existing module names are provided, you MUST use those exact names. "
+            "Output ONLY valid JSON. No markdown, no explanation."
+        )
+        prompt = f"""对比以下新旧两版需求文档，对旧文档中的每一个功能模块进行完整分类，用于指导测试用例的增量更新。
+{module_names_hint}
+【旧版文档】
+---
+{old_snip}
+---
+
+【新版文档】
+---
+{new_snip}
+---
+
+## 分析步骤（必须严格按照以下步骤执行）
+
+Step 1：从【旧用例模块名列表】（若已提供）或【旧版文档】中列出所有功能模块名称。
+Step 2：逐一判断每个旧模块在新文档中的状态：
+  - **removed（删除）**：该模块在新文档中完全不存在，相关功能/需求被整体删除
+  - **changed（变更）**：模块仍存在，但需求内容有实质修改（新增/修改/删除了具体需求点、字段、逻辑）
+  - **unchanged（未变）**：模块仍存在，内容几乎完全相同，旧测试用例可以直接复用
+Step 3：新文档中有但旧文档没有的模块归入 added。
+
+## 关键规则
+- **每个旧模块必须出现在 changed、removed、unchanged 三者之一中，不能遗漏**
+- **模块名必须使用旧用例列表中的原始名称，禁止重命名或合并模块**
+- removed 判断标准：在新文档中搜索不到该模块名称及其相关需求描述
+
+只输出纯 JSON：
+{{
+  "changed":   [{{"module": "旧模块原始名称", "summary": "变更描述（一句话）"}}],
+  "added":     [{{"module": "新模块名称", "summary": "新增描述（一句话）"}}],
+  "removed":   ["旧模块原始名称"],
+  "unchanged": ["旧模块原始名称"],
+  "impact_level": "high",
+  "diff_summary": "本次变更的一句话总结"
+}}"""
+
+        try:
+            raw = await self._run_claude_subprocess(system_prompt, prompt, timeout_secs=60)
+            result = json.loads(raw)
+            # 字段保底，防止 LLM 漏字段
+            result.setdefault("changed", [])
+            result.setdefault("added", [])
+            result.setdefault("removed", [])
+            result.setdefault("unchanged", [])
+            result.setdefault("impact_level", "medium")
+            result.setdefault("diff_summary", "需求文档已更新")
+            logger.info(
+                f"文档 Diff 分析完成: changed={len(result['changed'])} "
+                f"added={len(result['added'])} removed={len(result['removed'])} "
+                f"unchanged={len(result['unchanged'])}"
+            )
+            logger.debug(f"Diff 原始结果: {json.dumps(result, ensure_ascii=False)}")
+            return result
+        except json.JSONDecodeError as e:
+            logger.error(f"Diff 分析返回非法 JSON: {e}")
+            raise RuntimeError(f"Diff 分析失败，AI 返回非 JSON 内容: {e}")
+        except Exception as e:
+            logger.error(f"Diff 分析异常: {e}")
+            raise RuntimeError(f"Diff 分析异常: {e}")
 
     # ------------------------------------------------------------------
     # 清理旧生成文件，只保留当前批次
@@ -644,6 +756,475 @@ class AICaseGenerator:
                 f"AI 返回内容不是 JSON 格式，无法解析。\n"
                 f"AI 实际返回（前200字）：{raw[:200]}"
             )
+
+    # ------------------------------------------------------------------
+    # 增量更新入口：文档变更后只重生成 changed/added 模块
+    # ------------------------------------------------------------------
+    async def incremental_update(
+        self,
+        task_name: str,
+        old_cases_data: Dict[str, Any],
+        new_doc_content: str,
+        diff_result: Dict[str, Any],
+        formats: Optional[List[str]] = None,
+        progress_cb=None,
+    ) -> Dict[str, Any]:
+        """
+        根据 diff_result 只对变更/新增模块重生成用例，未变更模块直接保留，
+        删除模块用例打上 deprecated 标记后追加到末尾（审计追踪）。
+
+        返回与 generate() 相同的结构，额外包含 diff_summary。
+        """
+        if formats is None:
+            formats = ["md", "xmind"]
+
+        async def _p(pct: int, stage: str):
+            if progress_cb:
+                try:
+                    await progress_cb(pct, stage)
+                except Exception:
+                    pass
+
+        changed_mods   = diff_result.get("changed", [])
+        added_mods     = diff_result.get("added", [])
+        removed_names  = diff_result.get("removed", [])
+        unchanged_names = diff_result.get("unchanged", [])
+        diff_summary   = diff_result.get("diff_summary", "需求文档已更新")
+
+        # 旧用例按模块分布情况（方便排查）
+        old_modules_list = (old_cases_data or {}).get("modules", [])
+        logger.info(
+            f"旧用例数据: 共 {len(old_modules_list)} 个模块, "
+            f"各模块用例数: { {m.get('name','?'): len(m.get('cases',[])) for m in old_modules_list} }"
+        )
+
+        # 需要重生成的模块列表（added 仍然全量生成）
+        total_changed = len(changed_mods)
+        total_added   = len(added_mods)
+        total_tasks   = max(total_changed + total_added, 1)
+
+        await _p(10, f"共 {total_changed} 个变更模块（用例级合并）、{total_added} 个新增模块...")
+        logger.info(
+            f"增量更新: changed={len(changed_mods)} added={len(added_mods)} "
+            f"removed={len(removed_names)} unchanged={len(unchanged_names)}"
+        )
+
+        # 旧用例按模块名建索引（用于 changed 模块的用例级合并）
+        old_modules_index = {
+            m.get("name", ""): m
+            for m in (old_cases_data or {}).get("modules", [])
+        }
+
+        # ── 名字校正：若 AI Diff 返回的 changed 模块名在旧用例里找不到，
+        # 做模糊匹配（包含关系），找到最接近的旧模块名替换 ─────────────────
+        def _fuzzy_match(ai_name: str, real_names: List[str]) -> Optional[str]:
+            """从真实模块名里找与 ai_name 最匹配的，返回 None 表示找不到"""
+            ai_lower = ai_name.lower()
+            # 精确匹配
+            if ai_name in real_names:
+                return ai_name
+            # 包含匹配：旧名包含 AI 名的关键词，或 AI 名包含旧名的关键词
+            for real in real_names:
+                r_lower = real.lower()
+                if ai_lower in r_lower or r_lower in ai_lower:
+                    return real
+            # 字符重叠率：超过 60% 的字符相同
+            for real in real_names:
+                common = sum(1 for c in ai_name if c in real)
+                ratio  = common / max(len(ai_name), 1)
+                if ratio >= 0.6:
+                    return real
+            return None
+
+        real_names = list(old_modules_index.keys())
+        corrected_changed = []
+        for mod_info in changed_mods:
+            ai_name = mod_info.get("module", "")
+            if ai_name in old_modules_index:
+                corrected_changed.append(mod_info)
+            else:
+                matched = _fuzzy_match(ai_name, real_names)
+                if matched:
+                    logger.info(f"模块名校正: AI返回「{ai_name}」→ 旧用例实际名「{matched}」")
+                    corrected_changed.append({**mod_info, "module": matched})
+                else:
+                    # 找不到匹配则当作 added（新增模块），不丢弃
+                    logger.warning(f"模块「{ai_name}」在旧用例中找不到匹配，当作新增模块处理")
+                    added_mods = list(added_mods) + [mod_info]
+        changed_mods = corrected_changed
+
+        sem = asyncio.Semaphore(2)
+        completed = [0]
+
+        async def _progress_done(label: str):
+            completed[0] += 1
+            await _p(
+                10 + int(completed[0] / total_tasks * 75),
+                f"已完成 {completed[0]}/{total_tasks}：{label}",
+            )
+
+        # ── 变更模块：用例级合并（keep/deprecated/new） ──────────────────
+        async def _merge_changed(i: int, mod_info: dict):
+            async with sem:
+                name    = mod_info["module"]
+                summary = mod_info.get("summary", "")
+                old_mod = old_modules_index.get(name, {})
+                old_cases = old_mod.get("cases", [])
+                logger.info(f"changed 模块「{name}」: 找到旧用例 {len(old_cases)} 条, 旧模块索引 keys={list(old_modules_index.keys())}")
+                await _p(
+                    10 + int(i / total_tasks * 75),
+                    f"用例级合并 {i + 1}/{total_tasks}：{name}...",
+                )
+                result = await self._merge_module_cases(
+                    module_name    = name,
+                    old_cases      = old_cases,
+                    new_doc_content= new_doc_content,
+                    change_summary = summary,
+                )
+                await _progress_done(name)
+                return name, old_cases, result
+
+        # ── 新增模块：全量生成 ────────────────────────────────────────────
+        async def _regen_added(i: int, mod_info: dict):
+            async with sem:
+                name     = mod_info["module"]
+                features = [mod_info.get("summary", "")]
+                idx      = total_changed + i
+                await _p(
+                    10 + int(idx / total_tasks * 75),
+                    f"生成新增模块 {i + 1}/{total_added}：{name}...",
+                )
+                result = await self._call_llm_for_module(name, features, new_doc_content)
+                await _progress_done(name)
+                return result
+
+        changed_results: List = []
+        added_results:   List = []
+
+        if changed_mods:
+            changed_results = await asyncio.gather(
+                *[_merge_changed(i, m) for i, m in enumerate(changed_mods)]
+            )
+        if added_mods:
+            added_results = await asyncio.gather(
+                *[_regen_added(i, m) for i, m in enumerate(added_mods)]
+            )
+
+        # ── 合并用例 ──────────────────────────────────────────────────
+        await _p(87, "正在合并用例，统一编号...")
+        merged = self._merge_cases(
+            old_cases_data  = old_cases_data,
+            changed_results = changed_results,   # [(name, old_cases, merge_result), ...]
+            added_results   = added_results,     # [{name, cases}, ...]
+            added_names     = [m["module"] for m in added_mods],
+            unchanged_names = unchanged_names,
+            removed_names   = removed_names,
+            new_doc_content = new_doc_content,
+        )
+
+        # ── 保存文件 ──────────────────────────────────────────────────
+        await _p(90, "保存文件...")
+        ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+        result: Dict[str, Any] = {
+            "task_name": task_name,
+            "cases_data": merged,
+            "files": {},
+            "diff_summary": diff_summary,
+            "doc_hash": self._compute_doc_hash(new_doc_content),
+            "doc_content": new_doc_content[:20000],
+        }
+
+        if "md" in formats:
+            md_path = await self._save_markdown(merged, task_name, ts)
+            result["files"]["md"] = str(md_path)
+        if "xmind" in formats:
+            xmind_path = await self._save_xmind(merged, task_name, ts)
+            result["files"]["xmind"] = str(xmind_path)
+
+        await self._cleanup_old_files(ts)
+
+        # 统计活跃用例数（不含 deprecated）
+        active_count = sum(
+            len([c for c in m.get("cases", []) if c.get("status") != "deprecated"])
+            for m in merged.get("modules", [])
+        )
+        result["case_count"] = active_count
+        await _p(100, f"增量更新完成！共 {active_count} 条有效用例")
+        logger.info(f"增量更新完成: {task_name}，有效用例 {active_count} 条")
+        return result
+
+    # ------------------------------------------------------------------
+    # 用例级别合并：changed 模块内精确找「失效用例」+「新增场景」
+    # ------------------------------------------------------------------
+    async def _merge_module_cases(
+        self,
+        module_name: str,
+        old_cases: List[Dict],
+        new_doc_content: str,
+        change_summary: str = "",
+    ) -> Dict[str, Any]:
+        """
+        策略：默认保留所有旧用例，只让 LLM 识别两件事：
+        1. deprecated_ids：因变更导致「功能点已从新需求中删除」的旧用例 ID（少数）
+        2. new_cases：新需求中出现的、旧用例未覆盖的新场景
+
+        判断标准（严格）：
+        - 只有当旧用例测试的功能点在新文档中「完全消失」时，才标 deprecated
+        - 功能点仍然存在（即使逻辑有调整）→ 保留旧用例，由测试人员手动调整步骤
+        - 不确定是否删除 → 保留（保守原则）
+        """
+        cases_summary = "\n".join(
+            f"  {c.get('id','?')} | {c.get('name','')} | {c.get('test_method') or c.get('type','')} | {c.get('priority','')}"
+            for c in old_cases[:30]
+        )
+
+        system_prompt = (
+            "You are a senior QA engineer performing a conservative test case review. "
+            "Your default is to KEEP existing test cases unless the feature they test "
+            "has been COMPLETELY REMOVED from the new requirements. "
+            "Output ONLY valid JSON. No markdown."
+        )
+        prompt = f"""需求模块「{module_name}」发生了变更，请对现有测试用例做保守式审查。
+
+变更说明：{change_summary or '需求有局部更新'}
+
+【新版需求文档】
+---
+{new_doc_content[:4000]}
+---
+
+【现有测试用例】（用例ID | 用例名称 | 测试方法 | 优先级）
+{cases_summary}
+
+## 审查原则（请严格遵守）
+
+**废弃标准（必须同时满足以下两条才能废弃）**：
+1. 该用例测试的功能点在新版需求文档中「完全不存在」——不是调整了，是彻底删掉了
+2. 你能在新文档中明确找到"该功能已被移除"的依据
+
+**保留原则（满足任意一条就应保留）**：
+- 功能点仍然存在，只是需求描述有所调整 → 保留（测试人员手动更新步骤）
+- 无法确定该功能是否被删除 → 保留
+- 该用例测试的是边界值、异常流程、兼容性等通用场景 → 保留
+
+**新增用例**：只针对新文档中出现的、旧用例完全没有覆盖的全新功能场景。
+
+## 输出格式（只输出纯JSON）
+{{
+  "deprecated": ["TC002"],
+  "new_cases": [
+    {{
+      "name": "新场景用例名称",
+      "priority": "P1",
+      "type": "功能测试",
+      "test_method": "等价类划分",
+      "preconditions": "前置条件",
+      "steps": ["1. 操作步骤"],
+      "expected": "预期结果"
+    }}
+  ],
+  "reason": "一句话说明废弃了哪些用例及原因"
+}}
+
+注意：deprecated 列表应该很小（通常0-3条），如果你发现自己要废弃很多用例，请重新检查是否符合废弃标准。"""
+
+        try:
+            raw = await self._run_claude_subprocess(system_prompt, prompt, timeout_secs=90)
+            result = json.loads(raw)
+            deprecated = result.get("deprecated", [])
+            new_cases  = result.get("new_cases", [])
+
+            # 安全校验：deprecated 不能超过旧用例总数的 50%（超出说明 LLM 判断过激）
+            max_deprecated = max(1, len(old_cases) // 2)
+            if len(deprecated) > max_deprecated:
+                logger.warning(
+                    f"模块「{module_name}」废弃用例过多({len(deprecated)}/{len(old_cases)})，"
+                    f"超过50%阈值，重置为空（全部保留）"
+                )
+                deprecated = []
+
+            logger.info(
+                f"模块「{module_name}」用例级合并: "
+                f"keep={len(old_cases)-len(deprecated)} "
+                f"deprecated={len(deprecated)} new={len(new_cases)} "
+                f"reason={result.get('reason','')}"
+            )
+            return {
+                "deprecated": deprecated,
+                "new_cases":  new_cases,
+            }
+        except Exception as e:
+            logger.warning(f"模块「{module_name}」用例级合并失败: {e}，全部保留旧用例")
+            return {"deprecated": [], "new_cases": []}
+
+    # ------------------------------------------------------------------
+    # 用例合并：unchanged 保留 + changed/added 用新生成替换 + removed 打标记
+    # ------------------------------------------------------------------
+    def _merge_cases(
+        self,
+        old_cases_data: Dict[str, Any],
+        changed_results: List,           # [(name, old_cases, {keep,deprecated,new_cases}), ...]
+        added_results: List,             # [{name, cases}, ...]  全量新模块
+        added_names: List[str],
+        unchanged_names: List[str],
+        removed_names: List[str],
+        new_doc_content: str = "",
+    ) -> Dict[str, Any]:
+        """
+        合并规则：
+        1. unchanged 模块：直接保留旧用例
+        2. changed 模块：旧用例按 keep/deprecated 分别处理 + 追加新用例
+        3. added 模块：全量新用例
+        4. removed 模块：旧用例全部标 deprecated
+        5. 未分类旧模块：文本搜索二次判断 unchanged/removed
+
+        编号规则：active 用例统一重编 TC001…；deprecated 用例追加在模块末尾，
+        保留原始 id 前缀并加 (废弃) 后缀区分，不参与重编号。
+        """
+        old_modules: List[Dict] = (old_cases_data or {}).get("modules", [])
+        old_index = {m.get("name", ""): m for m in old_modules}
+
+        # ── 通用测试类型保护：性能/兼容性/安全等测试与需求无关，永远不废弃 ────
+        ALWAYS_KEEP_KEYWORDS = ("性能", "兼容", "安全", "压力", "负载", "可靠性", "稳定性")
+
+        def _is_generic_test(name: str) -> bool:
+            return any(kw in name for kw in ALWAYS_KEEP_KEYWORDS)
+
+        # 把 removed 里的通用测试类型模块移回 unchanged
+        protected: List[str] = []
+        filtered_removed = []
+        for name in removed_names:
+            if _is_generic_test(name):
+                protected.append(name)
+            else:
+                filtered_removed.append(name)
+        if protected:
+            logger.info(f"通用测试模块不随需求删除，强制保留: {protected}")
+        removed_names = filtered_removed
+
+        # ── 兜底：未分类旧模块用文本搜索二次判断 ──────────────────────────
+        changed_names_set = {r[0] for r in changed_results}
+        explicitly_classified = (
+            changed_names_set | set(added_names) | set(removed_names) | set(unchanged_names)
+            | set(protected)
+        )
+        implicit_unchanged: List[str] = []
+        implicit_removed:   List[str] = []
+
+        if new_doc_content:
+            doc_text_lower = new_doc_content.lower()
+            for name in old_index:
+                if name in explicitly_classified:
+                    continue
+                # 通用测试类型：无论文本搜索结果如何，一律保留
+                if _is_generic_test(name):
+                    implicit_unchanged.append(name)
+                    continue
+                keyword = (name.replace("模块", "").replace("测试", "")
+                           .replace("管理", "").replace("功能", "").strip())
+                if bool(keyword) and keyword.lower() in doc_text_lower:
+                    implicit_unchanged.append(name)
+                else:
+                    implicit_removed.append(name)
+            if implicit_unchanged:
+                logger.info(f"Diff 未分类 → 文本搜索确认保留: {implicit_unchanged}")
+            if implicit_removed:
+                logger.info(f"Diff 未分类 → 文本搜索确认废弃: {implicit_removed}")
+
+        all_unchanged = list(unchanged_names) + implicit_unchanged + protected
+        all_removed   = list(removed_names)   + implicit_removed
+
+        result_modules: List[Dict] = []
+        tc_counter = 1
+
+        # 1. unchanged 模块：全部旧用例保留，重新编号
+        for name in all_unchanged:
+            old_mod = old_index.get(name)
+            if not old_mod:
+                continue
+            active = []
+            for c in old_mod.get("cases", []):
+                c = dict(c)
+                c["id"] = f"TC{tc_counter:03d}"
+                c.pop("status", None)
+                c.pop("is_new", None)
+                c.pop("is_updated", None)
+                tc_counter += 1
+                active.append(c)
+            if active:
+                result_modules.append({"name": name, "cases": active})
+
+        # 2. changed 模块：默认保留所有旧用例，只排除 deprecated，再追加新用例
+        for (mod_name, old_cases, merge_result) in changed_results:
+            if not merge_result:
+                continue
+            deprecated_ids = set(merge_result.get("deprecated", []))
+            new_case_defs  = merge_result.get("new_cases", [])
+
+            old_case_index = {c.get("id", ""): c for c in old_cases}
+
+            active: List[Dict] = []
+            dep:    List[Dict] = []
+
+            # 所有旧用例：不在 deprecated_ids 里的全部保留
+            for c in old_cases:
+                cid = c.get("id", "")
+                c = dict(c)
+                if cid in deprecated_ids:
+                    c["status"] = "deprecated"
+                    dep.append(c)
+                else:
+                    c["id"] = f"TC{tc_counter:03d}"
+                    c.pop("status", None)
+                    c.pop("is_new", None)
+                    c.pop("is_updated", None)
+                    tc_counter += 1
+                    active.append(c)
+
+            # 新场景用例：标 is_new，追加到 active
+            for nc in new_case_defs:
+                nc = dict(nc)
+                nc["id"] = f"TC{tc_counter:03d}"
+                nc["is_new"] = True
+                if "expected" in nc and "expected_results" not in nc:
+                    nc["expected_results"] = nc.pop("expected")
+                tc_counter += 1
+                active.append(nc)
+
+            all_cases = active + dep
+            if all_cases:
+                result_modules.append({"name": mod_name, "cases": all_cases})
+
+        # 3. added 模块：全量新用例，标记 is_new
+        for i, mod_result in enumerate(added_results):
+            if not mod_result:
+                continue
+            name = added_names[i] if i < len(added_names) else mod_result.get("name", "")
+            active = []
+            for c in mod_result.get("cases", []):
+                c = dict(c)
+                c["id"] = f"TC{tc_counter:03d}"
+                c["is_new"] = True
+                tc_counter += 1
+                active.append(c)
+            if active:
+                result_modules.append({"name": name, "cases": active})
+
+        # 4. removed 模块：全部旧用例标 deprecated，追加到末尾
+        for name in all_removed:
+            old_mod = old_index.get(name)
+            if not old_mod:
+                continue
+            dep_cases = []
+            for c in old_mod.get("cases", []):
+                c = dict(c)
+                c["status"] = "deprecated"
+                dep_cases.append(c)
+            if dep_cases:
+                result_modules.append({"name": f"{name}（已废弃）", "cases": dep_cases})
+
+        title = (old_cases_data or {}).get("title", "测试用例集")
+        return {"title": title, "modules": result_modules}
 
     # ------------------------------------------------------------------
     # 用例优化入口

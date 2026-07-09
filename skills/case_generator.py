@@ -1,11 +1,14 @@
 """
 测试用例生成技能 — 分段调用 Claude LLM 生成可执行的 UI 自动化测试用例
 功能：
-  generate_cases()    分段生成（Step-1 提取模块 + Step-2 并行逐模块）
-  optimize_cases()    覆盖度补全（逐模块找缺口，追加新用例）
-  analyze_coverage()  覆盖度统计（规则引擎，无 LLM）
+  generate_cases()        分段生成（Step-1 提取模块 + Step-2 并行逐模块）
+  optimize_cases()        覆盖度补全（逐模块找缺口，追加新用例）
+  analyze_coverage()      覆盖度统计（规则引擎，无 LLM）
+  analyze_doc_diff()      新旧需求文档 AI Diff 分析，返回变更模块清单
+  incremental_update()    文档变更后增量更新用例（只对变更/新增模块重生成）
 """
 import asyncio
+import hashlib
 import json
 import os
 from typing import Any, Callable, Dict, List, Optional
@@ -142,11 +145,12 @@ class CaseGenerator:
   ]
 }}"""
         try:
-            raw = await self._run_claude_subprocess(system_prompt, prompt, timeout_secs=30)
+            raw = await self._run_claude_subprocess(system_prompt, prompt, timeout_secs=60)
             data = json.loads(raw)
             modules = data.get("modules", [])
             if isinstance(modules, list) and modules:
                 return modules
+            logger.warning(f"Module extraction returned no modules, raw={raw[:200]}")
         except Exception as e:
             logger.warning(f"Module extraction failed: {e}")
         return []
@@ -689,6 +693,370 @@ class CaseGenerator:
                     break
             case["priority"] = priority
         return cases
+
+
+    # ==================================================================
+    # 文档哈希（复用 ai_case_generator 的约定：MD5 前 16 位）
+    # ==================================================================
+    @staticmethod
+    def compute_doc_hash(text: str) -> str:
+        return hashlib.md5(text.encode("utf-8")).hexdigest()[:16]
+
+    # ==================================================================
+    # AI Diff 分析：新旧需求文档 → 变更模块清单
+    # ==================================================================
+    async def analyze_doc_diff(
+        self,
+        old_doc_content: str,
+        new_doc_content: str,
+    ) -> Dict[str, Any]:
+        """
+        对比两版需求文档，识别功能模块级别的变更范围。
+        返回与 AICaseGenerator.analyze_document_diff() 相同结构：
+        {
+            "changed":    [{"module": "...", "summary": "..."}],
+            "added":      [{"module": "...", "summary": "..."}],
+            "removed":    ["模块名"],
+            "unchanged":  ["模块名"],
+            "impact_level": "high|medium|low",
+            "diff_summary": "一句话变更总结"
+        }
+        """
+        old_snip = old_doc_content[:6000]
+        new_snip = new_doc_content[:6000]
+
+        system_prompt = (
+            "You are a senior QA analyst. Compare two versions of a requirements document "
+            "and identify which functional modules have changed, been added, removed, or remained the same. "
+            "Output ONLY valid JSON. No markdown, no explanation."
+        )
+        prompt = f"""对比以下新旧两版需求文档，识别功能模块级别的变更范围，用于指导 WebUI 自动化测试用例的增量更新。
+
+【旧版文档】
+---
+{old_snip}
+---
+
+【新版文档】
+---
+{new_snip}
+---
+
+分析要求：
+1. 以功能模块为粒度（对应页面中的一个功能区块，如：登录表单、搜索栏、用户菜单等）
+2. changed = 模块存在但需求内容发生实质变更（新增/修改/删除了具体交互或字段）
+3. added   = 旧文档中完全没有的全新功能模块
+4. removed = 旧文档有但新文档彻底删除的功能模块
+5. unchanged = 内容完全未变或只有文字细节调整，不影响测试用例的模块
+6. impact_level: high（影响核心流程）/ medium（影响部分功能）/ low（仅文字修正）
+
+只输出纯 JSON：
+{{
+  "changed": [{{"module": "模块名称", "summary": "变更描述（一句话）"}}],
+  "added":   [{{"module": "模块名称", "summary": "新增描述（一句话）"}}],
+  "removed": ["模块名称"],
+  "unchanged": ["模块名称"],
+  "impact_level": "high",
+  "diff_summary": "本次变更的一句话总结"
+}}"""
+
+        try:
+            raw = await self._run_claude_subprocess(system_prompt, prompt, timeout_secs=60)
+            result = json.loads(raw)
+            result.setdefault("changed", [])
+            result.setdefault("added", [])
+            result.setdefault("removed", [])
+            result.setdefault("unchanged", [])
+            result.setdefault("impact_level", "medium")
+            result.setdefault("diff_summary", "需求文档已更新")
+            logger.info(
+                f"WebUI Diff 分析: changed={len(result['changed'])} "
+                f"added={len(result['added'])} removed={len(result['removed'])} "
+                f"unchanged={len(result['unchanged'])}"
+            )
+            return result
+        except json.JSONDecodeError as e:
+            logger.error(f"WebUI Diff 返回非法 JSON: {e}")
+            raise RuntimeError(f"Diff 分析失败，AI 返回非 JSON 内容: {e}")
+        except Exception as e:
+            logger.error(f"WebUI Diff 分析异常: {e}")
+            raise RuntimeError(f"Diff 分析异常: {e}")
+
+    # ==================================================================
+    # 增量更新：文档变更后只对 changed/added 模块重生成
+    # ==================================================================
+    async def incremental_update(
+        self,
+        url: str,
+        page_elements: List[Dict[str, Any]],
+        existing_cases: List[Dict[str, Any]],
+        diff_result: Dict[str, Any],
+        new_doc_content: str = "",
+        progress_cb: Optional[Callable] = None,
+    ) -> Dict[str, Any]:
+        """
+        根据 diff_result 对 changed/added 模块重生成用例，unchanged 保留，removed 标记废弃。
+
+        返回：
+        {
+            "new_cases":        List[Dict],   # changed/added 模块新生成的用例
+            "retained_cases":   List[Dict],   # unchanged 保留的旧用例（status='active'）
+            "deprecated_cases": List[Dict],   # removed 打了 deprecated 标记的旧用例
+            "diff_summary":     str,
+        }
+        所有用例统一重编号 TC001…TCN（deprecated 不参与重编号，保留原 id）。
+        """
+        async def _p(pct: int, stage: str):
+            if progress_cb:
+                try:
+                    await progress_cb(pct, stage)
+                except Exception:
+                    pass
+
+        changed_mods   = diff_result.get("changed", [])
+        added_mods     = diff_result.get("added", [])
+        removed_names  = set(diff_result.get("removed", []))
+        unchanged_names = set(diff_result.get("unchanged", []))
+        diff_summary   = diff_result.get("diff_summary", "需求文档已更新")
+
+        # ── 按模块对已有用例分组 ──────────────────────────────────────────
+        existing_by_module: Dict[str, List[Dict]] = {}
+        for c in existing_cases:
+            m = c.get("module", "通用")
+            existing_by_module.setdefault(m, []).append(c)
+
+        # ── 需要重生成的模块 ──────────────────────────────────────────────
+        mods_to_regen = changed_mods + added_mods
+        total_tasks   = max(len(mods_to_regen), 1)
+
+        await _p(10, f"共 {len(changed_mods)} 个变更模块（用例级合并）、{len(added_mods)} 个新增模块...")
+
+        elements_summary = self._build_elements_summary(page_elements)
+        doc_context = (
+            f"需求文档信息：\n{new_doc_content[:2000]}" if new_doc_content else ""
+        )
+
+        sem = asyncio.Semaphore(2)
+        completed = [0]
+
+        # ── 变更模块：保守式用例级合并（默认保留，只找失效和新增） ────────────
+        async def _merge_changed(i: int, mod_info: Dict):
+            async with sem:
+                name    = mod_info["module"]
+                summary = mod_info.get("summary", "")
+                old_mod_cases = existing_by_module.get(name, [])
+                await _p(
+                    10 + int(i / total_tasks * 70),
+                    f"用例级合并 {i + 1}/{total_tasks}：{name}...",
+                )
+                cases_summary = "\n".join(
+                    f"  {c.get('id','?')} | {c.get('name','')} | {c.get('priority','')}"
+                    for c in old_mod_cases[:30]
+                )
+                system_prompt = (
+                    "You are a senior QA engineer performing a conservative test case review. "
+                    "Your default is to KEEP existing test cases. Only mark deprecated if the "
+                    "feature has been COMPLETELY REMOVED. Output ONLY valid JSON."
+                )
+                prompt = f"""需求模块「{name}」发生了变更，请做保守式审查。
+
+变更说明：{summary or '需求有局部更新'}
+
+【新版需求文档】
+---
+{new_doc_content[:3000]}
+---
+
+【现有测试用例】（用例ID | 用例名称 | 优先级）
+{cases_summary or '（暂无用例）'}
+
+## 审查原则（严格遵守）
+- 默认保留所有旧用例
+- deprecated（废弃）：只有功能点在新文档中「完全消失」才废弃，功能调整不废弃
+- 不确定是否删除 → 保留
+- deprecated 列表通常很小（0-2条），如果超过旧用例一半请重新检查
+
+只输出纯JSON：
+{{
+  "deprecated": ["用例ID（仅完全删除的功能点对应的用例）"],
+  "new_cases": [
+    {{
+      "name": "新场景用例名称", "module": "{name}", "priority": "P1",
+      "preconditions": "前置条件",
+      "steps": "1. 步骤\\n2. 步骤",
+      "expected_results": "预期结果",
+      "element_selector": ""
+    }}
+  ],
+  "reason": "一句话说明废弃原因"
+}}"""
+                try:
+                    raw = await self._run_claude_subprocess(system_prompt, prompt, timeout_secs=90)
+                    result = json.loads(raw)
+                    result.setdefault("deprecated", [])
+                    result.setdefault("new_cases", [])
+                except Exception as e:
+                    logger.warning(f"WebUI 模块「{name}」用例级合并失败: {e}，全部保留旧用例")
+                    result = {"deprecated": [], "new_cases": []}
+                completed[0] += 1
+                await _p(
+                    10 + int(completed[0] / total_tasks * 70),
+                    f"已完成 {completed[0]}/{total_tasks}：{name}",
+                )
+                return name, old_mod_cases, result
+
+        # ── 新增模块：全量生成 ────────────────────────────────────────────
+        async def _regen_added(i: int, mod_info: Dict) -> List[Dict]:
+            async with sem:
+                name    = mod_info["module"]
+                summary = mod_info.get("summary", "")
+                idx     = len(changed_mods) + i
+                await _p(
+                    10 + int(idx / total_tasks * 70),
+                    f"生成新增模块 {i + 1}/{len(added_mods)}：{name}...",
+                )
+                extra_ctx = f"变更说明：{summary}\n" + doc_context
+                try:
+                    cases = await self._generate_cases_for_module(url, name, [], extra_ctx)
+                except Exception as e:
+                    logger.warning(f"WebUI 新增模块「{name}」生成失败: {e}")
+                    cases = []
+                completed[0] += 1
+                await _p(
+                    10 + int(completed[0] / total_tasks * 70),
+                    f"已完成 {completed[0]}/{total_tasks}：{name}",
+                )
+                return cases
+
+        changed_results = []
+        added_case_lists = []
+        if changed_mods:
+            changed_results = await asyncio.gather(
+                *[_merge_changed(i, m) for i, m in enumerate(changed_mods)]
+            )
+        if added_mods:
+            added_case_lists = await asyncio.gather(
+                *[_regen_added(i, m) for i, m in enumerate(added_mods)]
+            )
+
+        await _p(82, "正在合并用例，统一编号...")
+
+        # ── 合并 ─────────────────────────────────────────────────────────
+        retained:    List[Dict] = []
+        new_cases:   List[Dict] = []
+        deprecated:  List[Dict] = []
+
+        # ── 通用测试类型保护：性能/兼容性/安全等测试永远不因需求变更而废弃 ──
+        ALWAYS_KEEP_KEYWORDS = ("性能", "兼容", "安全", "压力", "负载", "可靠性", "稳定性")
+
+        def _is_generic_test(name: str) -> bool:
+            return any(kw in name for kw in ALWAYS_KEEP_KEYWORDS)
+
+        protected_names: set = set()
+        filtered_removed = set()
+        for name in removed_names:
+            if _is_generic_test(name):
+                protected_names.add(name)
+            else:
+                filtered_removed.add(name)
+        if protected_names:
+            logger.info(f"WebUI 通用测试模块强制保留: {list(protected_names)}")
+        removed_names = filtered_removed
+
+        # ── 兜底：AI Diff 可能漏掉部分旧模块，文本搜索二次判断 ────────────
+        explicitly_classified = (
+            {m["module"] for m in changed_mods}
+            | {m["module"] for m in added_mods}
+            | removed_names
+            | unchanged_names
+            | protected_names
+        )
+        implicit_unchanged: set = set()
+        implicit_removed:   set = set()
+
+        if new_doc_content:
+            doc_text_lower = new_doc_content.lower()
+            for name in existing_by_module:
+                if name in explicitly_classified:
+                    continue
+                if _is_generic_test(name):
+                    implicit_unchanged.add(name)
+                    continue
+                keyword = (name.replace("模块", "").replace("测试", "")
+                           .replace("管理", "").replace("功能", "").strip())
+                found = bool(keyword) and keyword.lower() in doc_text_lower
+                if found:
+                    implicit_unchanged.add(name)
+                else:
+                    implicit_removed.add(name)
+            if implicit_unchanged:
+                logger.info(f"WebUI Diff 未分类 → 文本搜索确认保留: {list(implicit_unchanged)}")
+            if implicit_removed:
+                logger.info(f"WebUI Diff 未分类 → 文本搜索确认废弃: {list(implicit_removed)}")
+
+        all_unchanged = unchanged_names | implicit_unchanged | protected_names
+        all_removed   = removed_names   | implicit_removed
+
+        # unchanged + 兜底模块：直接保留
+        for name in all_unchanged:
+            for c in existing_by_module.get(name, []):
+                retained.append({**c, "status": "active"})
+
+        # changed 模块：默认保留所有旧用例，只排除 deprecated，再追加新场景
+        for (mod_name, old_mod_cases, merge_result) in changed_results:
+            deprecated_ids = set(merge_result.get("deprecated", []))
+            new_case_defs  = merge_result.get("new_cases", [])
+
+            # 安全校验：deprecated 超过 50% 则清空（LLM 过激判断保护）
+            if len(deprecated_ids) > max(1, len(old_mod_cases) // 2):
+                logger.warning(
+                    f"WebUI 模块「{mod_name}」废弃用例过多({len(deprecated_ids)}/{len(old_mod_cases)})，重置"
+                )
+                deprecated_ids = set()
+
+            # 所有旧用例：不在 deprecated_ids 里的全部保留
+            for c in old_mod_cases:
+                if c.get("id", "") in deprecated_ids:
+                    deprecated.append({**c, "status": "deprecated"})
+                else:
+                    retained.append({**c, "status": "active"})
+
+            # 新场景用例，标记 is_new
+            for nc in new_case_defs:
+                nc = dict(nc)
+                nc["is_new"] = True
+                new_cases.append(nc)
+
+        # added 模块：全量新用例，标记 is_new
+        for i, cases in enumerate(added_case_lists):
+            for c in (cases or []):
+                c = dict(c)
+                c["is_new"] = True
+                new_cases.append(c)
+
+        # removed + 兜底废弃模块：打废弃标记
+        for name in all_removed:
+            for c in existing_by_module.get(name, []):
+                deprecated.append({**c, "status": "deprecated"})
+
+        # 统一编号（只给 active 的）
+        tc_counter = 1
+        all_active = retained + new_cases
+        for c in all_active:
+            c["id"] = f"TC{tc_counter:03d}"
+            tc_counter += 1
+
+        await _p(100, f"增量更新完成！有效用例 {len(all_active)} 条，废弃 {len(deprecated)} 条")
+        logger.info(
+            f"WebUI 增量更新: retained={len(retained)} new/updated={len(new_cases)} "
+            f"deprecated={len(deprecated)}"
+        )
+        return {
+            "new_cases":        new_cases,
+            "retained_cases":   retained,
+            "deprecated_cases": deprecated,
+            "diff_summary":     diff_summary,
+        }
 
 
 case_generator = CaseGenerator()

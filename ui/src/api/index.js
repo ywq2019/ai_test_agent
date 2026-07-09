@@ -32,7 +32,10 @@ export const caseApi = {
   delete: (id) => api.delete(`/cases/${id}`),
   generate: (taskId) => api.post(`/cases/generate/${taskId}`, {}, { timeout: 180000 }),
   optimize: (taskId) => api.post(`/cases/optimize/${taskId}`, {}, { timeout: 300000 }),
-  coverage: (taskId) => api.get(`/cases/coverage/${taskId}`)
+  coverage: (taskId) => api.get(`/cases/coverage/${taskId}`),
+  // 文档变更检测与增量更新
+  docDiffCheck: (taskId, data) => api.post(`/cases/doc-diff-check/${taskId}`, data, { timeout: 120000 }),
+  incrementalUpdate: (taskId, data) => api.post(`/cases/incremental-update/${taskId}`, data, { timeout: 420000 }),
 }
 
 export const executeApi = {
@@ -74,8 +77,8 @@ export const agentApi = {
 }
 
 export const aiCaseApi = {
-  generate: (data) => api.post('/ai-cases/generate', data, { timeout: 420000 }),
-  optimize: (id) => api.post(`/ai-cases/${id}/optimize`, {}, { timeout: 420000 }),
+  generate: (data, signal) => api.post('/ai-cases/generate', data, { timeout: 420000, signal }),
+  optimize: (id, signal) => api.post(`/ai-cases/${id}/optimize`, {}, { timeout: 420000, signal }),
   coverage: (id) => api.get(`/ai-cases/${id}/coverage`),
   list: () => api.get('/ai-cases'),
   getById: (id) => api.get(`/ai-cases/${id}`),
@@ -85,6 +88,9 @@ export const aiCaseApi = {
   addCase: (recordId, data) => api.post(`/ai-cases/${recordId}/cases`, data),
   updateCase: (recordId, caseId, data) => api.put(`/ai-cases/${recordId}/cases/${caseId}`, data),
   deleteCase: (recordId, caseId) => api.delete(`/ai-cases/${recordId}/cases/${caseId}`),
+  // 文档变更检测与增量更新
+  diffCheck: (id, data) => api.post(`/ai-cases/${id}/diff-check`, data, { timeout: 120000 }),
+  incrementalUpdate: (id, data, signal) => api.post(`/ai-cases/${id}/incremental-update`, data, { timeout: 420000, signal }),
 }
 
 export const apiTestApi = {

@@ -57,6 +57,7 @@ class CaseResponse(BaseModel):
     expected_results: str
     element_selector: Optional[str] = ""
     enabled: bool
+    deprecated: bool = False  # 需求变更废弃标记（与用户禁用 enabled 分开）
 
 
 class ExecuteRequest(BaseModel):

@@ -44,9 +44,25 @@ class BrowserTool:
         logger.debug(f"New browser context created for {self.browser_type}")
 
     async def navigate(self, url: str, timeout: int = 60000):
-        await self.page.goto(url, timeout=timeout, wait_until="commit")
+        # 根据 URL 自动判断是否是移动端页面，切换 UA
+        is_mobile = any(k in url for k in ['/m/', 'm.', '/mobile', '/wap', 'micropage', 'h5'])
+        if is_mobile:
+            await self.page.emulate_media()
+            await self.context.set_extra_http_headers({"User-Agent": (
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
+            )})
+
+        # wait_until="networkidle" 等待网络请求静止，确保动态内容渲染完毕
+        # 兜底：networkidle 失败则改用 load
+        try:
+            await self.page.goto(url, timeout=timeout, wait_until="networkidle")
+        except Exception:
+            await self.page.goto(url, timeout=timeout, wait_until="load")
+
         logger.info(f"Navigated to {url}")
-        await self.page.wait_for_timeout(5000)
+        # 额外等待 JS 渲染（动态框架通常需要 1-2 秒完成首屏渲染）
+        await self.page.wait_for_timeout(3000)
 
     async def capture_elements(self) -> List[Dict[str, Any]]:
         debug_script = """
@@ -111,6 +127,14 @@ class BrowserTool:
         """
         elements = await self.page.evaluate(elements_script)
         logger.info(f"Captured {len(elements)} interactive elements")
+
+        # 元素太少说明页面还没渲染完，等待后重试一次
+        if len(elements) < 5:
+            logger.warning(f"Too few elements ({len(elements)}), waiting 3s and retrying...")
+            await self.page.wait_for_timeout(3000)
+            elements = await self.page.evaluate(elements_script)
+            logger.info(f"Retry captured {len(elements)} interactive elements")
+
         return elements
 
     async def fill_input(self, selector: str, value: str):
