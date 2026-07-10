@@ -67,20 +67,57 @@ cd ui && npm run dev
 
 ### 配置说明
 
-复制 `.env` 并按需修改：
+项目根目录有两个配置文件，按部署方式选用：
+
+| 文件 | 用途 |
+| --- | --- |
+| `.env` | 本地开发（SQLite，`python main.py` 读取） |
+| `.env.docker` | Docker 部署（PostgreSQL，`docker-compose.yml` 注入） |
+
+**`.env` 完整配置项说明：**
 
 ```ini
-# AI 大模型（必填，也可启动后在页面配置）
-AI_API_KEY=your_api_key
-AI_API_URL=https://api.deepseek.com   # 不要加 /v1
-AI_MODEL=deepseek-v4-flash
-
-# 服务端口（默认 4000）
+# ── 应用 ──────────────────────────────────────────────
+APP_NAME=AI 测试工具平台
+APP_VERSION=1.0.0
+DEBUG=True               # 生产环境改为 False
+HOST=0.0.0.0
 PORT=4000
 
-# 数据库（本地默认 SQLite，Docker 自动切换 PostgreSQL）
+# ── AI 大模型（必填，也可启动后在页面配置）──────────────
+AI_API_KEY=your_api_key
+AI_API_URL=https://api.deepseek.com   # 不要加 /v1，代码自动拼接
+AI_MODEL=deepseek-v4-flash
+AI_MODEL_NAME=DeepSeek V4 Flash
+AI_TEMPERATURE=0.5
+
+# ── 数据库 ────────────────────────────────────────────
+# 本地开发用 SQLite（零配置）
 DATABASE_URL=sqlite+aiosqlite:///./uitest_agent.db
+# 服务器/生产用 PostgreSQL（Docker 部署时 .env.docker 已配好）
+# DATABASE_URL=postgresql+asyncpg://user:pass@host:5432/dbname
+
+# ── 鉴权 ──────────────────────────────────────────────
+SECRET_KEY=your-secret-key-change-in-production   # 生产环境必须修改！
+JWT_EXPIRE_HOURS=168     # Token 有效期（小时），默认 7 天
+DEFAULT_USERNAME=admin   # 首次启动自动创建的管理员账号
+DEFAULT_PASSWORD=admin123
+
+# ── 数据目录 ───────────────────────────────────────────
+REPORT_OUTPUT_DIR=./reports
+SCREENSHOT_DIR=./screenshots
+LOG_DIR=./logs
+UPLOAD_DIR=./uploads
 ```
+
+**数据库选型说明：**
+
+| 场景 | 数据库 | 配置方式 |
+| --- | --- | --- |
+| 本地开发 / 1-5 人小团队 | SQLite | 默认，零配置，直接 `python main.py` |
+| 服务器部署 / 多人并发 | PostgreSQL 15 | `docker compose up -d` 自动启动，无需手动配置 |
+
+两套环境代码完全一致，SQLAlchemy 自动适配，新字段通过 `ALTER TABLE` 向前兼容，**升级只需拉代码重启，数据不丢失**。
 
 ### 局域网共享
 
