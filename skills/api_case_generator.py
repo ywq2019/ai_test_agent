@@ -737,3 +737,363 @@ class ApiCaseGenerator:
 
 
 api_case_generator = ApiCaseGenerator()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 代码分析器（单独类，不依赖项目配置）
+# ─────────────────────────────────────────────────────────────────────────────
+
+LANG_HINTS = {
+    "java":   "Java (Spring Boot / Spring MVC)",
+    "python": "Python (FastAPI / Flask / Django)",
+    "go":     "Go (Gin / Echo / net/http)",
+    "node":   "Node.js (Express / Koa / NestJS)",
+    "php":    "PHP (Laravel / ThinkPHP)",
+    "other":  "其他语言",
+}
+
+
+class ApiCodeAnalyzer:
+    """
+    方案二核心：从接口实现代码生成用例 / 与需求文档对比找差异。
+    """
+
+    async def _call_llm(self, system_prompt: str, prompt: str, timeout: int = 120) -> str:
+        cfg = _get_llm_config()
+        api_key  = cfg["api_key"]
+        base_url = cfg["base_url"].rstrip("/")
+        model    = cfg["model"]
+
+        if not api_key or not base_url:
+            raise RuntimeError("未配置 AI_API_KEY 或 AI_API_URL")
+
+        is_anthropic = "anthropic.com" in base_url or model.startswith("claude")
+
+        if is_anthropic:
+            url     = f"{base_url}/v1/messages"
+            headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01",
+                       "content-type": "application/json"}
+            payload = {"model": model, "max_tokens": 8192,
+                       "system": system_prompt,
+                       "messages": [{"role": "user", "content": prompt}]}
+        else:
+            url     = f"{base_url}/v1/chat/completions"
+            headers = {"Authorization": f"Bearer {api_key}", "content-type": "application/json"}
+            payload = {"model": model, "max_tokens": 8192,
+                       "messages": [{"role": "system", "content": system_prompt},
+                                    {"role": "user",   "content": prompt}]}
+
+        import httpx
+        async with httpx.AsyncClient(verify=False, timeout=timeout) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+
+        raw = (data["content"][0]["text"] if is_anthropic
+               else data["choices"][0]["message"]["content"])
+        raw = raw.strip()
+        if "```json" in raw:
+            raw = raw.split("```json", 1)[1].split("```", 1)[0].strip()
+        elif "```" in raw:
+            raw = raw.split("```", 1)[1].split("```", 1)[0].strip()
+        return raw
+
+    # ── 方法一：从接口代码直接生成测试用例 ─────────────────────────────────────
+    async def generate_from_code(
+        self,
+        code: str,
+        lang: str = "python",
+        base_url: str = "",
+        progress_cb=None,
+    ) -> List[Dict[str, Any]]:
+        """
+        解析接口实现代码，识别入参/边界条件/异常路径，生成覆盖这些场景的测试用例。
+        返回与 generate_cases() 相同格式，可直接写入 ApiCase 表。
+        """
+        lang_hint = LANG_HINTS.get(lang, lang)
+
+        async def _p(pct, stage):
+            if progress_cb:
+                try:
+                    await progress_cb(pct, stage)
+                except Exception:
+                    pass
+
+        await _p(10, "正在解析接口代码结构...")
+
+        system_prompt = (
+            "你是一名专业的接口测试工程师，擅长通过阅读接口实现代码来设计测试用例。"
+            "你能识别入参校验逻辑、边界条件、异常分支、状态码、返回格式等测试关注点。"
+            "严格输出 JSON 数组，不要任何解释文字。"
+        )
+
+        prompt = f"""以下是一段 {lang_hint} 接口实现代码，请仔细分析：
+
+1. 所有接口路径（path）、请求方法（method）
+2. 入参类型、必填/选填、取值范围、格式约束
+3. 内部的条件分支（if/else/switch/try-catch）覆盖的场景
+4. 边界值：最大值/最小值/空值/null/特殊字符等
+5. 异常路径：参数校验失败、业务异常、未授权等的返回格式和错误码
+
+然后生成测试用例，覆盖以下场景（按优先级排列）：
+- P0：正常主流程（必须有，且参数填写真实合理的示例值）
+- P1：参数校验失败（每种校验各一条）
+- P1：业务异常场景（从代码逻辑推断）
+- P2：边界值（最大值/最小值/空值）
+
+```code
+{code[:6000]}
+```
+
+输出严格的 JSON 数组，每条用例结构如下：
+[
+  {{
+    "name": "用例名称（如：创建订单-正常流程）",
+    "module": "从代码推断的模块名",
+    "method": "GET|POST|PUT|DELETE|PATCH",
+    "path": "/接口路径（含路径参数如 /users/{{id}}）",
+    "params": {{}},
+    "body": {{}},
+    "assertions": [
+      {{"type": "status_code", "expected": 200}},
+      {{"type": "json_path", "path": "$.code", "expected": 0}}
+    ],
+    "priority": "P0",
+    "description": "该接口的功能简介（一句话）",
+    "scenario": "正常流|参数校验|业务异常|边界值",
+    "_code_insight": "从代码中识别到的关键测试依据（如：第23行校验 quantity>0）"
+  }}
+]
+
+Base URL（如有）：{base_url or '（未提供，path 请使用相对路径）'}"""
+
+        await _p(30, "AI 正在分析代码逻辑和边界条件...")
+
+        try:
+            raw = await self._call_llm(system_prompt, prompt, timeout=120)
+            cases = json.loads(raw)
+            if not isinstance(cases, list):
+                cases = []
+        except (json.JSONDecodeError, Exception) as e:
+            logger.error(f"代码生成用例失败: {e}")
+            cases = []
+
+        # 统一字段默认值
+        for i, c in enumerate(cases):
+            c.setdefault("name", f"TC{i+1:03d}")
+            c.setdefault("module", "代码分析")
+            c.setdefault("method", "POST")
+            c.setdefault("path", "/")
+            c.setdefault("params", {})
+            c.setdefault("body", None)
+            c.setdefault("headers", {})
+            c.setdefault("assertions", [{"type": "status_code", "expected": 200}])
+            c.setdefault("priority", "P1")
+            c.setdefault("description", "")
+            c.setdefault("enabled", True)
+            c.setdefault("scenario", "正常流")
+
+        await _p(100, f"代码分析完成，生成 {len(cases)} 条用例")
+        logger.info(f"从代码生成用例: {len(cases)} 条")
+        return cases
+
+    # ── 方法二：需求文档 vs 代码 差异对比分析 ───────────────────────────────────
+    async def analyze_vs_requirement(
+        self,
+        requirement: str,
+        code: str,
+        lang: str = "python",
+        progress_cb=None,
+    ) -> Dict[str, Any]:
+        """
+        对比需求文档和接口代码实现，识别偏差，返回结构化分析报告。
+
+        返回格式：
+        {
+            "risk_level": "high|medium|low",
+            "summary": "整体评估一句话",
+            "items": [
+                {
+                    "type": "missing|mismatch|extra|risk",
+                    "severity": "high|medium|low",
+                    "title": "问题标题",
+                    "requirement": "需求文档原文或描述",
+                    "code_behavior": "代码实际行为",
+                    "suggestion": "建议的修复方向",
+                    "test_focus": "针对此偏差应测试什么"
+                }
+            ],
+            "auto_cases": [...]   # 针对差异项自动生成的测试用例
+        }
+        """
+        lang_hint = LANG_HINTS.get(lang, lang)
+
+        async def _p(pct, stage):
+            if progress_cb:
+                try:
+                    await progress_cb(pct, stage)
+                except Exception:
+                    pass
+
+        await _p(10, "正在解析需求文档...")
+        await _p(20, "正在解析接口代码...")
+        await _p(35, "AI 正在对比需求与实现...")
+
+        system_prompt = (
+            "你是一名资深测试架构师，专门发现需求文档和接口代码实现之间的偏差。"
+            "你的分析必须基于代码和需求的实际内容，不能凭空捏造问题。"
+            "输出严格的 JSON，不要任何解释文字。"
+        )
+
+        prompt = f"""请对比以下需求文档和接口实现代码，识别所有偏差和风险。
+
+【需求文档】
+---
+{requirement[:4000]}
+---
+
+【接口实现代码（{lang_hint}）】
+---
+{code[:4000]}
+---
+
+## 分析维度
+
+逐条检查以下四类问题：
+
+1. **missing（需求有，代码没有实现）**
+   - 需求描述的功能点在代码中完全缺失
+   - 需求要求的参数校验在代码中没有
+   - 需求要求的错误码/返回格式代码未实现
+
+2. **mismatch（需求和代码行为不一致）**
+   - 数值范围不同（如需求说≤999，代码写的≤100）
+   - 返回格式不同（需求说返回 error_code，代码返回 message）
+   - 状态码不同（需求说失败返回400，代码返回200带错误信息）
+
+3. **extra（代码有，需求未提及的隐式限制）**
+   - 代码中有需求未说明的频率限制、权限控制、黑名单等
+   - 对测试有影响，需要专门覆盖
+
+4. **risk（代码本身的潜在问题）**
+   - 缺少参数 null 校验
+   - 并发场景下可能的竞态条件
+   - 大数值/特殊字符未做防护
+
+## 输出格式
+
+输出纯 JSON，格式如下：
+{{
+  "risk_level": "high|medium|low",
+  "summary": "整体评估，一句话概括主要问题",
+  "items": [
+    {{
+      "type": "missing|mismatch|extra|risk",
+      "severity": "high|medium|low",
+      "title": "问题的简短标题（15字以内）",
+      "requirement": "需求文档的相关原文或描述（若是 risk 类型则填 N/A）",
+      "code_behavior": "代码的实际行为描述",
+      "suggestion": "建议开发修复的方向（一句话）",
+      "test_focus": "针对此问题，测试时应重点验证什么"
+    }}
+  ]
+}}
+
+如果没有发现问题，items 返回空数组，risk_level 为 low。
+每类问题最多列举 5 条，总 items 不超过 15 条。"""
+
+        try:
+            raw = await self._call_llm(system_prompt, prompt, timeout=120)
+            report = json.loads(raw)
+        except (json.JSONDecodeError, Exception) as e:
+            logger.error(f"需求 vs 代码对比分析失败: {e}")
+            report = {
+                "risk_level": "low",
+                "summary": f"分析过程出现异常: {e}",
+                "items": [],
+            }
+
+        report.setdefault("risk_level", "low")
+        report.setdefault("summary", "分析完成")
+        report.setdefault("items", [])
+
+        await _p(70, f"发现 {len(report['items'])} 个差异点，正在生成针对性测试用例...")
+
+        # 针对差异点自动生成用例（每条差异生成 1-2 条专项用例）
+        auto_cases = []
+        if report["items"]:
+            auto_cases = await self._generate_diff_cases(
+                report["items"], requirement, code, lang_hint
+            )
+        report["auto_cases"] = auto_cases
+
+        await _p(100, f"分析完成，发现 {len(report['items'])} 个差异点，生成 {len(auto_cases)} 条专项用例")
+        logger.info(
+            f"代码可行性分析完成: risk={report['risk_level']} "
+            f"items={len(report['items'])} auto_cases={len(auto_cases)}"
+        )
+        return report
+
+    async def _generate_diff_cases(
+        self,
+        items: List[Dict],
+        requirement: str,
+        code: str,
+        lang_hint: str,
+    ) -> List[Dict]:
+        """针对每条差异项生成专项测试用例（覆盖偏差场景）"""
+        if not items:
+            return []
+
+        items_summary = "\n".join(
+            f"{i+1}. [{item.get('type','?')}][{item.get('severity','?')}] "
+            f"{item.get('title','')}：{item.get('test_focus','')}"
+            for i, item in enumerate(items[:10])
+        )
+
+        system_prompt = (
+            "你是接口测试专家，根据需求与代码的差异点，生成专门覆盖这些偏差场景的测试用例。"
+            "严格输出 JSON 数组，不要任何解释。"
+        )
+        prompt = f"""根据以下需求与代码差异点，为每个差异生成 1-2 条专项测试用例，
+专门验证该差异是否真实存在（从测试角度触发和验证）。
+
+【差异清单】
+{items_summary}
+
+【接口代码概要（{lang_hint}）】
+{code[:2000]}
+
+输出 JSON 数组，格式与标准接口用例相同：
+[
+  {{
+    "name": "用例名称（需体现是针对哪个差异的验证）",
+    "module": "差异验证",
+    "method": "POST",
+    "path": "/接口路径",
+    "params": {{}},
+    "body": {{"示例参数": "示例值"}},
+    "assertions": [{{"type": "status_code", "expected": 200}}],
+    "priority": "P1",
+    "description": "该用例验证的差异描述",
+    "scenario": "差异验证",
+    "_diff_ref": "对应差异标题"
+  }}
+]"""
+
+        try:
+            raw = await self._call_llm(system_prompt, prompt, timeout=90)
+            cases = json.loads(raw)
+            if not isinstance(cases, list):
+                return []
+            for c in cases:
+                c.setdefault("enabled", True)
+                c.setdefault("headers", {})
+                c.setdefault("var_extracts", [])
+            return cases
+        except Exception as e:
+            logger.warning(f"差异用例生成失败: {e}")
+            return []
+
+
+api_code_analyzer = ApiCodeAnalyzer()

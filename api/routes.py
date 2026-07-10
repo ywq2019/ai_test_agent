@@ -2652,6 +2652,175 @@ async def generate_api_cases(
     return {"message": "AI生成任务已启动，请通过 WebSocket 接收进度", "project_id": project_id}
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 接口代码分析 — 从代码直接生成用例
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/api-test/projects/{project_id}/cases/generate-from-code")
+async def generate_cases_from_code(
+    project_id: int,
+    data: dict,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    从接口实现代码直接生成测试用例。
+    body: { code: str, lang: str }
+    后台执行，WebSocket client_id=api_gen 推送进度。
+    """
+    from sqlalchemy import select
+    result = await db.execute(select(ApiProject).where(ApiProject.id == project_id))
+    proj = result.scalar_one_or_none()
+    if not proj:
+        raise HTTPException(status_code=404, detail="项目不存在")
+
+    code = (data.get("code") or "").strip()
+    lang = data.get("lang", "python")
+    if not code:
+        raise HTTPException(status_code=400, detail="请提供接口代码")
+
+    async def _bg():
+        from skills.api_case_generator import api_code_analyzer
+        from tools.database import async_session_maker
+
+        async def progress_cb(pct, stage):
+            await ws_manager.broadcast(
+                {"type": "api_gen_progress", "percent": pct, "stage": stage},
+                client_id="api_gen",
+            )
+
+        try:
+            cases = await api_code_analyzer.generate_from_code(
+                code=code,
+                lang=lang,
+                base_url=proj.base_url or "",
+                progress_cb=progress_cb,
+            )
+            async with async_session_maker() as s:
+                for c in cases:
+                    s.add(ApiCase(
+                        project_id=project_id,
+                        name=c.get("name", ""),
+                        module=c.get("module", "代码分析"),
+                        method=c.get("method", "POST"),
+                        path=c.get("path", "/"),
+                        headers=c.get("headers") or {},
+                        params=c.get("params") or {},
+                        body=c.get("body"),
+                        assertions=c.get("assertions"),
+                        var_extracts=c.get("var_extracts"),
+                        priority=c.get("priority", "P1"),
+                        description=c.get("description", ""),
+                        enabled=True,
+                    ))
+                await s.commit()
+            await ws_manager.broadcast(
+                {"type": "api_gen_done", "count": len(cases)}, client_id="api_gen"
+            )
+        except Exception as e:
+            logger.error(f"代码用例生成失败: {e}", exc_info=True)
+            await ws_manager.broadcast(
+                {"type": "api_gen_error", "message": str(e)}, client_id="api_gen"
+            )
+
+    background_tasks.add_task(_bg)
+    return {"message": "代码分析任务已启动", "project_id": project_id}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 接口代码分析 — 需求文档 vs 代码 差异对比
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/api-test/projects/{project_id}/code-analyze")
+async def analyze_code_vs_requirement(
+    project_id: int,
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    对比需求文档和接口代码，返回差异分析报告（同步，前端等待结果）。
+    body: { requirement: str, code: str, lang: str }
+    """
+    from sqlalchemy import select
+    result = await db.execute(select(ApiProject).where(ApiProject.id == project_id))
+    proj = result.scalar_one_or_none()
+    if not proj:
+        raise HTTPException(status_code=404, detail="项目不存在")
+
+    requirement = (data.get("requirement") or "").strip()
+    code        = (data.get("code") or "").strip()
+    lang        = data.get("lang", "python")
+
+    if not code:
+        raise HTTPException(status_code=400, detail="请提供接口代码")
+    if not requirement:
+        raise HTTPException(status_code=400, detail="请提供需求文档或功能描述")
+
+    from skills.api_case_generator import api_code_analyzer
+
+    try:
+        report = await api_code_analyzer.analyze_vs_requirement(
+            requirement=requirement,
+            code=code,
+            lang=lang,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.exception("代码可行性分析失败: {}", repr(e))
+        raise HTTPException(status_code=500, detail=f"分析失败: {e}")
+
+    return report
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 接口代码分析 — 将差异分析报告中的 auto_cases 写入项目用例库
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/api-test/projects/{project_id}/code-analyze/save-cases")
+async def save_analyze_cases(
+    project_id: int,
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    将代码可行性分析结果中的 auto_cases 写入项目用例库。
+    body: { cases: [...] }
+    """
+    from sqlalchemy import select
+    result = await db.execute(select(ApiProject).where(ApiProject.id == project_id))
+    proj = result.scalar_one_or_none()
+    if not proj:
+        raise HTTPException(status_code=404, detail="项目不存在")
+
+    cases = data.get("cases", [])
+    if not cases:
+        raise HTTPException(status_code=400, detail="没有可保存的用例")
+
+    saved = 0
+    for c in cases:
+        db.add(ApiCase(
+            project_id=project_id,
+            name=c.get("name", "差异验证用例"),
+            module=c.get("module", "差异验证"),
+            method=c.get("method", "POST"),
+            path=c.get("path", "/"),
+            headers=c.get("headers") or {},
+            params=c.get("params") or {},
+            body=c.get("body"),
+            assertions=c.get("assertions") or [{"type": "status_code", "expected": 200}],
+            var_extracts=c.get("var_extracts"),
+            priority=c.get("priority", "P1"),
+            description=c.get("description", ""),
+            enabled=True,
+        ))
+        saved += 1
+
+    await db.commit()
+    logger.info(f"保存差异验证用例: {saved} 条 → project_id={project_id}")
+    return {"message": f"已保存 {saved} 条差异验证用例", "saved": saved}
+
+
 # ─────────────────────────────────────────────
 # 内置函数列表
 # ─────────────────────────────────────────────

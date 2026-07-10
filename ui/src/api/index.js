@@ -104,6 +104,10 @@ export const apiTestApi = {
   updateCase: (id, data) => api.put(`/api-test/cases/${id}`, data),
   deleteCases: (ids) => api.delete('/api-test/cases', { data: ids }),
   generateCases: (projectId, data) => api.post(`/api-test/projects/${projectId}/cases/generate`, data, { timeout: 300000 }),
+  // 代码分析
+  generateFromCode: (projectId, data) => api.post(`/api-test/projects/${projectId}/cases/generate-from-code`, data, { timeout: 300000 }),
+  codeAnalyze: (projectId, data) => api.post(`/api-test/projects/${projectId}/code-analyze`, data, { timeout: 180000 }),
+  saveAnalyzeCases: (projectId, data) => api.post(`/api-test/projects/${projectId}/code-analyze/save-cases`, data),
   executeCases: (projectId, data) => api.post(`/api-test/projects/${projectId}/execute`, data, { timeout: 600000 }),
   startLoad: (projectId, data) => api.post(`/api-test/projects/${projectId}/load`, data, { timeout: 30000 }),
   stopLoad: () => api.post('/api-test/load/stop'),
