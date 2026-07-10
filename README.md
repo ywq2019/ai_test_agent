@@ -19,9 +19,7 @@
 服务器已安装 Docker 和 Docker Compose 即可：
 
 ```bash
-git clone https://github.com/ywq2019/ai_test_agent.git
-cd ai_test_agent
-docker compose up -d
+git clone https://github.com/ywq2019/ai_test_agent.git && cd ai_test_agent && docker compose up -d
 ```
 
 启动后访问 `http://服务器IP:4000`，进入**大模型配置**页填写 API Key。
