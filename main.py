@@ -136,6 +136,18 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# ── 全局异常处理：屏蔽堆栈信息，统一返回格式 ─────────────────────────────────
+from fastapi import HTTPException as FastAPIHTTPException
+
+@app.exception_handler(FastAPIHTTPException)
+async def http_exception_handler(request: Request, exc: FastAPIHTTPException):
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Unhandled error [{request.method} {request.url.path}]: {type(exc).__name__}: {exc}")
+    return JSONResponse(status_code=500, content={"detail": "服务器内部错误，请稍后重试"})
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,

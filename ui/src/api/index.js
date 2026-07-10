@@ -15,7 +15,7 @@ api.interceptors.request.use(config => {
   return config
 })
 
-// ── 响应拦截器：401 跳登录页 ──────────────────────────────────────────────────
+// ── 响应拦截器：401 跳登录页，其他错误统一提示 ───────────────────────────────
 api.interceptors.response.use(
   response => response.data,
   error => {
@@ -25,6 +25,13 @@ api.interceptors.response.use(
       localStorage.removeItem('role')
       const redirect = encodeURIComponent(window.location.pathname)
       window.location.href = `/login?redirect=${redirect}`
+      return Promise.reject(error)
+    }
+    // 其他错误：取后端 detail 字段展示，没有则用通用提示
+    const msg = error.response?.data?.detail || error.message || '请求失败，请稍后重试'
+    // 不在登录页时才弹提示（避免循环）
+    if (!window.location.pathname.includes('/login')) {
+      import('element-plus').then(({ ElMessage }) => ElMessage.error(msg))
     }
     return Promise.reject(error)
   }
