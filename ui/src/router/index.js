@@ -2,6 +2,12 @@ import { createRouter, createWebHistory } from 'vue-router'
 
 const routes = [
   {
+    path: '/login',
+    name: 'Login',
+    component: () => import('../views/Login.vue'),
+    meta: { public: true }
+  },
+  {
     path: '/',
     name: 'Home',
     component: () => import('../views/Home.vue')
@@ -56,6 +62,14 @@ const routes = [
 const router = createRouter({
   history: createWebHistory(),
   routes
+})
+
+// ── 导航守卫：未登录跳转到登录页 ─────────────────────────────────────────────
+router.beforeEach((to) => {
+  if (to.meta.public) return true
+  const token = localStorage.getItem('token')
+  if (!token) return { path: '/login', query: { redirect: to.fullPath } }
+  return true
 })
 
 export default router

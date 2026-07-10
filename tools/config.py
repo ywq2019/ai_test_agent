@@ -36,6 +36,13 @@ class Settings(BaseSettings):
     LOG_DIR: str = "./logs"
     UPLOAD_DIR: str = "./uploads"
 
+    # ── 鉴权 ──────────────────────────────────────────────────────────────────
+    SECRET_KEY: str = "ai-test-agent-secret-key-change-in-production-2024"
+    JWT_ALGORITHM: str = "HS256"
+    JWT_EXPIRE_HOURS: int = 24 * 7   # token 有效期 7 天
+    DEFAULT_USERNAME: str = "admin"
+    DEFAULT_PASSWORD: str = "admin123"
+
     class Config:
         env_file = ".env"
 

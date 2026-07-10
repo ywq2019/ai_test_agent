@@ -10,10 +10,10 @@ import os
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from loguru import logger
 
 from api.routes import router as api_router
@@ -93,6 +93,21 @@ async def lifespan(app: FastAPI):
     await load_global_vars()
     logger.info("全局变量池已加载")
 
+    # 初始化默认管理员账号
+    from api.auth import hash_password
+    from sqlalchemy import select
+    from tools.database import AsyncSessionLocal, User
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(User).where(User.username == settings.DEFAULT_USERNAME))
+        if not result.scalar_one_or_none():
+            db.add(User(
+                username=settings.DEFAULT_USERNAME,
+                password_hash=hash_password(settings.DEFAULT_PASSWORD),
+                role="admin"
+            ))
+            await db.commit()
+            logger.info(f"默认管理员账号已创建：{settings.DEFAULT_USERNAME} / {settings.DEFAULT_PASSWORD}")
+
     yield
 
     # 关闭时取消清理任务
@@ -128,6 +143,39 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── JWT 鉴权中间件 ────────────────────────────────────────────────────────────
+# 白名单：不需要 token 的路径前缀
+_AUTH_WHITELIST = (
+    "/api/v1/auth/login",
+    "/api/v1/health",
+    "/ws",
+    "/assets",
+    "/screenshots",
+    "/reports",
+)
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    path = request.url.path
+    # 白名单路径直接放行
+    if any(path.startswith(w) for w in _AUTH_WHITELIST):
+        return await call_next(request)
+    # 非 API 路径（前端页面）放行
+    if not path.startswith("/api/"):
+        return await call_next(request)
+    # 验证 token
+    from api.auth import decode_token
+    token = None
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+    if not token or not decode_token(token):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "未登录或 Token 已过期"}
+        )
+    return await call_next(request)
 
 # 挂载前端构建产物（模块级，目录固定存在）
 _dist_dir = os.path.join(os.path.dirname(__file__), "ui", "dist")

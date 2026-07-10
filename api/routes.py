@@ -4,6 +4,7 @@ API路由定义
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, BackgroundTasks
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 from typing import List, Optional
 from pathlib import Path
 import shutil
@@ -20,12 +21,51 @@ from api.schemas import (
     PageElementResponse, HealthResponse,
     LLMConfigRequest, LLMTestRequest, PageParseRequest
 )
-from tools.database import get_db, TestTask, TestCase, TestResult, TestReport, ApiProject, ApiCase, ApiLoadConfig, ApiTestReport, CustomScript, GlobalVariable, TestPlan, TestPlanStep, TestPlanReport
+from tools.database import get_db, TestTask, TestCase, TestResult, TestReport, ApiProject, ApiCase, ApiLoadConfig, ApiTestReport, CustomScript, GlobalVariable, TestPlan, TestPlanStep, TestPlanReport, User
 from agent.core import uitest_agent
 from api.websocket_manager import ws_manager
 from tools.config import settings
+from api.auth import get_current_user, verify_password, hash_password, create_access_token
 
 router = APIRouter()
+
+# ── 鉴权接口（无需 token）─────────────────────────────────────────────────────
+
+@router.post("/auth/login")
+async def login(data: dict, db: AsyncSession = Depends(get_db)):
+    username = data.get("username", "").strip()
+    password = data.get("password", "")
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="用户名和密码不能为空")
+    result = await db.execute(select(User).where(User.username == username))
+    user = result.scalar_one_or_none()
+    if not user or not verify_password(password, user.password_hash):
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
+    token = create_access_token({"sub": user.username, "role": user.role})
+    return {"access_token": token, "token_type": "bearer", "username": user.username, "role": user.role}
+
+
+@router.get("/auth/me")
+async def get_me(current_user: User = Depends(get_current_user)):
+    return {"username": current_user.username, "role": current_user.role}
+
+
+@router.put("/auth/password")
+async def change_password(
+    data: dict,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    old_pwd = data.get("old_password", "")
+    new_pwd = data.get("new_password", "")
+    if not verify_password(old_pwd, current_user.password_hash):
+        raise HTTPException(status_code=400, detail="原密码错误")
+    if len(new_pwd) < 6:
+        raise HTTPException(status_code=400, detail="新密码不能少于6位")
+    current_user.password_hash = hash_password(new_pwd)
+    db.add(current_user)
+    await db.commit()
+    return {"message": "密码修改成功"}
 
 
 @router.get("/health", response_model=HealthResponse)

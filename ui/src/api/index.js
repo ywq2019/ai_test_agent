@@ -8,10 +8,24 @@ const api = axios.create({
   }
 })
 
+// ── 请求拦截器：自动附加 token ────────────────────────────────────────────────
+api.interceptors.request.use(config => {
+  const token = localStorage.getItem('token')
+  if (token) config.headers['Authorization'] = `Bearer ${token}`
+  return config
+})
+
+// ── 响应拦截器：401 跳登录页 ──────────────────────────────────────────────────
 api.interceptors.response.use(
   response => response.data,
   error => {
-    console.error('API Error:', error)
+    if (error.response?.status === 401) {
+      localStorage.removeItem('token')
+      localStorage.removeItem('username')
+      localStorage.removeItem('role')
+      const redirect = encodeURIComponent(window.location.pathname)
+      window.location.href = `/login?redirect=${redirect}`
+    }
     return Promise.reject(error)
   }
 )

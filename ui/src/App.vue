@@ -1,6 +1,10 @@
 <template>
   <div id="app">
-    <el-container class="layout-container">
+    <!-- 登录页单独渲染，不带侧边栏 -->
+    <router-view v-if="route.name === 'Login'" />
+
+    <!-- 主布局 -->
+    <el-container v-else class="layout-container">
       <el-aside width="200px" class="layout-aside">
         <div class="logo">
           <el-icon><Monitor /></el-icon>
@@ -82,6 +86,9 @@
             <el-badge :value="notificationCount" :hidden="notificationCount === 0">
               <el-icon size="20"><Bell /></el-icon>
             </el-badge>
+            <el-divider direction="vertical" style="margin:0 12px;height:16px" />
+            <span style="font-size:13px;color:#606266;margin-right:8px">{{ auth.username }}</span>
+            <el-button size="small" text type="danger" @click="handleLogout">退出</el-button>
           </div>
         </el-header>
 
@@ -106,11 +113,14 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useTaskStore } from './stores/task'
+import { useAuthStore } from './stores/auth'
 import { RefreshRight } from '@element-plus/icons-vue'
+import { ElMessageBox, ElMessage } from 'element-plus'
 
 const route = useRoute()
 const router = useRouter()
 const taskStore = useTaskStore()
+const auth = useAuthStore()
 
 const wsConnected = ref(false)
 const wsDialogVisible = ref(false)
@@ -118,6 +128,13 @@ const notificationCount = ref(0)
 
 const refreshPage = () => {
   router.go(0)
+}
+
+const handleLogout = async () => {
+  await ElMessageBox.confirm('确定退出登录？', '提示', { type: 'warning', confirmButtonText: '退出' })
+  auth.logout()
+  ElMessage.success('已退出登录')
+  router.push('/login')
 }
 
 const pageTitle = computed(() => {
