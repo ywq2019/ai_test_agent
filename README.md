@@ -1,6 +1,6 @@
 # AI 测试工具平台
 
-基于 **AI 大模型 + LangGraph + Playwright** 的智能化零代码全场景自动化测试平台，覆盖 UI 自动化与接口自动化双引擎，支持 Claude / DeepSeek / GPT / Gemini 等任意模型一键切换。
+ 基于 **AI 大模型 + LangGraph + Playwright** 的智能化零代码全场景自动化测试平台，覆盖 UI 自动化与接口自动化双引擎，支持 Claude / DeepSeek / GPT / Gemini 等任意模型一键切换。
 
 ---
 
