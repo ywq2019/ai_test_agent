@@ -395,41 +395,17 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
     async def _call_llm_for_module(
         self, module_name: str, features: list, content: str
     ) -> Dict[str, Any]:
-        """为单个功能模块生成测试用例（最多10条）。"""
+        """为单个功能模块生成测试用例，数量根据功能点数量动态调整（8-20条）。"""
         features_text = "\n".join(f"  - {f}" for f in features[:6])
-        system_prompt = (
-            "You are a senior QA engineer. Generate functional test cases for ONE specific module. "
-            "Use equivalence partitioning, boundary value analysis, scenario testing, and error guessing. "
-            "Output ONLY valid JSON. No markdown."
-        )
-        prompt = f"""为「{module_name}」模块生成功能测试用例（最多10条）。
-
-该模块功能点：
-{features_text}
-
-参考需求（节选）：
----
-{content[:2000]}
----
-
-只输出纯JSON：
-{{
-  "name": "{module_name}",
-  "cases": [
-    {{
-      "id": "TC001",
-      "name": "功能点-测试方法-场景（如：登录-等价类-有效账号成功登录）",
-      "priority": "P0",
-      "type": "功能测试",
-      "test_method": "等价类划分",
-      "preconditions": "前置条件",
-      "steps": ["1. 具体操作（含测试数据）", "2. 操作"],
-      "expected": "预期结果（可量化验证）"
-    }}
-  ]
-}}
-
-涵盖：正常主流程(P0/P1) + 边界值 + 异常分支(P2)，ID从TC001编号。"""
+        # 功能点数 × 2，最少 8 条，最多 20 条
+        case_limit = max(8, min(len(features) * 2, 20))
+        from skills.prompt_loader import get_system, render_user
+        system_prompt = get_system("ai_case_gen.yaml", "generate_module_cases")
+        prompt = render_user("ai_case_gen.yaml", "generate_module_cases",
+                             module_name=module_name,
+                             features_text=features_text,
+                             content=content[:2000],
+                             case_limit=case_limit)
 
         try:
             raw = await self._run_claude_subprocess(system_prompt, prompt, timeout_secs=90)

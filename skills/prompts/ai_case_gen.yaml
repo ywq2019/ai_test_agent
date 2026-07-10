@@ -35,7 +35,7 @@ generate_module_cases:
     Output ONLY valid JSON. No markdown.
 
   user_template: |
-    为「{module_name}」模块生成功能测试用例（最多10条）。
+    为「{module_name}」模块生成功能测试用例（最多{case_limit}条）。
 
     该模块功能点：
     {features_text}
