@@ -35,96 +35,56 @@ docker compose logs -f                     # 查看日志
 docker compose down                        # 停止
 ```
 
-### 方式二：本地开发启动
+### 方式二：本地启动
 
 **环境要求**：Python 3.11+、Node.js 18+
+
+**生产模式**（单端口，前端打包后由后端托管）：
 
 ```bash
 # 1. 安装依赖
 pip install -r requirements.txt
 playwright install chromium
 
-# 2. 构建前端
+# 2. 构建前端（编译产物由后端静态托管）
 cd ui && npm install && npm run build && cd ..
 
-# 3. 启动后端
+# 3. 启动
 python main.py
 ```
 
-访问 `http://localhost:4000`，进入大模型配置页填写 API Key。
+访问 `http://localhost:4000`，前端由后端统一托管，只需启动一个进程。
 
-**开发模式**（前后端分离，支持热更新）：
+**开发模式**（双端口，支持热更新，适合开发调试）：
 
 ```bash
-# 终端1：后端
+# 终端1：后端（API 服务，端口 4000）
 python main.py
 
-# 终端2：前端（访问 http://localhost:8090）
+# 终端2：前端 Vite 开发服务器（端口 8090，自动代理 /api 请求到后端 4000）
 cd ui && npm run dev
 ```
 
-### 配置说明
+访问 `http://localhost:8090`，前端代码修改实时生效。
 
-项目根目录有两个配置文件，按部署方式选用：
+> **两个端口说明**：生产模式下 FastAPI 直接托管 `ui/dist/` 静态文件，访问 4000 即可；开发模式下 Vite 在 8090 启动独立服务并将 `/api`、`/ws` 等请求代理转发到后端 4000。
 
-| 文件 | 用途 |
-| --- | --- |
-| `.env` | 本地开发（SQLite，`python main.py` 读取） |
-| `.env.docker` | Docker 部署（PostgreSQL，`docker-compose.yml` 注入） |
+### 局域网共享（Windows 团队使用）
 
-**`.env` 完整配置项说明：**
+本机启动后，团队成员可通过内网 IP 直接访问，无需额外配置：
 
-```ini
-# ── 应用 ──────────────────────────────────────────────
-APP_NAME=AI 测试工具平台
-APP_VERSION=1.0.0
-DEBUG=True               # 生产环境改为 False
-HOST=0.0.0.0
-PORT=4000
-
-# ── AI 大模型（必填，也可启动后在页面配置）──────────────
-AI_API_KEY=your_api_key
-AI_API_URL=https://api.deepseek.com   # 不要加 /v1，代码自动拼接
-AI_MODEL=deepseek-v4-flash
-AI_MODEL_NAME=DeepSeek V4 Flash
-AI_TEMPERATURE=0.5
-
-# ── 数据库 ────────────────────────────────────────────
-# 本地开发用 SQLite（零配置）
-DATABASE_URL=sqlite+aiosqlite:///./uitest_agent.db
-# 服务器/生产用 PostgreSQL（Docker 部署时 .env.docker 已配好）
-# DATABASE_URL=postgresql+asyncpg://user:pass@host:5432/dbname
-
-# ── 鉴权 ──────────────────────────────────────────────
-SECRET_KEY=your-secret-key-change-in-production   # 生产环境必须修改！
-JWT_EXPIRE_HOURS=168     # Token 有效期（小时），默认 7 天
-DEFAULT_USERNAME=admin   # 首次启动自动创建的管理员账号
-DEFAULT_PASSWORD=admin123
-
-# ── 数据目录 ───────────────────────────────────────────
-REPORT_OUTPUT_DIR=./reports
-SCREENSHOT_DIR=./screenshots
-LOG_DIR=./logs
-UPLOAD_DIR=./uploads
+```bash
+# 查看本机内网 IP（找以太网或 WLAN 的 IPv4 地址）
+ipconfig
 ```
 
-**数据库选型说明：**
-
-| 场景 | 数据库 | 配置方式 |
-| --- | --- | --- |
-| 本地开发 / 1-5 人小团队 | SQLite | 默认，零配置，直接 `python main.py` |
-| 服务器部署 / 多人并发 | PostgreSQL 15 | `docker compose up -d` 自动启动，无需手动配置 |
-
-两套环境代码完全一致，SQLAlchemy 自动适配，新字段通过 `ALTER TABLE` 向前兼容，**升级只需拉代码重启，数据不丢失**。
-
-### 局域网共享
-
-团队成员直接访问内网 IP，无需额外配置：
+开放防火墙入站端口：
 
 ```powershell
-# 开放防火墙端口（Windows）
 New-NetFirewallRule -DisplayName "AI测试平台" -Direction Inbound -Protocol TCP -LocalPort 4000 -Action Allow
 ```
+
+团队成员访问 `http://<本机IP>:4000` 即可使用，例如 `http://192.168.1.100:4000`。
 
 ### 登录账号
 
