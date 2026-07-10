@@ -4,7 +4,7 @@
 
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/AI%E5%B9%B3%E5%8F%B0%E6%BC%94%E7%A4%BA%E8%A7%86%E9%A2%91_1904w.gif" width="90%" alt="AI 测试平台演示"/>
+<img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/AI%E6%B5%8B%E8%AF%95%E5%B7%A5%E5%85%B7%E5%B9%B3%E5%8F%B0_1904w.gif" width="90%" alt="AI 测试平台演示"/>
 
 > ⏳ 演示包含 AI 生成测试用例的完整过程，AI 推理需要一定时间，请耐心观看。
 
@@ -280,44 +280,48 @@ ai_test_agent/
 
 <table>
     <tr>
+        <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/0.png"/></td>
         <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/1.png"/></td>
+    </tr>
+    <tr>
         <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/2.png"/></td>
-    </tr>
-    <tr>
         <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/3.png"/></td>
+    </tr>
+    <tr>
         <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/4.png"/></td>
-    </tr>
-    <tr>
         <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/5.png"/></td>
+    </tr>
+    <tr>
         <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/6.png"/></td>
-    </tr>
-    <tr>
         <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/7.png"/></td>
+    </tr>
+    <tr>
         <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/8.png"/></td>
-    </tr>
-    <tr>
         <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/8.1.png"/></td>
+    </tr>
+    <tr>
         <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/9.png"/></td>
-    </tr>
-    <tr>
         <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/9.1.png"/></td>
+    </tr>
+    <tr>
         <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/9.2.png"/></td>
-    </tr>
-    <tr>
         <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/9.3.png"/></td>
+    </tr>
+    <tr>
         <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/10.png"/></td>
-    </tr>
-    <tr>
         <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/11.png"/></td>
+    </tr>
+    <tr>
         <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/12.png"/></td>
-    </tr>
-    <tr>
         <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/13.png"/></td>
-        <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/14.png"/></td>
     </tr>
     <tr>
+        <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/14.png"/></td>
         <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/15.png"/></td>
+    </tr>
+    <tr>
         <td><img src="https://raw.githubusercontent.com/ywq2019/ai_test_agent/master/image/16.png"/></td>
+        <td></td>
     </tr>
 </table>
 
