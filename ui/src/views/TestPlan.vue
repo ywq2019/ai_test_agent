@@ -506,9 +506,8 @@ import {
   CircleCheck, CircleClose, RefreshRight, Clock, WarningFilled, Loading, Cpu, CopyDocument,
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import axios from 'axios'
+import api from '../api'
 
-const API = '/api/v1'
 
 // ── 状态 ────────────────────────────────────────────────────────────────────
 const plans = ref([])
@@ -646,8 +645,8 @@ async function copyAnalysis() {
 
 // ── 数据加载 ──────────────────────────────────────────────────────────────────
 async function loadPlans() {
-  const res = await axios.get(`${API}/test-plans`)
-  plans.value = res.data
+  const res = await api.get(`/test-plans`)
+  plans.value = res
 }
 
 async function selectPlan(id) {
@@ -660,31 +659,31 @@ async function selectPlan(id) {
 }
 
 async function loadPlanDetail(id) {
-  const res = await axios.get(`${API}/test-plans/${id}`)
-  activePlan.value = res.data
+  const res = await api.get(`/test-plans/${id}`)
+  activePlan.value = res
 }
 
 async function loadPlanReports(id) {
-  const res = await axios.get(`${API}/test-plans/${id}/reports`)
-  reports.value = res.data
+  const res = await api.get(`/test-plans/${id}/reports`)
+  reports.value = res
   lastReport.value = reports.value[0] ? await fetchReportDetail(reports.value[0].id) : null
 }
 
 async function fetchReportDetail(id) {
-  const res = await axios.get(`${API}/test-plans/reports/${id}`)
-  return res.data
+  const res = await api.get(`/test-plans/reports/${id}`)
+  return res
 }
 
 async function loadAllProjects() {
-  const res = await axios.get(`${API}/api-test/projects`)
-  allProjects.value = res.data
+  const res = await api.get(`/api-test/projects`)
+  allProjects.value = res
 }
 
 async function loadCandidateCases() {
   // 使用 all-cases 接口，返回 [{project_id, project_name, cases:[...]}]
-  const res = await axios.get(`${API}/api-test/all-cases`)
+  const res = await api.get(`/api-test/all-cases`)
   const result = []
-  for (const proj of res.data) {
+  for (const proj of res) {
     for (const c of proj.cases || []) {
       result.push({ ...c, project_id: proj.project_id, project_name: proj.project_name })
     }
@@ -714,7 +713,7 @@ async function submitPlanForm() {
   saving.value = true
   try {
     if (planDialogMode.value === 'create') {
-      const res = await axios.post(`${API}/test-plans`, {
+      const res = await api.post(`/test-plans`, {
         name,
         description: planForm.value.description || '',
         proxy_url: planForm.value.proxy_url || '',
@@ -723,9 +722,9 @@ async function submitPlanForm() {
       planDialogVisible.value = false
       ElMessage.success('计划已创建')
       await loadPlans()
-      await selectPlan(res.data.id)
+      await selectPlan(res.id)
     } else {
-      await axios.put(`${API}/test-plans/${activePlanId.value}`, {
+      await api.put(`/test-plans/${activePlanId.value}`, {
         name,
         description: planForm.value.description || '',
         proxy_url: planForm.value.proxy_url || '',
@@ -748,7 +747,7 @@ async function submitPlanForm() {
 async function deletePlan() {
   await ElMessageBox.confirm(`确定删除计划「${activePlan.value.name}」？其步骤和报告也会一并删除。`, '删除确认', { type: 'warning' })
   try {
-    await axios.delete(`${API}/test-plans/${activePlanId.value}`)
+    await api.delete(`/test-plans/${activePlanId.value}`)
     ElMessage.success('已删除')
     activePlanId.value = null
     activePlan.value = null
@@ -782,7 +781,7 @@ async function submitAddSteps() {
       sort_order: currentMax + i,
       enabled: true,
     }))
-    await axios.post(`${API}/test-plans/${activePlanId.value}/steps`, { steps: newSteps, replace: false })
+    await api.post(`/test-plans/${activePlanId.value}/steps`, { steps: newSteps, replace: false })
     ElMessage.success(`已添加 ${newSteps.length} 个步骤`)
     await loadPlanDetail(activePlanId.value)
     await loadPlans()
@@ -794,7 +793,7 @@ async function submitAddSteps() {
 
 async function deleteStep(row) {
   await ElMessageBox.confirm(`确定移除步骤「${row.case_name}」？`, '确认', { type: 'warning' })
-  await axios.delete(`${API}/test-plans/${activePlanId.value}/steps/${row.id}`)
+  await api.delete(`/test-plans/${activePlanId.value}/steps/${row.id}`)
   ElMessage.success('已移除')
   await loadPlanDetail(activePlanId.value)
   await loadPlans()
@@ -808,7 +807,7 @@ async function toggleStep(row) {
     sort_order: i,
     enabled: s.enabled,
   }))
-  await axios.post(`${API}/test-plans/${activePlanId.value}/steps`, { steps, replace: true })
+  await api.post(`/test-plans/${activePlanId.value}/steps`, { steps, replace: true })
 }
 
 // ── 执行 ──────────────────────────────────────────────────────────────────────
@@ -866,8 +865,8 @@ async function runPlan(force = false) {
     }))
   startRunningTimer()
   try {
-    const url = `${API}/test-plans/${activePlanId.value}/run${force ? '?force=true' : ''}`
-    await axios.post(url)
+    const url = `/test-plans/${activePlanId.value}/run${force ? '?force=true' : ''}`
+    await api.post(url)
     // 结果通过 WebSocket 推送
   } catch (e) {
     const detail = e?.response?.data?.detail || '启动执行失败'
@@ -894,7 +893,7 @@ async function viewReport(id) {
 
 async function deleteReport(id) {
   await ElMessageBox.confirm('确定删除该执行报告？', '确认', { type: 'warning' })
-  await axios.delete(`${API}/test-plans/reports/${id}`)
+  await api.delete(`/test-plans/reports/${id}`)
   ElMessage.success('已删除')
   await loadPlanReports(activePlanId.value)
 }
@@ -904,7 +903,7 @@ async function batchDeleteReports() {
   if (!ids.length) return
   await ElMessageBox.confirm(`确定删除选中的 ${ids.length} 条报告？`, '批量删除', { type: 'warning' })
   try {
-    await axios.delete(`${API}/test-plans/reports/batch`, { data: ids })
+    await api.delete(`/test-plans/reports/batch`, { data: ids })
     ElMessage.success(`已删除 ${ids.length} 条报告`)
     selectedReports.value = []
     await loadPlanReports(activePlanId.value)
@@ -917,8 +916,8 @@ async function analyzeReport() {
   if (!reportDetail.value) return
   aiAnalyzing.value = true
   try {
-    const res = await axios.post(`${API}/test-plans/reports/${reportDetail.value.id}/analyze`)
-    aiAnalysis.value = res.data.analysis
+    const res = await api.post(`/test-plans/reports/${reportDetail.value.id}/analyze`)
+    aiAnalysis.value = res.analysis
   } catch (e) {
     ElMessage.error(e?.response?.data?.detail || 'AI分析失败')
   } finally {

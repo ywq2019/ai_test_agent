@@ -88,6 +88,7 @@
             </el-badge>
             <el-divider direction="vertical" style="margin:0 12px;height:16px" />
             <span style="font-size:13px;color:#606266;margin-right:8px">{{ auth.username }}</span>
+            <el-button v-if="auth.role === 'admin'" size="small" text @click="openUserMgr" style="margin-right:4px">用户管理</el-button>
             <el-button size="small" text type="danger" @click="handleLogout">退出</el-button>
           </div>
         </el-header>
@@ -106,6 +107,65 @@
         <el-button @click="connectWebSocket">重新连接</el-button>
       </template>
     </el-dialog>
+
+    <!-- 用户管理 Dialog -->
+    <el-dialog v-model="userMgrVisible" title="用户管理" width="600px" destroy-on-close>
+      <div style="margin-bottom:12px">
+        <el-button type="primary" size="small" :icon="Plus" @click="showCreateUser = true">新建用户</el-button>
+      </div>
+
+      <!-- 新建用户表单 -->
+      <el-form v-if="showCreateUser" :model="newUserForm" label-width="72px" size="small"
+        style="background:#f8fafc;border-radius:8px;padding:14px 16px;margin-bottom:12px;border:1px solid #ebeef5">
+        <el-row :gutter="12">
+          <el-col :span="8">
+            <el-form-item label="用户名">
+              <el-input v-model="newUserForm.username" placeholder="登录用户名" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="密码">
+              <el-input v-model="newUserForm.password" type="password" show-password placeholder="不少于6位" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="角色">
+              <el-select v-model="newUserForm.role" style="width:100%">
+                <el-option label="普通用户" value="user" />
+                <el-option label="管理员" value="admin" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <div style="display:flex;justify-content:flex-end;gap:8px">
+          <el-button size="small" @click="showCreateUser = false">取消</el-button>
+          <el-button size="small" type="primary" :loading="creatingUser" @click="handleCreateUser">确认创建</el-button>
+        </div>
+      </el-form>
+
+      <!-- 用户列表 -->
+      <el-table :data="userList" size="small" stripe v-loading="loadingUsers">
+        <el-table-column prop="username" label="用户名" />
+        <el-table-column prop="role" label="角色" width="90">
+          <template #default="{ row }">
+            <el-tag :type="row.role === 'admin' ? 'danger' : 'info'" size="small">
+              {{ row.role === 'admin' ? '管理员' : '普通用户' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="created_at" label="创建时间" width="160">
+          <template #default="{ row }">{{ formatUserTime(row.created_at) }}</template>
+        </el-table-column>
+        <el-table-column label="操作" width="150" align="center">
+          <template #default="{ row }">
+            <el-button size="small" text type="primary" @click="handleResetPwd(row)">重置密码</el-button>
+            <el-button size="small" text type="danger"
+              :disabled="row.username === auth.username"
+              @click="handleDeleteUser(row)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-dialog>
   </div>
 </template>
 
@@ -114,8 +174,9 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useTaskStore } from './stores/task'
 import { useAuthStore } from './stores/auth'
-import { RefreshRight } from '@element-plus/icons-vue'
+import { RefreshRight, Plus } from '@element-plus/icons-vue'
 import { ElMessageBox, ElMessage } from 'element-plus'
+import { userApi } from './api'
 
 const route = useRoute()
 const router = useRouter()
@@ -135,6 +196,65 @@ const handleLogout = async () => {
   auth.logout()
   ElMessage.success('已退出登录')
   router.push('/login')
+}
+
+// ── 用户管理 ─────────────────────────────────────────────────────────────────
+const userMgrVisible = ref(false)
+const userList = ref([])
+const loadingUsers = ref(false)
+const showCreateUser = ref(false)
+const creatingUser = ref(false)
+const newUserForm = reactive({ username: '', password: '', role: 'user' })
+
+const formatUserTime = (iso) => {
+  if (!iso) return ''
+  const d = new Date(iso.includes('Z') ? iso : iso + 'Z')
+  const pad = n => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+const openUserMgr = async () => {
+  userMgrVisible.value = true
+  showCreateUser.value = false
+  loadingUsers.value = true
+  try {
+    userList.value = await userApi.list()
+  } finally {
+    loadingUsers.value = false
+  }
+}
+
+const handleCreateUser = async () => {
+  if (!newUserForm.username.trim() || !newUserForm.password) {
+    return ElMessage.warning('用户名和密码不能为空')
+  }
+  creatingUser.value = true
+  try {
+    const u = await userApi.create({ ...newUserForm })
+    userList.value.push(u)
+    showCreateUser.value = false
+    Object.assign(newUserForm, { username: '', password: '', role: 'user' })
+    ElMessage.success(`用户 ${u.username} 创建成功`)
+  } finally {
+    creatingUser.value = false
+  }
+}
+
+const handleResetPwd = async (row) => {
+  const { value: pwd } = await ElMessageBox.prompt(
+    `请输入「${row.username}」的新密码（不少于6位）`, '重置密码',
+    { confirmButtonText: '确认', cancelButtonText: '取消', inputType: 'password',
+      inputValidator: v => v && v.length >= 6 ? true : '密码不能少于6位' }
+  )
+  await userApi.resetPassword(row.username, pwd)
+  ElMessage.success('密码已重置')
+}
+
+const handleDeleteUser = async (row) => {
+  await ElMessageBox.confirm(`确定删除用户「${row.username}」？`, '警告', { type: 'warning' })
+  await userApi.delete(row.username)
+  userList.value = userList.value.filter(u => u.username !== row.username)
+  ElMessage.success('已删除')
 }
 
 const pageTitle = computed(() => {

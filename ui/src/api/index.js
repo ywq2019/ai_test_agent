@@ -154,3 +154,10 @@ export const gvarApi = {
   update: (id, data) => api.put(`/global-vars/${id}`, data),
   delete: (id) => api.delete(`/global-vars/${id}`),
 }
+
+export const userApi = {
+  list: () => api.get('/auth/users'),
+  create: (data) => api.post('/auth/users', data),
+  delete: (username) => api.delete(`/auth/users/${username}`),
+  resetPassword: (username, newPassword) => api.put(`/auth/users/${username}/password`, { new_password: newPassword }),
+}

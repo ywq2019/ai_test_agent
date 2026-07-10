@@ -68,6 +68,92 @@ async def change_password(
     return {"message": "密码修改成功"}
 
 
+# ── admin 依赖 ────────────────────────────────────────────────────────────────
+async def require_admin(current_user: User = Depends(get_current_user)):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+    return current_user
+
+
+# ── 用户管理接口（admin only）────────────────────────────────────────────────
+
+@router.get("/auth/users")
+async def list_users(
+    _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(User).order_by(User.created_at))
+    users = result.scalars().all()
+    return [
+        {"id": u.id, "username": u.username, "role": u.role,
+         "created_at": u.created_at.isoformat() if u.created_at else None}
+        for u in users
+    ]
+
+
+@router.post("/auth/users")
+async def create_user(
+    data: dict,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    username = data.get("username", "").strip()
+    password = data.get("password", "")
+    role = data.get("role", "user")
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="用户名和密码不能为空")
+    if len(password) < 6:
+        raise HTTPException(status_code=400, detail="密码不能少于6位")
+    if role not in ("admin", "user"):
+        raise HTTPException(status_code=400, detail="角色只能是 admin 或 user")
+    result = await db.execute(select(User).where(User.username == username))
+    if result.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail=f"用户名 '{username}' 已存在")
+    new_user = User(username=username, password_hash=hash_password(password), role=role)
+    db.add(new_user)
+    await db.commit()
+    await db.refresh(new_user)
+    return {"id": new_user.id, "username": new_user.username, "role": new_user.role,
+            "created_at": new_user.created_at.isoformat() if new_user.created_at else None}
+
+
+@router.delete("/auth/users/{username}")
+async def delete_user(
+    username: str,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    if username == admin.username:
+        raise HTTPException(status_code=400, detail="不能删除自己")
+    result = await db.execute(select(User).where(User.username == username))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    await db.delete(user)
+    await db.commit()
+    return {"message": f"用户 '{username}' 已删除"}
+
+
+@router.put("/auth/users/{username}/password")
+async def reset_user_password(
+    username: str,
+    data: dict,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    new_pwd = data.get("new_password", "")
+    if len(new_pwd) < 6:
+        raise HTTPException(status_code=400, detail="新密码不能少于6位")
+    result = await db.execute(select(User).where(User.username == username))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    user.password_hash = hash_password(new_pwd)
+    db.add(user)
+    await db.commit()
+    return {"message": f"用户 '{username}' 密码已重置"}
+
+
 @router.get("/health", response_model=HealthResponse)
 async def health_check():
     return {
