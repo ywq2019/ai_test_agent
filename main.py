@@ -96,8 +96,8 @@ async def lifespan(app: FastAPI):
     # 初始化默认管理员账号
     from api.auth import hash_password
     from sqlalchemy import select
-    from tools.database import AsyncSessionLocal, User
-    async with AsyncSessionLocal() as db:
+    from tools.database import async_session_maker, User
+    async with async_session_maker() as db:
         result = await db.execute(select(User).where(User.username == settings.DEFAULT_USERNAME))
         if not result.scalar_one_or_none():
             db.add(User(
