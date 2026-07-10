@@ -1,0 +1,202 @@
+# WebUI 自动化用例生成 Prompts
+# 供 skills/case_generator.py 的 CaseGenerator 使用
+
+# ── 页面元素模块提取 ────────────────────────────────────────────────────────────
+extract_page_modules:
+  system: |
+    You are a UI analyst. Analyze page elements and group them into logical modules.
+    Output ONLY valid JSON. No markdown, no explanation.
+
+  user_template: |
+    分析以下页面元素，将它们归纳为 2-8 个逻辑功能模块。
+
+    页面元素：
+    {elements_summary}
+
+    {doc_context}
+
+    只输出纯JSON：
+    {{
+      "modules": [
+        {{
+          "name": "模块名称（如：登录模块、搜索模块）",
+          "elements": ["selector1", "selector2"]
+        }}
+      ]
+    }}
+
+# ── 单模块 UI 用例生成 ──────────────────────────────────────────────────────────
+generate_module_cases:
+  system: |
+    You are a senior QA automation engineer.
+    Generate executable UI automation test cases for Playwright/Selenium.
+    Output ONLY a single valid JSON object. No markdown, no explanation.
+
+  user_template: |
+    为页面模块「{module_name}」生成 UI 自动化测试用例。
+
+    目标页面：{url}
+    本模块关键元素：
+    {selectors_str}
+
+    {doc_context}
+
+    【要求】
+    - 生成 5-8 条覆盖正常流程(P0)、表单校验(P1)、边界/异常(P2) 的用例
+    - 步骤含具体 selector 和测试数据，示例：
+      "1. 找到用户名输入框（selector: #username），输入 'test@example.com'\n2. 点击登录按钮（selector: button.submit）"
+    - 预期结果可断言（如"页面跳转到 /home，顶部显示欢迎语"）
+    - 只针对本模块
+
+    只输出纯JSON：
+    {{
+      "cases": [
+        {{
+          "name": "登录-有效账号-登录成功",
+          "module": "{module_name}",
+          "priority": "P0",
+          "preconditions": "前置条件",
+          "steps": "1. 步骤一\n2. 步骤二",
+          "expected_results": "可断言预期结果",
+          "element_selector": "主元素 selector"
+        }}
+      ]
+    }}
+
+# ── 单次兜底生成（全部模块） ────────────────────────────────────────────────────
+generate_single_call:
+  system: |
+    You are a senior QA automation engineer.
+    Generate executable UI automation test cases for Playwright/Selenium.
+    Output ONLY a single valid JSON object. No markdown, no explanation.
+
+  user_template: |
+    根据以下页面结构生成 UI 自动化测试用例（总量不超过 25 条）。
+
+    目标页面：{url}
+    页面元素：
+    {elements_summary}
+
+    {doc_context}
+
+    步骤含具体 selector 和测试数据，预期结果可断言。
+    只输出纯JSON：
+    {{
+      "cases": [
+        {{
+          "name": "...", "module": "...", "priority": "P0",
+          "preconditions": "...", "steps": "1. ...\n2. ...",
+          "expected_results": "...", "element_selector": "..."
+        }}
+      ]
+    }}
+
+# ── 单模块覆盖度优化 ────────────────────────────────────────────────────────────
+optimize_module_cases:
+  system: |
+    You are a senior QA automation engineer.
+    Find coverage gaps in existing test cases and output ONLY new supplementary cases.
+    Output ONLY valid JSON. No markdown, no explanation.
+
+  user_template: |
+    模块「{module_name}」已有 {case_count} 条测试用例：
+    {existing_summary}
+
+    页面元素参考：
+    {elements_summary}
+
+    {doc_context}
+
+    请分析覆盖缺口，生成 3-5 条补充用例（不重复已有用例），重点检查：
+    - 等价类划分：有没有遗漏的有效/无效等价类
+    - 边界值：最小值、最大值、零值、空值
+    - 异常分支：网络错误、并发、权限不足
+    - 状态转换：从不同前置状态触发操作
+
+    只输出纯JSON，只包含新增用例：
+    {{
+      "new_cases": [
+        {{
+          "name": "用例名称",
+          "module": "{module_name}",
+          "priority": "P1",
+          "preconditions": "前置条件",
+          "steps": "1. 步骤一\n2. 步骤二",
+          "expected_results": "预期结果",
+          "element_selector": ""
+        }}
+      ]
+    }}
+
+# ── 文档 Diff 分析（增量更新） ──────────────────────────────────────────────────
+doc_diff_analysis:
+  system: |
+    You are a senior QA analyst. Compare two versions of requirements documents
+    to identify WebUI functional module-level changes.
+    Output ONLY valid JSON. No markdown, no explanation.
+
+  user_template: |
+    对比以下新旧两版需求文档，识别 WebUI 功能模块级别的变更，用于指导 UI 测试用例的增量更新。
+
+    【旧版文档】
+    ---
+    {old_snip}
+    ---
+
+    【新版文档】
+    ---
+    {new_snip}
+    ---
+
+    只输出纯JSON：
+    {{
+      "changed":   [{{"module": "模块名", "summary": "变更描述"}}],
+      "added":     [{{"module": "模块名", "summary": "新增描述"}}],
+      "removed":   ["模块名"],
+      "unchanged": ["模块名"],
+      "diff_summary": "本次变更一句话总结"
+    }}
+
+# ── WebUI 用例级保守合并 ────────────────────────────────────────────────────────
+merge_module_cases:
+  system: |
+    You are a senior QA engineer performing a conservative UI test case review.
+    Your default is to KEEP existing test cases. Only mark cases as deprecated
+    if the feature they test has been COMPLETELY REMOVED from the new requirements.
+    Output ONLY valid JSON. No markdown.
+
+  user_template: |
+    模块「{module_name}」需求发生了变更，请对现有 UI 测试用例做保守式审查。
+
+    变更说明：{change_summary}
+
+    【新版需求】
+    ---
+    {new_doc_content}
+    ---
+
+    【现有测试用例】
+    {cases_summary}
+
+    审查原则：
+    - 只废弃功能已在新文档中「完全删除」的用例
+    - 功能仍存在但需求调整 → 保留（测试人员手动更新）
+    - 不确定 → 保留（保守原则）
+    - 新增用例：只针对新文档新出现的功能场景
+
+    只输出纯JSON：
+    {{
+      "deprecated": ["TC002"],
+      "new_cases": [
+        {{
+          "name": "新场景",
+          "module": "{module_name}",
+          "priority": "P1",
+          "preconditions": "",
+          "steps": "1. 步骤",
+          "expected_results": "预期结果",
+          "element_selector": ""
+        }}
+      ],
+      "reason": "一句话说明"
+    }}
