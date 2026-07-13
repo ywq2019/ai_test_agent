@@ -12,7 +12,7 @@
 
 </div>
 
----
+***
 
 ## 快速部署
 
@@ -26,10 +26,10 @@ git clone https://github.com/ywq2019/ai_test_agent.git && cd ai_test_agent && do
 
 启动后访问 `http://服务器IP:4000`，进入**大模型配置**页填写 API Key。
 
-| 服务 | 说明 |
-| --- | --- |
-| `app` | FastAPI 后端 + 前端静态文件，监听 4000 端口 |
-| `db` | PostgreSQL 15，自动建表，数据持久化到 Volume |
+| 服务    | 说明                               |
+| ----- | -------------------------------- |
+| `app` | FastAPI 后端 + 前端静态文件，监听 4000 端口   |
+| `db`  | PostgreSQL 15，自动建表，数据持久化到 Volume |
 
 ```bash
 git pull && docker compose up -d --build  # 更新
@@ -92,13 +92,13 @@ New-NetFirewallRule -DisplayName "AI测试平台" -Direction Inbound -Protocol T
 
 平台内置 JWT 鉴权，首次启动自动创建默认账号：
 
-| 用户名 | 密码 | 权限 |
-| --- | --- | --- |
+| 用户名     | 密码         | 权限        |
+| ------- | ---------- | --------- |
 | `admin` | `admin123` | 管理员，可管理用户 |
 
 > 登录后点击顶栏右上角「用户管理」可新建账号，普通用户只能登录和修改自己的密码。
 
----
+***
 
 ## 核心功能
 
@@ -106,94 +106,94 @@ New-NetFirewallRule -DisplayName "AI测试平台" -Direction Inbound -Protocol T
 
 上传需求文档，AI 按功能模块并行生成覆盖 6 种测试方法的高质量用例，导出 Markdown / XMind。
 
-| 功能 | 说明 |
-| --- | --- |
-| 分段并行生成 | 提取模块后并发调用 AI（Semaphore=2），每次输出可控，不超时 |
-| 6 种测试方法 | 等价类、边界值、判定表、场景法、错误推测、状态转换，每条用例标注方法 |
-| 多维度覆盖 | 功能用例 + 性能用例 + 兼容性用例同步生成 |
-| 覆盖度优化 | 分析已有用例盲区，自动追加补充用例 |
+| 功能           | 说明                                                                      |
+| ------------ | ----------------------------------------------------------------------- |
+| 分段并行生成       | 提取模块后并发调用 AI（Semaphore=2），每次输出可控，不超时                                    |
+| 6 种测试方法      | 等价类、边界值、判定表、场景法、错误推测、状态转换，每条用例标注方法                                      |
+| 多维度覆盖        | 功能用例 + 性能用例 + 兼容性用例同步生成                                                 |
+| 覆盖度优化        | 分析已有用例盲区，自动追加补充用例                                                       |
 | **需求变更增量更新** | 上传新版文档 → AI Diff 分析 → 仅对变更模块做用例级保守合并，unchanged 模块直接保留，通用测试模块（性能/兼容）永不废弃 |
-| 废弃用例管理 | 废弃用例追加模块末尾（删除线展示），默认隐藏，可开关查看 |
+| 废弃用例管理       | 废弃用例追加模块末尾（删除线展示），默认隐藏，可开关查看                                            |
 
 ### WebUI 自动化
 
 Playwright 抓取页面元素，AI 生成含具体 selector 的可执行用例，直接运行自动化测试。
 
-| 功能 | 说明 |
-| --- | --- |
-| 页面元素解析 | 自动抓取可交互元素，识别移动端 H5，等待 networkidle 确保动态渲染完成 |
-| AI 生成用例 | 结合页面元素 + 需求文档分段生成，含 selector 和测试数据，支持随时取消 |
-| 执行控制 | 支持暂停/继续/停止，自动截图，生成含图表的 HTML 报告 |
-| **需求变更增量更新** | 保守合并策略：默认保留所有旧用例，只废弃功能已彻底删除的用例 |
+| 功能           | 说明                                         |
+| ------------ | ------------------------------------------ |
+| 页面元素解析       | 自动抓取可交互元素，识别移动端 H5，等待 networkidle 确保动态渲染完成 |
+| AI 生成用例      | 结合页面元素 + 需求文档分段生成，含 selector 和测试数据，支持随时取消  |
+| 执行控制         | 支持暂停/继续/停止，自动截图，生成含图表的 HTML 报告             |
+| **需求变更增量更新** | 保守合并策略：默认保留所有旧用例，只废弃功能已彻底删除的用例             |
 
 ### 接口自动化
 
 #### 接口测试
 
-| 功能 | 说明 |
-| --- | --- |
-| 多项目管理 | Base URL + 鉴权方式（Bearer/Basic/API Key）+ 代理 + Hosts 映射 |
-| AI 生成用例 | 三种输入：Swagger/OpenAPI、自然语言描述、**直接粘贴接口实现代码**（Python/Java/Go/Node.js/PHP） |
-| **代码可行性分析** | 对比需求文档与代码实现，识别 `missing`/`mismatch`/`extra`/`risk` 四类偏差，自动生成差异验证用例 |
-| 参数化 | 全局变量池 `{{gvar:name}}`、内置函数 `{{uuid()}}`、自定义 Python 脚本函数 |
-| 前置依赖 | 配置登录前置用例，自动提取 Token，鉴权失败自动重试 |
-| 压力测试 | 配置并发/时长/爬坡，实时推送 TPS / P95 / P99 |
-| AI 报告分析 | 执行完成后调用 LLM 分析失败原因，给出修复建议 |
+| 功能          | 说明                                                                     |
+| ----------- | ---------------------------------------------------------------------- |
+| 多项目管理       | Base URL + 鉴权方式（Bearer/Basic/API Key）+ 代理 + Hosts 映射                   |
+| AI 生成用例     | 三种输入：Swagger/OpenAPI、自然语言描述、**直接粘贴接口实现代码**（Python/Java/Go/Node.js/PHP） |
+| **代码可行性分析** | 对比需求文档与代码实现，识别 `missing`/`mismatch`/`extra`/`risk` 四类偏差，自动生成差异验证用例     |
+| 参数化         | 全局变量池 `{{gvar:name}}`、内置函数 `{{uuid()}}`、自定义 Python 脚本函数                |
+| 前置依赖        | 配置登录前置用例，自动提取 Token，鉴权失败自动重试                                           |
+| 压力测试        | 配置并发/时长/爬坡，实时推送 TPS / P95 / P99                                        |
+| AI 报告分析     | 执行完成后调用 LLM 分析失败原因，给出修复建议                                              |
 
 #### 测试计划
 
 跨项目接口用例编排，共享变量上下文，实现端到端链路测试（如：登录 → 下单 → 查询）。
 
-| 功能 | 说明 |
-| --- | --- |
-| 步骤编排 | 从任意项目拖入用例，自由排序、启用/禁用单步 |
-| 共享变量 | 所有步骤共享 `var_store`，前步提取的变量后步直接引用 |
-| 计划级网络配置 | 代理/Hosts 优先级高于项目级，可按计划统一切换测试环境 |
-| 执行报告 | WebSocket 实时推送进度，卡片式报告展示通过率/断言详情/AI 分析 |
+| 功能      | 说明                                     |
+| ------- | -------------------------------------- |
+| 步骤编排    | 从任意项目拖入用例，自由排序、启用/禁用单步                 |
+| 共享变量    | 所有步骤共享 `var_store`，前步提取的变量后步直接引用       |
+| 计划级网络配置 | 代理/Hosts 优先级高于项目级，可按计划统一切换测试环境         |
+| 执行报告    | WebSocket 实时推送进度，卡片式报告展示通过率/断言详情/AI 分析 |
 
----
+***
 
 ## 技术栈
 
 ### 后端
 
-| 技术 | 说明 |
-| --- | --- |
-| Python 3.11+ / FastAPI 0.138 | 全异步 ASGI 框架，Uvicorn 服务器 |
-| SQLAlchemy 2.0 | 异步 ORM，SQLite（本机）/ PostgreSQL（Docker）双数据库兼容 |
-| httpx | 异步 HTTP 客户端，支持代理 / 自定义 Transport（Hosts 映射） |
-| Playwright 1.39 | 浏览器自动化，支持 networkidle 等待策略 |
-| LangChain + LangGraph | LLM 对话代理工作流（可选） |
-| python-jose + bcrypt | JWT 鉴权 + 密码哈希 |
-| PyYAML | Prompt 配置文件读取 |
+| 技术                           | 说明                                          |
+| ---------------------------- | ------------------------------------------- |
+| Python 3.11+ / FastAPI 0.138 | 全异步 ASGI 框架，Uvicorn 服务器                     |
+| SQLAlchemy 2.0               | 异步 ORM，SQLite（本机）/ PostgreSQL（Docker）双数据库兼容 |
+| httpx                        | 异步 HTTP 客户端，支持代理 / 自定义 Transport（Hosts 映射）  |
+| Playwright 1.39              | 浏览器自动化，支持 networkidle 等待策略                  |
+| LangChain + LangGraph        | LLM 对话代理工作流（可选）                             |
+| python-jose + bcrypt         | JWT 鉴权 + 密码哈希                               |
+| PyYAML                       | Prompt 配置文件读取                               |
 
 ### 前端
 
-| 技术 | 说明 |
-| --- | --- |
-| Vue 3.4 + Vite 5 | 前端框架 + 构建工具 |
-| Element Plus 2.14 | UI 组件库 |
-| Pinia / Vue Router | 状态管理 / 路由（含登录守卫） |
-| ECharts 5.5 | 压测实时图表 |
-| Axios 1.6 | HTTP 客户端，请求拦截器自动附加 JWT Token |
+| 技术                 | 说明                           |
+| ------------------ | ---------------------------- |
+| Vue 3.4 + Vite 5   | 前端框架 + 构建工具                  |
+| Element Plus 2.14  | UI 组件库                       |
+| Pinia / Vue Router | 状态管理 / 路由（含登录守卫）             |
+| ECharts 5.5        | 压测实时图表                       |
+| Axios 1.6          | HTTP 客户端，请求拦截器自动附加 JWT Token |
 
----
+***
 
 ## AI 集成
 
 所有 AI 功能统一读取「大模型配置」页的设置，**自动判断 Anthropic / OpenAI 格式**，支持一键切换：
 
-| 提供商 | 模型示例 | API URL |
-| --- | --- | --- |
-| Claude（Anthropic） | claude-sonnet-4-5 | https://api.anthropic.com |
-| DeepSeek | deepseek-v4-flash | https://api.deepseek.com |
-| OpenAI | gpt-4o | https://api.openai.com |
-| Ollama（本地） | llama3 | http://localhost:11434 |
-| 任意 OpenAI 兼容代理 | — | 填入代理地址即可 |
+| 提供商               | 模型示例              | API URL                     |
+| ----------------- | ----------------- | --------------------------- |
+| Claude（Anthropic） | claude-sonnet-4-5 | <https://api.anthropic.com> |
+| DeepSeek          | deepseek-v4-flash | <https://api.deepseek.com>  |
+| OpenAI            | gpt-4o            | <https://api.openai.com>    |
+| Ollama（本地）        | llama3            | <http://localhost:11434>    |
+| 任意 OpenAI 兼容代理    | —                 | 填入代理地址即可                    |
 
 所有 Prompt 统一管理在 `skills/prompts/*.yaml`，无需改代码即可调整 AI 生成效果。
 
----
+***
 
 ## 项目结构
 
@@ -235,7 +235,7 @@ ai_test_agent/
     └── test_incremental.py      # 12 条
 ```
 
----
+***
 
 ## 接口说明
 
@@ -243,35 +243,35 @@ ai_test_agent/
 
 **认证**
 
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| POST | `/api/v1/auth/login` | 登录，返回 JWT Token |
-| GET | `/api/v1/auth/users` | 用户列表（admin） |
-| POST | `/api/v1/auth/users` | 新建用户（admin） |
-| DELETE | `/api/v1/auth/users/{username}` | 删除用户（admin） |
-| PUT | `/api/v1/auth/users/{username}/password` | 重置密码（admin） |
+| 方法     | 路径                                       | 说明              |
+| ------ | ---------------------------------------- | --------------- |
+| POST   | `/api/v1/auth/login`                     | 登录，返回 JWT Token |
+| GET    | `/api/v1/auth/users`                     | 用户列表（admin）     |
+| POST   | `/api/v1/auth/users`                     | 新建用户（admin）     |
+| DELETE | `/api/v1/auth/users/{username}`          | 删除用户（admin）     |
+| PUT    | `/api/v1/auth/users/{username}/password` | 重置密码（admin）     |
 
 **接口测试（部分）**
 
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| POST | `/api/v1/api-test/projects/{id}/cases/generate` | AI 生成用例（Swagger/描述/代码） |
-| POST | `/api/v1/api-test/projects/{id}/cases/generate-from-code` | 从代码生成用例 |
-| POST | `/api/v1/api-test/projects/{id}/code-analyze` | 代码可行性分析 |
-| POST | `/api/v1/api-test/projects/{id}/execute` | 单测执行 |
-| POST | `/api/v1/api-test/projects/{id}/load` | 压力测试 |
+| 方法   | 路径                                                        | 说明                     |
+| ---- | --------------------------------------------------------- | ---------------------- |
+| POST | `/api/v1/api-test/projects/{id}/cases/generate`           | AI 生成用例（Swagger/描述/代码） |
+| POST | `/api/v1/api-test/projects/{id}/cases/generate-from-code` | 从代码生成用例                |
+| POST | `/api/v1/api-test/projects/{id}/code-analyze`             | 代码可行性分析                |
+| POST | `/api/v1/api-test/projects/{id}/execute`                  | 单测执行                   |
+| POST | `/api/v1/api-test/projects/{id}/load`                     | 压力测试                   |
 
 **WebSocket 频道**
 
-| client_id | 说明 |
-| --- | --- |
-| `ai_gen` | AI 用例生成/优化/增量更新进度 |
-| `cases_gen` | UI 用例生成进度 |
-| `api_exec` | 接口用例执行进度 |
-| `api_load` | 压测实时指标 |
-| `plan_<id>` | 测试计划执行进度 |
+| client\_id  | 说明                |
+| ----------- | ----------------- |
+| `ai_gen`    | AI 用例生成/优化/增量更新进度 |
+| `cases_gen` | UI 用例生成进度         |
+| `api_exec`  | 接口用例执行进度          |
+| `api_load`  | 压测实时指标            |
+| `plan_<id>` | 测试计划执行进度          |
 
----
+***
 
 ## 截图
 
@@ -322,7 +322,7 @@ ai_test_agent/
     </tr>
 </table>
 
----
+***
 
 ## 许可证
 

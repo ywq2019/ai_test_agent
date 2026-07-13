@@ -1767,6 +1767,13 @@ async def generate_ai_cases(
     await db.commit()
     await db.refresh(record)
 
+    # RAG 入库（后台异步，不阻塞响应）
+    doc_text = result.get("_doc_text_for_rag", "")
+    if doc_text:
+        import asyncio as _asyncio
+        from skills.rag import index_document as _index_doc
+        _asyncio.create_task(_index_doc(record.id, "ai_case", doc_text))
+
     return _ai_case_response(record)
 
 
@@ -2480,6 +2487,12 @@ async def incremental_update_ai_case(
     db.add(new_record)
     await db.commit()
     await db.refresh(new_record)
+
+    # RAG：新文档重建索引（后台异步，用新 record_id）
+    if new_content:
+        import asyncio as _asyncio
+        from skills.rag import index_document as _index_doc
+        _asyncio.create_task(_index_doc(new_record.id, "ai_case", new_content))
 
     logger.info(
         f"增量更新完成: 旧记录 #{old_record.id} → 新记录 #{new_record.id}，"

@@ -7,6 +7,13 @@ from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, Float, 
 from datetime import datetime
 from tools.config import settings
 
+# pgvector 支持（仅 PostgreSQL 时生效；SQLite 时跳过）
+try:
+    from pgvector.sqlalchemy import Vector as PgVector
+    _PGVECTOR_AVAILABLE = True
+except ImportError:
+    _PGVECTOR_AVAILABLE = False
+
 engine = create_async_engine(settings.DATABASE_URL, echo=settings.DEBUG)
 
 async_session_maker = async_sessionmaker(
@@ -264,8 +271,30 @@ class TestPlanReport(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class DocumentChunk(Base):
+    """文档分段向量表，用于 RAG 检索。
+    PostgreSQL 环境下存储 pgvector 向量；SQLite 环境下 embedding 列存 None，退化为关键词检索。
+    """
+    __tablename__ = "document_chunks"
+
+    id           = Column(Integer, primary_key=True, index=True)
+    source_id    = Column(Integer, nullable=False, index=True)   # AICaseFile.id 或 TestTask.id
+    source_type  = Column(String(20), nullable=False, index=True) # "ai_case" | "ui_case"
+    chunk_index  = Column(Integer, nullable=False)
+    content      = Column(Text, nullable=False)                  # 原始文本段落
+    # pgvector 列：PostgreSQL 时存 1536 维向量，SQLite 时列不存在（create_all 跳过）
+    embedding    = Column(PgVector(1536), nullable=True) if _PGVECTOR_AVAILABLE else Column(Text, nullable=True)
+    created_at   = Column(DateTime, default=datetime.utcnow)
+
+
 async def init_database():
     async with engine.begin() as conn:
+        # PostgreSQL 环境下启用 pgvector 扩展
+        if "postgresql" in settings.DATABASE_URL:
+            try:
+                await conn.execute(__import__('sqlalchemy').text("CREATE EXTENSION IF NOT EXISTS vector"))
+            except Exception:
+                pass
         await conn.run_sync(Base.metadata.create_all)
         # 兼容旧库：自动补齐新增列
         for ddl in [

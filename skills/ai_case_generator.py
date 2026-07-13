@@ -116,6 +116,9 @@ class AICaseGenerator:
         # 将文档哈希和截断内容一并返回，由 routes.py 写入数据库
         result["doc_hash"] = doc_hash
         result["doc_content"] = doc_text[:20000]   # 最多保存 2 万字，够 Diff 分析用
+
+        # RAG 入库：异步后台进行，不阻塞主流程（记录 record_id 由 routes.py 写入 DB 后赋值）
+        result["_doc_text_for_rag"] = doc_text   # 全文，routes.py 拿到 record_id 后调 index_document
         await _p(100, f"完成！共生成 {result['case_count']} 条用例")
         logger.info(f"AI 用例生成完成: {result['case_count']} 条，文件: {result['files']}")
         return result
@@ -393,18 +396,41 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
     # 分段生成 Step-2：单模块用例生成
     # ------------------------------------------------------------------
     async def _call_llm_for_module(
-        self, module_name: str, features: list, content: str
+        self,
+        module_name: str,
+        features: list,
+        content: str,
+        rag_source_id: Optional[int] = None,
+        rag_source_type: str = "ai_case",
     ) -> Dict[str, Any]:
-        """为单个功能模块生成测试用例，数量根据功能点数量动态调整（8-20条）。"""
+        """为单个功能模块生成测试用例，数量根据功能点数量动态调整（8-20条）。
+        rag_source_id 不为 None 时优先用 RAG 检索相关段落替代硬截断。
+        """
         features_text = "\n".join(f"  - {f}" for f in features[:6])
-        # 功能点数 × 2，最少 8 条，最多 20 条
         case_limit = max(8, min(len(features) * 2, 20))
+
+        # 尝试 RAG 检索，失败则回退截断
+        context = None
+        if rag_source_id is not None:
+            try:
+                from skills.rag import search_chunks
+                query = f"{module_name} {' '.join(features[:4])}"
+                retrieved = await search_chunks(query, rag_source_id, rag_source_type, top_k=5)
+                if retrieved:
+                    context = "\n\n".join(retrieved)
+                    logger.info(f"RAG: module '{module_name}' retrieved {len(retrieved)} chunks")
+            except Exception as e:
+                logger.warning(f"RAG search failed for '{module_name}': {e}")
+
+        if context is None:
+            context = content[:2000]
+
         from skills.prompt_loader import get_system, render_user
         system_prompt = get_system("ai_case_gen.yaml", "generate_module_cases")
         prompt = render_user("ai_case_gen.yaml", "generate_module_cases",
                              module_name=module_name,
                              features_text=features_text,
-                             content=content[:2000],
+                             content=context,
                              case_limit=case_limit)
 
         try:
@@ -516,6 +542,7 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
         task_name: str,
         modules_info: list,
         _p,
+        rag_source_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """并发（最多2路）逐模块生成功能用例，同时生成性能和兼容性用例，统一编号合并。"""
         total_all = len(modules_info) + 2  # +2：性能 + 兼容性
@@ -537,7 +564,10 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
                     20 + int(i / total_all * 65),
                     f"正在生成功能模块 {i+1}/{len(modules_info)}：{name}...",
                 )
-                result = await self._call_llm_for_module(name, features, content)
+                result = await self._call_llm_for_module(
+                    name, features, content,
+                    rag_source_id=rag_source_id,
+                )
                 await _progress_done(name)
                 return result
 
