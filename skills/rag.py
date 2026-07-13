@@ -20,6 +20,27 @@ EMBED_DIM     = 1536  # OpenAI text-embedding-3-small / DeepSeek 维度
 TOP_K         = 5     # 默认检索返回段数
 
 
+# ── HTML 清洗 ────────────────────────────────────────────────────────────────
+def clean_text(text: str) -> str:
+    """去除 HTML 标签、CSS 样式、脚本，保留纯文本内容。"""
+    if not text:
+        return ""
+    # 去除 <style>...</style> 和 <script>...</script>
+    text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<script[^>]*>.*?</script>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    # 去除所有 HTML 标签
+    text = re.sub(r'<[^>]+>', '', text)
+    # 去除 HTML 实体
+    text = re.sub(r'&[a-zA-Z]+;', ' ', text)
+    text = re.sub(r'&#\d+;', ' ', text)
+    # 去除 CSS 属性值残留（如 font-size:13px 等）
+    text = re.sub(r"[\w-]+\s*:\s*[\w\s,.'\"#%()/-]+;", ' ', text)
+    # 合并多余空白行
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    text = re.sub(r'[ \t]{2,}', ' ', text)
+    return text.strip()
+
+
 # ── 环境检测 ──────────────────────────────────────────────────────────────────
 def _is_pg() -> bool:
     from tools.config import settings
@@ -125,7 +146,7 @@ async def index_document(
     """将文档分段并存入 document_chunks 表。返回写入的段数。
     同一 source_id + source_type 的旧记录先删除（重建索引）。
     """
-    chunks = split_text(text)
+    chunks = split_text(clean_text(text))
     if not chunks:
         return 0
 

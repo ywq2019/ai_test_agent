@@ -64,6 +64,42 @@ class BrowserTool:
         # 额外等待 JS 渲染（动态框架通常需要 1-2 秒完成首屏渲染）
         await self.page.wait_for_timeout(3000)
 
+        # 自动滚动页面，触发懒加载内容（需求页面、列表页等常见场景）
+        await self._scroll_to_load()
+
+    async def _scroll_to_load(self):
+        """分段滚动页面到底部，触发懒加载内容，最多滚动 15 屏。"""
+        try:
+            # 获取页面总高度
+            page_height = await self.page.evaluate("() => document.body.scrollHeight")
+            viewport_height = 1080
+            scroll_step = viewport_height          # 每次滚动一屏
+            current_pos = 0
+            max_scrolls = 15                       # 最多滚动 15 屏，防止无限页面卡住
+            scroll_count = 0
+
+            logger.info(f"开始滚动加载，页面总高度: {page_height}px")
+
+            while current_pos < page_height and scroll_count < max_scrolls:
+                current_pos += scroll_step
+                await self.page.evaluate(f"window.scrollTo(0, {current_pos})")
+                await self.page.wait_for_timeout(600)   # 等待懒加载内容渲染
+
+                # 重新获取高度（内容动态加载后高度可能增加）
+                new_height = await self.page.evaluate("() => document.body.scrollHeight")
+                if new_height > page_height:
+                    page_height = new_height
+                    logger.debug(f"页面高度增加到 {page_height}px（懒加载触发）")
+
+                scroll_count += 1
+
+            # 滚动完成后回到顶部，让页面元素恢复正常状态
+            await self.page.evaluate("window.scrollTo(0, 0)")
+            await self.page.wait_for_timeout(800)
+            logger.info(f"滚动完成，共滚动 {scroll_count} 屏")
+        except Exception as e:
+            logger.warning(f"滚动加载失败（不影响主流程）: {e}")
+
     async def capture_elements(self) -> List[Dict[str, Any]]:
         debug_script = """
         () => {
