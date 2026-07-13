@@ -63,6 +63,17 @@ class AICaseGenerator:
         if not doc_text:
             raise ValueError("未提供需求内容（文档路径或文本均为空）")
 
+        # HTML 文档清洗：去除 CSS/JS/HTML 标签噪音，只保留纯文本
+        try:
+            from skills.rag import clean_text as _clean_text
+            cleaned = _clean_text(doc_text)
+            if len(cleaned) >= 200:   # 清洗后有足够内容才替换（防止过度清洗丢失内容）
+                if len(doc_text) - len(cleaned) > 1000:
+                    logger.info(f"HTML 清洗: {len(doc_text)} → {len(cleaned)} 字（去除 {len(doc_text)-len(cleaned)} 字噪音）")
+                doc_text = cleaned
+        except Exception as e:
+            logger.warning(f"HTML 清洗失败，使用原始内容: {e}")
+
         # 计算文档哈希，供调用方写入数据库做变更检测
         doc_hash = self._compute_doc_hash(doc_text)
 
@@ -399,8 +410,9 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
 
 识别所有主要功能模块（不限数量），每个模块列出3-8个功能点，只提取文档中明确的功能。"""
 
-        MAX_SINGLE = 8000   # 8000字以内直接全文提取
-        BATCH_SIZE = 6000   # 分批时每批大小
+        MAX_SINGLE = 8000    # 8000字以内直接全文提取
+        BATCH_SIZE = 10000   # 分批时每批大小，提高减少批次
+        MAX_BATCHES = 20     # 最多处理20批，防止超大文档卡死
 
         try:
             if len(content) <= MAX_SINGLE:
@@ -412,15 +424,16 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
                     logger.info(f"模块提取成功: {len(modules)} 个模块")
                     return modules
             else:
-                # 长文档：分批提取，合并去重
-                logger.info(f"文档较长({len(content)}字)，分批提取模块...")
-                all_modules: Dict[str, Dict] = {}  # name -> module_info，自动去重
+                # 长文档：分批提取，合并去重，最多处理 MAX_BATCHES 批
+                total_batch = (len(content) + BATCH_SIZE - 1) // BATCH_SIZE
+                actual_batch = min(total_batch, MAX_BATCHES)
+                logger.info(f"文档较长({len(content)}字)，分{actual_batch}批提取模块（共{total_batch}批，上限{MAX_BATCHES}）...")
+                all_modules: Dict[str, Dict] = {}
 
-                for i in range(0, len(content), BATCH_SIZE):
+                for i in range(0, min(len(content), BATCH_SIZE * MAX_BATCHES), BATCH_SIZE):
                     batch = content[i:i + BATCH_SIZE]
                     batch_num = i // BATCH_SIZE + 1
-                    total_batch = (len(content) + BATCH_SIZE - 1) // BATCH_SIZE
-                    logger.info(f"提取模块 批次 {batch_num}/{total_batch}")
+                    logger.info(f"提取模块 批次 {batch_num}/{actual_batch}")
                     try:
                         raw = await self._run_claude_subprocess(system_prompt, _build_prompt(batch), timeout_secs=60)
                         data = json.loads(raw)
