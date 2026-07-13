@@ -351,7 +351,11 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
             data = resp.json()
 
         if is_anthropic:
-            raw = data["content"][0]["text"]
+            # content 可能包含 thinking block（扩展思考），取第一个 type=="text" 的 block
+            text_blocks = [b for b in data["content"] if b.get("type") == "text"]
+            if not text_blocks:
+                raise ValueError(f"Anthropic API 未返回 text block，content={data['content']}")
+            raw = text_blocks[0]["text"]
         else:
             raw = data["choices"][0]["message"]["content"]
 
@@ -794,7 +798,11 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
             sim_task.cancel()
 
         if is_anthropic:
-            raw = data["content"][0]["text"]
+            # content 可能包含 thinking block（扩展思考），取第一个 type=="text" 的 block
+            text_blocks = [b for b in data["content"] if b.get("type") == "text"]
+            if not text_blocks:
+                raise ValueError(f"Anthropic API 未返回 text block，content={data['content']}")
+            raw = text_blocks[0]["text"]
         else:
             raw = data["choices"][0]["message"]["content"]
 

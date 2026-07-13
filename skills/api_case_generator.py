@@ -598,7 +598,10 @@ class ApiCaseGenerator:
             data = resp.json()
 
         if is_anthropic:
-            text = data["content"][0]["text"]
+            text_blocks = [b for b in data["content"] if b.get("type") == "text"]
+            if not text_blocks:
+                raise ValueError(f"Anthropic API 未返回 text block")
+            text = text_blocks[0]["text"]
         else:
             text = data["choices"][0]["message"]["content"]
 
@@ -770,7 +773,8 @@ class ApiCodeAnalyzer:
             resp.raise_for_status()
             data = resp.json()
 
-        raw = (data["content"][0]["text"] if is_anthropic
+        _text_blocks = [b for b in data["content"] if b.get("type") == "text"]
+        raw = (_text_blocks[0]["text"] if is_anthropic and _text_blocks
                else data["choices"][0]["message"]["content"])
         raw = raw.strip()
         if "```json" in raw:
