@@ -1730,12 +1730,24 @@ async def generate_ai_cases(
     if not request.document_path and not request.content:
         raise HTTPException(status_code=400, detail="请提供文档路径或需求文本内容")
 
+    # ── 步骤1：先写占位记录，获取 record.id 供 RAG 使用 ──────────────────
+    placeholder = AICaseFile(
+        task_name=request.task_name,
+        case_count=0,
+        cases_data=None,
+    )
+    db.add(placeholder)
+    await db.commit()
+    await db.refresh(placeholder)
+    rag_source_id = placeholder.id
+
     async def _progress(pct: int, stage: str):
         await ws_manager.broadcast(
             {"type": "ai_gen_progress", "percent": pct, "stage": stage},
             client_id="ai_gen",
         )
 
+    # ── 步骤2：传入 rag_source_id，generate() 内部先入库再生成 ────────────
     try:
         result = await ai_case_generator.generate(
             task_name=request.task_name,
@@ -1743,38 +1755,34 @@ async def generate_ai_cases(
             content=request.content,
             formats=request.formats,
             progress_cb=_progress,
+            rag_source_id=rag_source_id,
         )
     except RuntimeError as e:
+        # 清理占位记录
+        await db.delete(placeholder)
+        await db.commit()
         await ws_manager.broadcast(
             {"type": "ai_gen_progress", "percent": 0, "stage": f"生成失败: {e}", "error": True},
             client_id="ai_gen",
         )
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        await db.delete(placeholder)
+        await db.commit()
         logger.exception("AI 用例生成失败: {}", repr(e))
         raise HTTPException(status_code=500, detail=f"生成失败: {type(e).__name__}: {e}")
 
-    record = AICaseFile(
-        task_name=request.task_name,
-        case_count=result.get("case_count", 0),
-        md_path=result["files"].get("md"),
-        xmind_path=result["files"].get("xmind"),
-        cases_data=result.get("cases_data"),
-        doc_hash=result.get("doc_hash"),
-        doc_content=result.get("doc_content"),
-    )
-    db.add(record)
+    # ── 步骤3：更新占位记录为完整数据 ────────────────────────────────────
+    placeholder.case_count  = result.get("case_count", 0)
+    placeholder.md_path     = result["files"].get("md")
+    placeholder.xmind_path  = result["files"].get("xmind")
+    placeholder.cases_data  = result.get("cases_data")
+    placeholder.doc_hash    = result.get("doc_hash")
+    placeholder.doc_content = result.get("doc_content")
     await db.commit()
-    await db.refresh(record)
+    await db.refresh(placeholder)
 
-    # RAG 入库（后台异步，不阻塞响应）
-    doc_text = result.get("_doc_text_for_rag", "")
-    if doc_text:
-        import asyncio as _asyncio
-        from skills.rag import index_document as _index_doc
-        _asyncio.create_task(_index_doc(record.id, "ai_case", doc_text))
-
-    return _ai_case_response(record)
+    return _ai_case_response(placeholder)
 
 
 @router.get("/ai-cases", response_model=List[AICaseFileResponse])

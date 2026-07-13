@@ -41,6 +41,7 @@ class AICaseGenerator:
         content: Optional[str] = None,
         formats: Optional[List[str]] = None,
         progress_cb=None,
+        rag_source_id: Optional[int] = None,   # 传入时先入库 RAG，生成时检索
     ) -> Dict[str, Any]:
         """
         生成 AI 测试用例并保存为文件。
@@ -65,6 +66,15 @@ class AICaseGenerator:
         # 计算文档哈希，供调用方写入数据库做变更检测
         doc_hash = self._compute_doc_hash(doc_text)
 
+        # RAG 入库：文档解析完成后立即分段入库，生成时可直接检索
+        if rag_source_id is not None:
+            try:
+                from skills.rag import index_document
+                await index_document(rag_source_id, "ai_case", doc_text)
+                logger.info(f"RAG: indexed doc for ai_case:{rag_source_id}")
+            except Exception as e:
+                logger.warning(f"RAG index failed, will use truncated context: {e}")
+
         pro_max = self._load_pro_max_skill()
 
         if pro_max:
@@ -81,7 +91,10 @@ class AICaseGenerator:
                 total_mod = len(modules_info)
                 await _p(20, f"识别到 {total_mod} 个功能模块，开始逐模块生成用例...")
                 logger.info(f"提取模块: {[m['name'] for m in modules_info]}")
-                cases_data = await self._call_llm_staged(truncated, task_name, modules_info, _p)
+                cases_data = await self._call_llm_staged(
+                    truncated, task_name, modules_info, _p,
+                    rag_source_id=rag_source_id,
+                )
             else:
                 logger.warning("模块识别失败，回退到单次生成")
                 await _p(20, "模块识别失败，使用默认方式生成...")
@@ -116,9 +129,6 @@ class AICaseGenerator:
         # 将文档哈希和截断内容一并返回，由 routes.py 写入数据库
         result["doc_hash"] = doc_hash
         result["doc_content"] = doc_text[:20000]   # 最多保存 2 万字，够 Diff 分析用
-
-        # RAG 入库：异步后台进行，不阻塞主流程（记录 record_id 由 routes.py 写入 DB 后赋值）
-        result["_doc_text_for_rag"] = doc_text   # 全文，routes.py 拿到 record_id 后调 index_document
         await _p(100, f"完成！共生成 {result['case_count']} 条用例")
         logger.info(f"AI 用例生成完成: {result['case_count']} 条，文件: {result['files']}")
         return result
