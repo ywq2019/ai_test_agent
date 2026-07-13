@@ -79,20 +79,19 @@ class AICaseGenerator:
 
         if pro_max:
             # ── 分段生成模式 ──────────────────────────────────────────
-            max_content = 5000
-            truncated = (doc_text[:max_content] + "\n\n[内容已截断]") if len(doc_text) > max_content else doc_text
-
             await _p(15, "正在分析需求文档，识别功能模块...")
             logger.info(f"AI 用例分段生成开始: {task_name}，内容 {len(doc_text)} 字")
 
-            modules_info = await self._extract_modules(truncated)
+            # 模块提取：传全文，内部按段分批让 AI 识别所有模块
+            modules_info = await self._extract_modules(doc_text, rag_source_id=rag_source_id)
 
             if modules_info:
                 total_mod = len(modules_info)
                 await _p(20, f"识别到 {total_mod} 个功能模块，开始逐模块生成用例...")
                 logger.info(f"提取模块: {[m['name'] for m in modules_info]}")
+                # 传全文给各模块生成，RAG 检索相关段落
                 cases_data = await self._call_llm_staged(
-                    truncated, task_name, modules_info, _p,
+                    doc_text, task_name, modules_info, _p,
                     rag_source_id=rag_source_id,
                 )
             else:
@@ -366,17 +365,22 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
     # ------------------------------------------------------------------
     # 分段生成 Step-1：提取功能模块列表
     # ------------------------------------------------------------------
-    async def _extract_modules(self, content: str) -> list:
-        """快速调用 Claude 从需求文档中提取功能模块及其功能点列表。"""
+    async def _extract_modules(self, content: str, rag_source_id: Optional[int] = None) -> list:
+        """从需求文档中提取功能模块列表。
+        - 文档较短（≤8000字）：直接传入全文
+        - 文档较长（>8000字）：分批提取后合并去重
+        """
         system_prompt = (
             "You are a business analyst. Extract functional modules from a requirements document. "
             "Output ONLY valid JSON. No markdown, no explanation."
         )
-        prompt = f"""分析以下需求文档，识别所有功能模块并列出每个模块的核心功能点。
+
+        def _build_prompt(text: str) -> str:
+            return f"""分析以下需求文档，识别所有功能模块并列出每个模块的核心功能点。
 
 需求文档：
 ---
-{content}
+{text}
 ---
 
 只输出纯JSON：
@@ -389,15 +393,51 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
   ]
 }}
 
-识别3-10个主要功能模块，每个模块列出3-6个功能点，只提取文档中明确的功能。"""
+识别所有主要功能模块（不限数量），每个模块列出3-8个功能点，只提取文档中明确的功能。"""
+
+        MAX_SINGLE = 8000   # 8000字以内直接全文提取
+        BATCH_SIZE = 6000   # 分批时每批大小
 
         try:
-            raw = await self._run_claude_subprocess(system_prompt, prompt, timeout_secs=60)
-            data = json.loads(raw)
-            modules = data.get("modules", [])
-            if isinstance(modules, list) and modules:
-                logger.info(f"模块提取成功: {len(modules)} 个模块")
-                return modules
+            if len(content) <= MAX_SINGLE:
+                # 直接全文提取
+                raw = await self._run_claude_subprocess(system_prompt, _build_prompt(content), timeout_secs=60)
+                data = json.loads(raw)
+                modules = data.get("modules", [])
+                if isinstance(modules, list) and modules:
+                    logger.info(f"模块提取成功: {len(modules)} 个模块")
+                    return modules
+            else:
+                # 长文档：分批提取，合并去重
+                logger.info(f"文档较长({len(content)}字)，分批提取模块...")
+                all_modules: Dict[str, Dict] = {}  # name -> module_info，自动去重
+
+                for i in range(0, len(content), BATCH_SIZE):
+                    batch = content[i:i + BATCH_SIZE]
+                    batch_num = i // BATCH_SIZE + 1
+                    total_batch = (len(content) + BATCH_SIZE - 1) // BATCH_SIZE
+                    logger.info(f"提取模块 批次 {batch_num}/{total_batch}")
+                    try:
+                        raw = await self._run_claude_subprocess(system_prompt, _build_prompt(batch), timeout_secs=60)
+                        data = json.loads(raw)
+                        for mod in data.get("modules", []):
+                            name = mod.get("name", "").strip()
+                            if not name:
+                                continue
+                            if name not in all_modules:
+                                all_modules[name] = mod
+                            else:
+                                # 合并功能点（去重）
+                                existing = set(all_modules[name].get("features", []))
+                                new_feats = mod.get("features", [])
+                                all_modules[name]["features"] = list(existing | set(new_feats))
+                    except Exception as e:
+                        logger.warning(f"批次 {batch_num} 模块提取失败: {e}")
+
+                modules = list(all_modules.values())
+                if modules:
+                    logger.info(f"分批提取完成，共识别 {len(modules)} 个模块")
+                    return modules
         except Exception as e:
             logger.warning(f"模块提取失败: {e}")
         return []
@@ -470,7 +510,7 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
 
 参考需求（节选）：
 ---
-{content[:1500]}
+{content[:4000]}
 ---
 
 覆盖以下场景（每类1-2条）：
@@ -506,7 +546,7 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
 
 参考需求（节选）：
 ---
-{content[:1500]}
+{content[:4000]}
 ---
 
 覆盖以下场景（每类1-2条）：
@@ -629,8 +669,8 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
             "modules": merged_modules,
         }
     async def _call_llm(self, content: str, task_name: str, _p=None) -> Dict[str, Any]:
-        # 内容截断：5000 字足够 Claude 理解需求，同时保证输出 token 可控
-        max_content = 5000
+        # 内容截断：10000 字保证覆盖完整需求，同时保证输出 token 可控
+        max_content = 10000
         if len(content) > max_content:
             content = content[:max_content] + f"\n\n[内容已截断，以上为前 {max_content} 字]"
 
@@ -1006,7 +1046,7 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
 
 【新版需求文档】
 ---
-{new_doc_content[:4000]}
+{new_doc_content[:8000]}
 ---
 
 【现有测试用例】（用例ID | 用例名称 | 测试方法 | 优先级）
