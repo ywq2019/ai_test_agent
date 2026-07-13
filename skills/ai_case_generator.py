@@ -63,14 +63,32 @@ class AICaseGenerator:
         if not doc_text:
             raise ValueError("未提供需求内容（文档路径或文本均为空）")
 
-        # HTML 文档清洗：去除 CSS/JS/HTML 标签噪音，只保留纯文本
+        # HTML 深度清洗：document_parser 提取的 content 可能仍含大量 CSS/JS 噪音
+        # 优先用 BeautifulSoup 精准提取正文，回退到正则清洗
+        original_len = len(doc_text)
         try:
-            from skills.rag import clean_text as _clean_text
-            cleaned = _clean_text(doc_text)
-            if len(cleaned) >= 200:   # 清洗后有足够内容才替换（防止过度清洗丢失内容）
-                if len(doc_text) - len(cleaned) > 1000:
-                    logger.info(f"HTML 清洗: {len(doc_text)} → {len(cleaned)} 字（去除 {len(doc_text)-len(cleaned)} 字噪音）")
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(doc_text, "html.parser")
+            # 移除脚本、样式、注释
+            for tag in soup(["script", "style", "head", "meta", "link"]):
+                tag.decompose()
+            cleaned = soup.get_text(separator="\n", strip=True)
+            # 合并多余空行
+            import re as _re
+            cleaned = _re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+            if len(cleaned) >= 200:
                 doc_text = cleaned
+                logger.info(f"BeautifulSoup 清洗: {original_len} → {len(doc_text)} 字")
+        except ImportError:
+            # BeautifulSoup 不可用，用 rag.clean_text 正则清洗
+            try:
+                from skills.rag import clean_text as _clean_text
+                cleaned = _clean_text(doc_text)
+                if len(cleaned) >= 200:
+                    doc_text = cleaned
+                    logger.info(f"正则清洗: {original_len} → {len(doc_text)} 字")
+            except Exception:
+                pass
         except Exception as e:
             logger.warning(f"HTML 清洗失败，使用原始内容: {e}")
 

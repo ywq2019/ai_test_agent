@@ -24,3 +24,4 @@ langgraph==1.2.6
 python-jose[cryptography]==3.3.0
 bcrypt==4.2.1
 pgvector==0.3.6
+beautifulsoup4==4.12.3
