@@ -62,13 +62,6 @@ async def lifespan(app: FastAPI):
     os.makedirs(settings.REPORT_OUTPUT_DIR, exist_ok=True)
     os.makedirs(os.path.join(settings.UPLOAD_DIR, "documents"), exist_ok=True)
 
-    # 静态文件目录创建后再挂载（确保目录存在）
-    if not app.routes or not any(getattr(r, 'name', None) == 'screenshots' for r in app.routes):
-        if os.path.exists(settings.SCREENSHOT_DIR):
-            app.mount("/screenshots", StaticFiles(directory=settings.SCREENSHOT_DIR), name="screenshots")
-        if os.path.exists(settings.REPORT_OUTPUT_DIR):
-            app.mount("/reports", StaticFiles(directory=settings.REPORT_OUTPUT_DIR), name="reports")
-
     # 注册 LangChain 工具
     tool_registry.register_all()
     logger.info("LangChain tools registered")
@@ -193,6 +186,11 @@ async def auth_middleware(request: Request, call_next):
 _dist_dir = os.path.join(os.path.dirname(__file__), "ui", "dist")
 if os.path.exists(_dist_dir):
     app.mount("/assets", StaticFiles(directory=os.path.join(_dist_dir, "assets")), name="assets")
+
+# 挂载截图目录（执行报告中的截图查看）
+_screenshots_dir = os.path.join(os.path.dirname(__file__), "screenshots")
+os.makedirs(_screenshots_dir, exist_ok=True)
+app.mount("/screenshots", StaticFiles(directory=_screenshots_dir), name="screenshots")
 
 app.include_router(api_router, prefix="/api/v1")
 app.websocket("/ws")(websocket_endpoint)
