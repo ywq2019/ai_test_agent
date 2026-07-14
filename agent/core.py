@@ -116,6 +116,27 @@ class UITestAgent:
         try:
             await bt.navigate(url)
             elements = await bt.capture_elements()
+            # 顺便提取页面正文文本，作为 document_data 的补充
+            # 当任务没有上传需求文档时，LLM 可以基于页面内容生成用例
+            try:
+                page_text = await bt.page.evaluate("""
+                () => {
+                    // 移除 script/style 噪音
+                    ['script','style','noscript'].forEach(tag =>
+                        document.querySelectorAll(tag).forEach(el => el.remove())
+                    );
+                    return (document.body.innerText || '').replace(/\\s{3,}/g, '\\n\\n').trim();
+                }
+                """)
+                if page_text and len(page_text) > 100:
+                    state.document_data = {
+                        "content": page_text[:50000],   # 最多5万字
+                        "structured": {"functional_points": [], "validation_rules": [], "business_flows": []},
+                        "metadata": {"format": "page_text", "url": url},
+                    }
+                    logger.info(f"页面正文提取: {len(page_text)} 字符")
+            except Exception as e:
+                logger.warning(f"页面正文提取失败（不影响主流程）: {e}")
         finally:
             await bt.close()
             browser_pool.release(bt)

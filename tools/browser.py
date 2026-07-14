@@ -68,35 +68,58 @@ class BrowserTool:
         await self._scroll_to_load()
 
     async def _scroll_to_load(self):
-        """分段滚动页面到底部，触发懒加载内容，最多滚动 15 屏。"""
+        """分段滚动页面到底部，触发懒加载内容。
+        策略：
+        - 每步滚动一屏，等待网络请求静止或超时
+        - 检测页面高度变化，有新内容时额外等待
+        - 连续两步高度不变则认为内容已全部加载
+        - 最多滚动 40 屏（约 40000px）防止无限页面
+        """
         try:
-            # 获取页面总高度
-            page_height = await self.page.evaluate("() => document.body.scrollHeight")
-            viewport_height = 1080
-            scroll_step = viewport_height          # 每次滚动一屏
-            current_pos = 0
-            max_scrolls = 15                       # 最多滚动 15 屏，防止无限页面卡住
-            scroll_count = 0
+            viewport_height = await self.page.evaluate("() => window.innerHeight") or 1080
+            page_height     = await self.page.evaluate("() => document.body.scrollHeight")
+            current_pos     = 0
+            max_scrolls     = 40
+            scroll_count    = 0
+            unchanged_count = 0   # 连续高度未变计数
 
-            logger.info(f"开始滚动加载，页面总高度: {page_height}px")
+            logger.info(f"开始滚动加载，页面总高度: {page_height}px，视口: {viewport_height}px")
 
-            while current_pos < page_height and scroll_count < max_scrolls:
-                current_pos += scroll_step
-                await self.page.evaluate(f"window.scrollTo(0, {current_pos})")
-                await self.page.wait_for_timeout(600)   # 等待懒加载内容渲染
+            while scroll_count < max_scrolls:
+                next_pos = current_pos + viewport_height
+                await self.page.evaluate(f"window.scrollTo({{top: {next_pos}, behavior: 'smooth'}})")
 
-                # 重新获取高度（内容动态加载后高度可能增加）
+                # 等待网络请求静止（最多 2s），再额外等 800ms 让 JS 渲染
+                try:
+                    await self.page.wait_for_load_state("networkidle", timeout=2000)
+                except Exception:
+                    pass
+                await self.page.wait_for_timeout(800)
+
                 new_height = await self.page.evaluate("() => document.body.scrollHeight")
                 if new_height > page_height:
-                    page_height = new_height
-                    logger.debug(f"页面高度增加到 {page_height}px（懒加载触发）")
+                    logger.debug(f"页面高度增加 {page_height}→{new_height}px，等待内容稳定...")
+                    page_height     = new_height
+                    unchanged_count = 0
+                    # 新内容出现，多等 1.5s 让后续内容继续加载
+                    await self.page.wait_for_timeout(1500)
+                else:
+                    unchanged_count += 1
 
+                current_pos   = next_pos
                 scroll_count += 1
 
-            # 滚动完成后回到顶部，让页面元素恢复正常状态
+                # 已滚到底或连续2步无新内容 → 结束
+                if current_pos >= page_height or unchanged_count >= 2:
+                    break
+
+            logger.info(f"滚动完成，共滚动 {scroll_count} 屏，最终页面高度: {page_height}px")
+
+            # 停在底部等内容稳定，然后回顶
+            await self.page.wait_for_timeout(1000)
             await self.page.evaluate("window.scrollTo(0, 0)")
-            await self.page.wait_for_timeout(800)
-            logger.info(f"滚动完成，共滚动 {scroll_count} 屏")
+            await self.page.wait_for_timeout(1000)
+
         except Exception as e:
             logger.warning(f"滚动加载失败（不影响主流程）: {e}")
 
@@ -170,6 +193,41 @@ class BrowserTool:
             await self.page.wait_for_timeout(3000)
             elements = await self.page.evaluate(elements_script)
             logger.info(f"Retry captured {len(elements)} interactive elements")
+
+        # ── 补充文字内容节点（h/p/li/label/strong 等）──────────────────────────
+        # 无论交互元素数量多少，始终追加页面文字节点作为语义补充。
+        # 对于名师专区/课程列表等内容型页面，名师姓名、职称、简介均在文字节点里，
+        # 不补充这些内容 LLM 无法生成有意义的用例。
+        if True:  # 始终执行，替换原来的 len(elements) < 10 条件
+            logger.info("补充抓取页面文字节点（语义增强）...")
+            text_script = """
+            () => {
+                const texts = [];
+                const textTags = ['h1','h2','h3','h4','h5','h6','p','li','td','th','label','strong','dt','dd','span'];
+                document.querySelectorAll(textTags.join(',')).forEach(el => {
+                    const t = (el.innerText || '').trim();
+                    if (t.length > 5 && t.length < 500) {
+                        texts.push({
+                            tag: el.tagName.toLowerCase(),
+                            text: t.substring(0, 200),
+                            type: '', role: '', id: el.id || '', name: '',
+                            placeholder: '', href: '',
+                            x: 0, y: 0, width: 100, height: 20,
+                            selector: el.tagName.toLowerCase()
+                        });
+                    }
+                });
+                // 去重（相同文本只保留一条）
+                const seen = new Set();
+                return texts.filter(t => {
+                    if (seen.has(t.text)) return false;
+                    seen.add(t.text); return true;
+                }).slice(0, 300);  // 最多300条文字节点
+            }
+            """
+            text_elements = await self.page.evaluate(text_script)
+            logger.info(f"补充文字节点: {len(text_elements)} 条")
+            elements = elements + text_elements
 
         return elements
 

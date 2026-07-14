@@ -138,8 +138,8 @@ export const useTaskStore = defineStore('task', () => {
     return data
   }
 
-  async function generateCases(taskId) {
-    const data = await api.caseApi.generate(taskId)
+  async function generateCases(taskId, options = {}) {
+    const data = await api.caseApi.generate(taskId, options)
     cases.value = data
     return data
   }

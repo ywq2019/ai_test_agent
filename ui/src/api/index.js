@@ -51,7 +51,7 @@ export const caseApi = {
   create: (data) => api.post('/cases', data),
   update: (id, data) => api.put(`/cases/${id}`, data),
   delete: (id) => api.delete(`/cases/${id}`),
-  generate: (taskId) => api.post(`/cases/generate/${taskId}`, {}, { timeout: 180000 }),
+  generate: (taskId, options = {}) => api.post(`/cases/generate/${taskId}`, options, { timeout: 180000 }),
   optimize: (taskId) => api.post(`/cases/optimize/${taskId}`, {}, { timeout: 300000 }),
   coverage: (taskId) => api.get(`/cases/coverage/${taskId}`),
   // 文档变更检测与增量更新

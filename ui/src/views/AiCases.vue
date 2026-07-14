@@ -69,6 +69,10 @@
                 <el-tag size="small" type="warning" v-if="r.has_xmind">XMind</el-tag>
                 <el-tag size="small" type="info" v-if="r.parent_id">增量更新</el-tag>
                 <el-tag size="small" effect="plain" type="danger" v-if="r.record_status === 'deprecated'">已废弃</el-tag>
+                <el-tag size="small" type="primary" effect="plain" v-if="r.gen_status === 'generating'">
+                  <el-icon class="is-loading"><Loading /></el-icon> 生成中...
+                </el-tag>
+                <el-tag size="small" type="danger" effect="plain" v-if="r.gen_status === 'failed'">生成失败</el-tag>
                 <span class="record-count">{{ r.case_count }} 条用例</span>
                 <span class="record-date">{{ formatDate(r.created_at) }}</span>
               </div>
@@ -513,7 +517,7 @@
       <div style="margin-top:16px">
         <div class="detail-section-title">测试步骤</div>
         <ol class="step-list">
-          <li v-for="(step, i) in (detailCase?.steps || [])" :key="i">{{ step }}</li>
+          <li v-for="(step, i) in (detailCase?.steps || [])" :key="i">{{ String(step).replace(/^\s*\d+\.\s*/, '') }}</li>
         </ol>
       </div>
       <div style="margin-top:12px">
@@ -1062,6 +1066,24 @@ function connectGenWS() {
       if (msg.type === 'ai_gen_progress') {
         genPercent.value = msg.percent ?? genPercent.value
         genStage.value = msg.stage ?? genStage.value
+        // 生成失败时结束等待
+        if (msg.error) {
+          generating.value = false
+          ElMessage.error(msg.stage || '生成失败')
+          disconnectGenWS()
+        }
+      } else if (msg.type === 'ai_gen_done') {
+        // 后台生成完成，刷新列表并关闭对话框
+        genPercent.value = 100
+        genStage.value = `完成！共 ${msg.case_count} 条用例`
+        ElMessage.success(`生成成功！共 ${msg.case_count} 条用例`)
+        generating.value = false
+        genDialogVisible.value = false
+        fetchRecords().then(() => {
+          const found = records.value.find(r => r.id === msg.record_id)
+          if (found) current.value = found
+        })
+        disconnectGenWS()
       }
     } catch (_) {}
   }
@@ -1182,23 +1204,26 @@ const doGenerate = async () => {
         : { content: genForm.value.content }),
     }
 
-    const result = await aiCaseApi.generate(payload, _genAbortController.signal)
-    genPercent.value = 100
-    genStage.value = `完成！共 ${result.case_count} 条用例`
-    await new Promise(r => setTimeout(r, 600))
-    ElMessage.success(`生成成功！共 ${result.case_count} 条用例`)
-    genDialogVisible.value = false
-    await fetchRecords()
-    const found = records.value.find(r => r.id === result.id)
-    if (found) current.value = found
+    // 后台任务模式：接口立即返回占位记录（gen_status=generating），
+    // 后续通过 WebSocket 的 ai_gen_done 事件得知真正完成
+    const placeholder = await aiCaseApi.generate(payload, _genAbortController.signal)
+    genPercent.value = 10
+    genStage.value = '后台生成中，请稍候...'
+    // 先把占位记录加入列表（显示"生成中"状态），等 ai_gen_done 时再刷新
+    if (placeholder && placeholder.id) {
+      await fetchRecords()
+    }
+    // 不关对话框，等 ws 的 ai_gen_done 再关
   } catch (e) {
     // AbortError 是用户主动取消，不显示错误
-    if (e.name === 'CanceledError' || e.name === 'AbortError' || e.code === 'ERR_CANCELED') return
+    if (e.name === 'CanceledError' || e.name === 'AbortError' || e.code === 'ERR_CANCELED') {
+      generating.value = false
+      disconnectGenWS()
+      return
+    }
     const msg = e.response?.data?.detail || e.message || '生成失败'
     ElMessage.error(msg)
-  } finally {
     generating.value = false
-    _genAbortController = null
     disconnectGenWS()
   }
 }

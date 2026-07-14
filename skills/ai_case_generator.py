@@ -17,6 +17,149 @@ def _uid() -> str:
     return uuid.uuid4().hex[:16]
 
 
+def _repair_truncated_json(raw: str) -> str:
+    """尝试修复因 max_tokens 截断导致的不完整 JSON。
+    策略：找到最后一个完整的顶层数组/对象元素，截断到那里并补齐闭合括号。
+    """
+    if not raw:
+        return raw
+    try:
+        json.loads(raw)
+        return raw  # 本来就合法，直接返回
+    except json.JSONDecodeError:
+        pass
+
+    # 逐步从尾部裁剪，找到最后一个能合法闭合的位置
+    # 策略：找最后一个 },  或 }] 的位置，在那里截断后补齐括号
+    depth_map = {'{': '}', '[': ']'}
+    stack = []
+    last_good_pos = -1
+
+    i = 0
+    in_string = False
+    escape = False
+    while i < len(raw):
+        c = raw[i]
+        if escape:
+            escape = False
+        elif c == '\\' and in_string:
+            escape = True
+        elif c == '"':
+            in_string = not in_string
+        elif not in_string:
+            if c in ('{', '['):
+                stack.append(c)
+            elif c in ('}', ']'):
+                if stack and depth_map.get(stack[-1]) == c:
+                    stack.pop()
+                    if not stack:
+                        last_good_pos = i  # 顶层完整闭合位置
+        i += 1
+
+    if last_good_pos > 0:
+        # 截断到最后一个完整顶层元素结束位置，然后补齐外层括号
+        truncated = raw[:last_good_pos + 1]
+    else:
+        # 没找到任何完整闭合点：去掉尾部残缺内容（逗号及之后），直到遇到 } 或 ]
+        truncated = raw.rstrip()
+        # 从尾部往前找，去掉最后一个不完整的元素
+        for end in range(len(truncated) - 1, -1, -1):
+            if truncated[end] in ('}', ']'):
+                truncated = truncated[:end + 1]
+                break
+        else:
+            return raw  # 完全无法修复
+
+    # 重新计算还需要补什么括号
+    stack2 = []
+    in_string2 = False
+    escape2 = False
+    for c in truncated:
+        if escape2:
+            escape2 = False
+        elif c == '\\' and in_string2:
+            escape2 = True
+        elif c == '"':
+            in_string2 = not in_string2
+        elif not in_string2:
+            if c in ('{', '['):
+                stack2.append(depth_map[c])
+            elif c in ('}', ']'):
+                if stack2 and stack2[-1] == c:
+                    stack2.pop()
+    suffix = ''.join(reversed(stack2))
+    repaired = truncated + suffix
+    try:
+        json.loads(repaired)
+        logger.warning(f"JSON 截断修复成功: 原始 {len(raw)} 字符 → 修复后 {len(repaired)} 字符")
+        return repaired
+    except json.JSONDecodeError:
+        pass
+
+    return raw  # 修复失败，返回原始内容让调用方处理
+
+
+def _sanitize_json_string(raw: str) -> str:
+    """修复 AI 在 JSON 字符串值内部输出的未转义控制字符和裸引号。
+
+    两类问题都处理：
+    1. 控制字符（换行/制表/回车等）→ 转为对应转义序列
+    2. 字符串值内的裸 " 引号 → 转为 \\"
+
+    对裸引号的判断策略：
+    当 in_string=True 时遇到 "，向后扫描跳过空白，若下一个非空白字符
+    是合法的 JSON 分隔符（, } ] :）或到达字符串末尾，则视为合法的
+    闭合引号；否则视为嵌入式裸引号，替换为 \\"。
+    """
+    if not raw:
+        return raw
+
+    _escape_map = {'\n': '\\n', '\r': '\\r', '\t': '\\t', '\b': '\\b', '\f': '\\f'}
+    # 紧跟闭合引号后合法的首个非空字符集合
+    _CLOSING_FOLLOWERS = set(',}]:')
+
+    result = []
+    in_string = False
+    escape = False
+    n = len(raw)
+
+    i = 0
+    while i < n:
+        ch = raw[i]
+        if escape:
+            result.append(ch)
+            escape = False
+        elif ch == '\\' and in_string:
+            result.append(ch)
+            escape = True
+        elif ch == '"':
+            if not in_string:
+                # 开启字符串
+                result.append(ch)
+                in_string = True
+            else:
+                # 判断是闭合引号还是内嵌裸引号
+                # 向前看：跳过空白，看下一个有效字符
+                j = i + 1
+                while j < n and raw[j] in (' ', '\t', '\n', '\r'):
+                    j += 1
+                next_ch = raw[j] if j < n else ''
+                if next_ch in _CLOSING_FOLLOWERS or next_ch == '':
+                    # 合法闭合
+                    result.append(ch)
+                    in_string = False
+                else:
+                    # 嵌入式裸引号，转义之
+                    result.append('\\"')
+        elif in_string and ch in _escape_map:
+            result.append(_escape_map[ch])
+        else:
+            result.append(ch)
+        i += 1
+
+    return ''.join(result)
+
+
 def _xml_escape(text: str) -> str:
     return (str(text)
             .replace("&", "&amp;")
@@ -27,9 +170,15 @@ def _xml_escape(text: str) -> str:
 
 
 class AICaseGenerator:
+    # 全文分段常量：每段 2 万字，段间 2000 字重叠，确保功能描述不被切割
+    _SEGMENT_SIZE    = 20000
+    _SEGMENT_OVERLAP =  2000
+
     def __init__(self):
         self.output_dir = Path("ai_cases")
         self.output_dir.mkdir(exist_ok=True)
+        # 进程内分段索引缓存（doc_hash → segments 列表），避免重复切分
+        self._segment_cache: Dict[str, list] = {}
 
     # ------------------------------------------------------------------
     # 主入口
@@ -67,18 +216,73 @@ class AICaseGenerator:
         # 优先用 BeautifulSoup 精准提取正文，回退到正则清洗
         original_len = len(doc_text)
         try:
-            from bs4 import BeautifulSoup
-            soup = BeautifulSoup(doc_text, "html.parser")
-            # 移除脚本、样式、注释
-            for tag in soup(["script", "style", "head", "meta", "link"]):
-                tag.decompose()
-            cleaned = soup.get_text(separator="\n", strip=True)
-            # 合并多余空行
+            from bs4 import BeautifulSoup, Comment
             import re as _re
+            soup = BeautifulSoup(doc_text, "html.parser")
+
+            # ── Step1: 只删语义明确的噪音标签，不做 class 关键词匹配（避免误伤正文）
+            _NOISE_TAGS = [
+                "script", "style", "head", "meta", "link", "noscript",
+                "nav", "footer", "aside", "iframe", "svg", "canvas",
+            ]
+            for tag in soup(_NOISE_TAGS):
+                tag.decompose()
+            # 删除 HTML 注释
+            for comment in soup.find_all(string=lambda s: isinstance(s, Comment)):
+                comment.extract()
+
+            # ── Step2: 优先从语义主内容区提取 ───────────────────────────
+            _MAIN_SELECTORS = [
+                "main", "article",
+                "[role='main']",
+                "#content", "#main", "#main-content", "#page-content",
+                "#app-content", "#editor-content",
+                ".main-content", ".page-content", ".article-content",
+                ".wiki-content", ".doc-content", ".markdown-body",
+                ".ql-editor", ".ProseMirror",
+                ".requirement-content", ".spec-content",
+            ]
+            main_text = ""
+            for sel in _MAIN_SELECTORS:
+                try:
+                    node = soup.select_one(sel)
+                    if node:
+                        candidate = node.get_text(separator="\n", strip=True)
+                        if len(candidate) >= 200:
+                            main_text = candidate
+                            logger.info(f"主内容区命中选择器: {sel}，{len(main_text)} 字")
+                            break
+                except Exception:
+                    continue
+
+            # 没有找到主内容区，退回全文 get_text
+            if not main_text:
+                main_text = soup.get_text(separator="\n", strip=True)
+                logger.info(f"未命中主内容区，使用全文 get_text，{len(main_text)} 字")
+
+            # ── Step3: 行级过滤——只去掉极短碎片和纯符号行，保留所有正文 ──
+            lines_kept = []
+            for line in main_text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                # 只过滤：纯符号/数字行 或 极短行（≤3字）
+                if _re.fullmatch(r'[\d\s\-–—|/\\·•○●□■◆▷▶→←★☆※…。，,\.]+', line):
+                    continue
+                if len(line) <= 3:
+                    continue
+                lines_kept.append(line)
+
+            # ── Step4: 合并多余空行 ───────────────────────────────────────
+            cleaned = "\n".join(lines_kept)
             cleaned = _re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+
             if len(cleaned) >= 200:
                 doc_text = cleaned
-                logger.info(f"BeautifulSoup 清洗: {original_len} → {len(doc_text)} 字")
+                logger.info(f"BeautifulSoup 主内容提取: {original_len} → {len(doc_text)} 字")
+            else:
+                logger.warning(f"主内容提取结果过短({len(cleaned)}字)，保留原始内容")
+
         except ImportError:
             # BeautifulSoup 不可用，用 rag.clean_text 正则清洗
             try:
@@ -92,40 +296,50 @@ class AICaseGenerator:
         except Exception as e:
             logger.warning(f"HTML 清洗失败，使用原始内容: {e}")
 
-        # 计算文档哈希，供调用方写入数据库做变更检测
+        # 计算文档哈希（用于变更检测 & 分段缓存 key）
         doc_hash = self._compute_doc_hash(doc_text)
 
-        # RAG 入库：文档解析完成后立即分段入库，生成时可直接检索
+        # RAG 入库：对全文（不截断）建立向量索引，覆盖文档所有章节
         if rag_source_id is not None:
             try:
                 from skills.rag import index_document
                 await index_document(rag_source_id, "ai_case", doc_text)
-                logger.info(f"RAG: indexed doc for ai_case:{rag_source_id}")
+                logger.info(f"RAG: indexed full doc ({len(doc_text)}字) for ai_case:{rag_source_id}")
             except Exception as e:
-                logger.warning(f"RAG index failed, will use truncated context: {e}")
+                logger.warning(f"RAG index failed, will use segment index: {e}")
+
+        # 构建全文分段索引（内存缓存），供各模块精准定位需求上下文
+        doc_segments = self._build_segment_index(doc_text, doc_hash)
 
         pro_max = self._load_pro_max_skill()
 
         if pro_max:
             # ── 分段生成模式 ──────────────────────────────────────────
             await _p(15, "正在分析需求文档，识别功能模块...")
-            logger.info(f"AI 用例分段生成开始: {task_name}，内容 {len(doc_text)} 字")
+            logger.info(f"AI 用例分段生成开始: {task_name}，内容 {len(doc_text)} 字，"
+                        f"共 {len(doc_segments)} 个分段")
 
             # 模块提取：传全文，内部按段分批让 AI 识别所有模块
-            modules_info = await self._extract_modules(doc_text, rag_source_id=rag_source_id)
+            try:
+                modules_info = await self._extract_modules(doc_text, rag_source_id=rag_source_id)
+            except Exception as _e:
+                modules_info = []
+                logger.warning(f"模块识别异常，回退到单次生成: {_e}")
+                await _p(20, "正在调用 AI 整体生成用例...")
 
             if modules_info:
                 total_mod = len(modules_info)
                 await _p(20, f"识别到 {total_mod} 个功能模块，开始逐模块生成用例...")
                 logger.info(f"提取模块: {[m['name'] for m in modules_info]}")
-                # 传全文给各模块生成，RAG 检索相关段落
+                # 传全文 + 分段索引给各模块生成
                 cases_data = await self._call_llm_staged(
                     doc_text, task_name, modules_info, _p,
                     rag_source_id=rag_source_id,
+                    doc_segments=doc_segments,
                 )
             else:
-                logger.warning("模块识别失败，回退到单次生成")
-                await _p(20, "模块识别失败，使用默认方式生成...")
+                logger.warning("模块识别返回空，回退到单次生成")
+                await _p(20, "正在调用 AI 整体生成用例...")
                 cases_data = await self._call_llm(doc_text, task_name, _p)
         else:
             # ── 默认单次生成模式 ─────────────────────────────────────
@@ -156,7 +370,7 @@ class AICaseGenerator:
         )
         # 将文档哈希和截断内容一并返回，由 routes.py 写入数据库
         result["doc_hash"] = doc_hash
-        result["doc_content"] = doc_text[:20000]   # 最多保存 2 万字，够 Diff 分析用
+        result["doc_content"] = doc_text[:40000]   # 最多保存 4 万字，供 Diff 分析完整覆盖
         await _p(100, f"完成！共生成 {result['case_count']} 条用例")
         logger.info(f"AI 用例生成完成: {result['case_count']} 条，文件: {result['files']}")
         return result
@@ -243,7 +457,7 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
 }}"""
 
         try:
-            raw = await self._run_claude_subprocess(system_prompt, prompt, timeout_secs=60)
+            raw = await self._run_claude_subprocess(system_prompt, prompt, timeout_secs=120)
             result = json.loads(raw)
             # 字段保底，防止 LLM 漏字段
             result.setdefault("changed", [])
@@ -263,8 +477,8 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
             logger.error(f"Diff 分析返回非法 JSON: {e}")
             raise RuntimeError(f"Diff 分析失败，AI 返回非 JSON 内容: {e}")
         except Exception as e:
-            logger.error(f"Diff 分析异常: {e}")
-            raise RuntimeError(f"Diff 分析异常: {e}")
+            logger.error(f"Diff 分析异常: {type(e).__name__}: {e}", exc_info=True)
+            raise RuntimeError(f"Diff 分析异常: {type(e).__name__}: {e}")
 
     # ------------------------------------------------------------------
     # 清理旧生成文件，只保留当前批次
@@ -343,7 +557,9 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
         if not api_key or not base_url:
             raise RuntimeError("未配置 AI_API_KEY 或 AI_API_URL，请在大模型配置页填写后重试")
 
-        is_anthropic = "anthropic.com" in base_url or model.startswith("claude")
+        # 只有 URL 真正指向 Anthropic 官方时才走 Anthropic 格式；
+        # 第三方代理（aims.hqwx.com 等）统一走 OpenAI 兼容格式
+        is_anthropic = "anthropic.com" in base_url
 
         if is_anthropic:
             url     = f"{base_url}/v1/messages"
@@ -354,7 +570,7 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
             }
             payload = {
                 "model": model,
-                "max_tokens": 8192,
+                "max_tokens": 16000,
                 "system": system_prompt,
                 "messages": [{"role": "user", "content": prompt}],
             }
@@ -366,25 +582,77 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
             }
             payload = {
                 "model": model,
-                "max_tokens": 8192,
+                "max_tokens": 16000,
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user",   "content": prompt},
                 ],
             }
 
-        logger.info(f"Calling LLM API: {url}, model={model}")
-        async with httpx.AsyncClient(verify=False, timeout=timeout_secs) as client:
-            resp = await client.post(url, json=payload, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
+        logger.info(f"Calling LLM API: {url}, model={model}, is_anthropic={is_anthropic}")
+
+        # 临时错误（502/503/504/超时）自动重试，最多3次，间隔递增
+        _RETRYABLE = {502, 503, 504}
+        _MAX_RETRY  = 3
+        last_exc: Exception = RuntimeError("未知错误")
+        for _attempt in range(1, _MAX_RETRY + 1):
+            try:
+                async with httpx.AsyncClient(verify=False, timeout=timeout_secs) as client:
+                    resp = await client.post(url, json=payload, headers=headers)
+                    if resp.status_code in _RETRYABLE:
+                        raise httpx.HTTPStatusError(
+                            f"Server error '{resp.status_code}' (retryable)",
+                            request=resp.request, response=resp,
+                        )
+                    resp.raise_for_status()
+                    data = resp.json()
+                break  # 成功则跳出重试循环
+            except (httpx.TimeoutException, httpx.HTTPStatusError) as e:
+                last_exc = e
+                is_retryable = isinstance(e, httpx.TimeoutException) or (
+                    isinstance(e, httpx.HTTPStatusError)
+                    and e.response.status_code in _RETRYABLE
+                )
+                if is_retryable and _attempt < _MAX_RETRY:
+                    wait = _attempt * 5  # 5s, 10s, 15s
+                    logger.warning(f"LLM 请求失败（第{_attempt}次）: {e}，{wait}s 后重试...")
+                    await asyncio.sleep(wait)
+                    continue
+                raise  # 不可重试或已用完重试次数，直接抛出
+        else:
+            raise last_exc  # 全部重试失败
 
         if is_anthropic:
-            # content 可能包含 thinking block（扩展思考），取第一个 type=="text" 的 block
-            text_blocks = [b for b in data["content"] if b.get("type") == "text"]
-            if not text_blocks:
-                raise ValueError(f"Anthropic API 未返回 text block，content={data['content']}")
-            raw = text_blocks[0]["text"]
+            # 兼容多种代理响应格式
+            content_field = data.get("content")
+            if not content_field:
+                logger.error(f"Anthropic API 返回无 content 字段，完整响应: {json.dumps(data, ensure_ascii=False)[:500]}")
+                raise ValueError(f"Anthropic API 返回无内容，响应: {json.dumps(data, ensure_ascii=False)[:200]}")
+
+            if isinstance(content_field, str):
+                # 部分代理直接把 content 作为字符串返回
+                raw = content_field
+            elif isinstance(content_field, list):
+                # 标准格式：[{"type": "text", "text": "..."}]，可能包含 thinking block
+                text_blocks = [b for b in content_field if isinstance(b, dict) and b.get("type") == "text"]
+                if not text_blocks:
+                    logger.error(f"Anthropic API 未返回 text block，content={content_field}")
+                    raise ValueError(f"Anthropic API 未返回 text block，content={content_field}")
+                block = text_blocks[0]
+                raw = block.get("text", "")
+                if not raw:
+                    # 代理可能把文本存在其他字段，尝试常见备选字段
+                    raw = (block.get("content", "") or block.get("value", "")
+                           or block.get("message", ""))
+                    if not raw:
+                        logger.error(
+                            f"Anthropic text block 缺少 'text' 字段，block={block}，"
+                            f"完整 content={content_field}"
+                        )
+                        raise ValueError(f"Anthropic text block 无文本内容（'text' 字段缺失）: {block}")
+            else:
+                logger.error(f"Anthropic content 格式异常: type={type(content_field)}, value={content_field!r}")
+                raise ValueError(f"Anthropic content 格式异常: {type(content_field)}")
         else:
             raw = data["choices"][0]["message"]["content"]
 
@@ -393,23 +661,47 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
             raw = raw.split("```json", 1)[1].split("```", 1)[0].strip()
         elif "```" in raw:
             raw = raw.split("```", 1)[1].split("```", 1)[0].strip()
+        # Step1: 修复字符串值内部的裸控制字符（换行/制表符等破坏JSON结构）
+        raw = _sanitize_json_string(raw)
+        # Step2: 修复因 max_tokens 截断导致的不完整 JSON
+        raw = _repair_truncated_json(raw)
         return raw
 
     # ------------------------------------------------------------------
-    # 分段生成 Step-1：提取功能模块列表
+    # ------------------------------------------------------------------
+    # 分段生成 Step-1：提取功能模块列表（并行分批）
     # ------------------------------------------------------------------
     async def _extract_modules(self, content: str, rag_source_id: Optional[int] = None) -> list:
         """从需求文档中提取功能模块列表。
-        - 文档较短（≤8000字）：直接传入全文
-        - 文档较长（>8000字）：分批提取后合并去重
+        - 文档 ≤30000字：一次性全文提取
+        - 文档 >30000字：按 20000字/批 并行提取，全部批次同时发出，结果合并去重
+        失败时抛出异常，由调用方决定如何处理。
         """
         system_prompt = (
-            "You are a business analyst. Extract functional modules from a requirements document. "
+            "You are a product QA analyst. Your job is to extract testable functional modules from a requirements document. "
+            "A testable module is something a tester can open in a browser/app and verify behavior. "
+            "Include: any page, screen, feature, workflow, or admin panel that a human user interacts with. "
+            "Exclude ONLY pure backend/infra topics that have NO user interface and NO user-visible behavior: "
+            "e.g. database schema, CI/CD pipeline, code deployment, server configuration. "
+            "When in doubt, INCLUDE the module — it is better to have extra modules than to miss real features. "
             "Output ONLY valid JSON. No markdown, no explanation."
         )
 
-        def _build_prompt(text: str) -> str:
-            return f"""分析以下需求文档，识别所有功能模块并列出每个模块的核心功能点。
+        def _build_prompt(text: str, batch_hint: str = "") -> str:
+            hint = f"\n注意：这是文档的{batch_hint}部分，请提取其中出现的功能模块。" if batch_hint else ""
+            return f"""分析以下需求文档，提取所有可测试的功能模块。{hint}
+
+判断标准（满足任意一条即提取）：
+✅ 用户/管理员能在浏览器或App上看到并操作的页面或功能
+✅ 有具体交互流程的功能（如：登录、搜索、下单、报表查看）
+✅ 后台管理界面（如：CRM配置、Admin后台、数据埋点配置）
+✅ 有用户可感知结果的业务功能（如：周报推送、消息通知、用例生成）
+
+排除标准（同时满足以下两条才排除）：
+❌ 完全没有用户界面，纯粹是服务端/基础设施实现
+❌ 测试人员无法通过界面操作来验证其行为（如：数据库 Schema、CI/CD 流水线、服务器部署脚本）
+
+遇到模糊情况时，倾向于【保留】而非排除。
 
 需求文档：
 ---
@@ -421,62 +713,107 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
   "modules": [
     {{
       "name": "模块名称",
-      "features": ["核心功能点1", "核心功能点2", "核心功能点3"]
+      "features": ["核心功能点1", "核心功能点2", "核心功能点3"],
+      "anchor_keywords": ["该模块在文档中的特征词1", "特征词2"]
     }}
   ]
 }}
 
-识别所有主要功能模块（不限数量），每个模块列出3-8个功能点，只提取文档中明确的功能。"""
+识别所有可测试的功能模块（不限数量），每个模块列出3-8个功能点，anchor_keywords填写该模块在需求文档中独有的标识性词汇。若本段文字确实全部是无界面的纯技术实现内容，返回 {{"modules": []}}。"""
 
-        MAX_SINGLE = 8000    # 8000字以内直接全文提取
-        BATCH_SIZE = 10000   # 分批时每批大小，提高减少批次
-        MAX_BATCHES = 20     # 最多处理20批，防止超大文档卡死
+        BATCH_SIZE = 20000   # 每批 2 万字，与 _SEGMENT_SIZE 对齐
+        # 不再设置 MAX_BATCHES 上限，覆盖全文所有内容
+        MAX_CONCURRENT_EXTRACT = 5  # 并发数，防止 API 过载
 
         try:
-            if len(content) <= MAX_SINGLE:
-                # 直接全文提取
-                raw = await self._run_claude_subprocess(system_prompt, _build_prompt(content), timeout_secs=60)
+            if len(content) <= BATCH_SIZE:
+                raw = await self._run_claude_subprocess(
+                    system_prompt, _build_prompt(content), timeout_secs=90
+                )
                 data = json.loads(raw)
                 modules = data.get("modules", [])
                 if isinstance(modules, list) and modules:
                     logger.info(f"模块提取成功: {len(modules)} 个模块")
                     return modules
             else:
-                # 长文档：分批提取，合并去重，最多处理 MAX_BATCHES 批
-                total_batch = (len(content) + BATCH_SIZE - 1) // BATCH_SIZE
-                actual_batch = min(total_batch, MAX_BATCHES)
-                logger.info(f"文档较长({len(content)}字)，分{actual_batch}批提取模块（共{total_batch}批，上限{MAX_BATCHES}）...")
+                # 切分批次，覆盖全文（无上限）
+                batches = []
+                for i in range(0, len(content), BATCH_SIZE):
+                    batches.append((len(batches) + 1, content[i:i + BATCH_SIZE]))
+                total_batch = len(batches)
+                logger.info(f"文档较长({len(content)}字)，并行提取 {total_batch} 批模块（全文覆盖）...")
+
+                sem = asyncio.Semaphore(MAX_CONCURRENT_EXTRACT)
+
+                async def _extract_one(batch_num: int, text: str):
+                    async with sem:
+                        hint = f"第{batch_num}/{total_batch}批"
+                        logger.info(f"提取模块 批次 {batch_num}/{total_batch}")
+                        try:
+                            raw = await self._run_claude_subprocess(
+                                system_prompt, _build_prompt(text, hint), timeout_secs=90
+                            )
+                            data = json.loads(raw)
+                            return data.get("modules", [])
+                        except Exception as e:
+                            logger.warning(f"批次 {batch_num} 模块提取失败: {e}")
+                            return []
+
+                # 全部批次并行发出（受 sem 限流，避免 API 过载）
+                all_batch_results = await asyncio.gather(
+                    *[_extract_one(bn, text) for bn, text in batches]
+                )
+
+                # 合并去重：同名或高相似度模块合并功能点，避免不同批次因名字微差产生重复
                 all_modules: Dict[str, Dict] = {}
 
-                for i in range(0, min(len(content), BATCH_SIZE * MAX_BATCHES), BATCH_SIZE):
-                    batch = content[i:i + BATCH_SIZE]
-                    batch_num = i // BATCH_SIZE + 1
-                    logger.info(f"提取模块 批次 {batch_num}/{actual_batch}")
-                    try:
-                        raw = await self._run_claude_subprocess(system_prompt, _build_prompt(batch), timeout_secs=60)
-                        data = json.loads(raw)
-                        for mod in data.get("modules", []):
-                            name = mod.get("name", "").strip()
-                            if not name:
-                                continue
-                            if name not in all_modules:
-                                all_modules[name] = mod
-                            else:
-                                # 合并功能点（去重）
-                                existing = set(all_modules[name].get("features", []))
-                                new_feats = mod.get("features", [])
-                                all_modules[name]["features"] = list(existing | set(new_feats))
-                    except Exception as e:
-                        logger.warning(f"批次 {batch_num} 模块提取失败: {e}")
+                def _find_existing_key(name: str) -> Optional[str]:
+                    """在 all_modules 中找与 name 高度相似的 key，找不到返回 None"""
+                    if name in all_modules:
+                        return name
+                    name_lower = name.lower()
+                    for key in all_modules:
+                        key_lower = key.lower()
+                        # 包含匹配：「名师专区」vs「名师专区模块」
+                        if name_lower in key_lower or key_lower in name_lower:
+                            return key
+                        # 字符重叠率 ≥ 70%
+                        common = sum(1 for c in name if c in key)
+                        if common / max(len(name), 1) >= 0.7:
+                            return key
+                    return None
+
+                for batch_modules in all_batch_results:
+                    for mod in batch_modules:
+                        name = mod.get("name", "").strip()
+                        if not name:
+                            continue
+                        existing_key = _find_existing_key(name)
+                        if existing_key is None:
+                            all_modules[name] = mod
+                        else:
+                            # 合并 features 和 anchor_keywords
+                            existing_feats = set(all_modules[existing_key].get("features", []))
+                            merged_feats = list(existing_feats | set(mod.get("features", [])))
+                            all_modules[existing_key]["features"] = merged_feats
+                            existing_anchors = set(all_modules[existing_key].get("anchor_keywords", []))
+                            merged_anchors = list(existing_anchors | set(mod.get("anchor_keywords", [])))
+                            all_modules[existing_key]["anchor_keywords"] = merged_anchors
+                            if existing_key != name:
+                                logger.debug(f"模块合并: 「{name}」→「{existing_key}」，"
+                                             f"功能点合并至 {len(merged_feats)} 个")
 
                 modules = list(all_modules.values())
                 if modules:
-                    logger.info(f"分批提取完成，共识别 {len(modules)} 个模块")
+                    logger.info(f"并行分批提取完成，共识别 {len(modules)} 个模块")
                     return modules
+
         except Exception as e:
-            logger.warning(f"模块提取失败: {e}")
+            logger.error(f"模块提取失败（将回退到单次生成）: {e}")
+            raise
         return []
 
+    # ------------------------------------------------------------------
     # ------------------------------------------------------------------
     # 分段生成 Step-2：单模块用例生成
     # ------------------------------------------------------------------
@@ -487,28 +824,57 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
         content: str,
         rag_source_id: Optional[int] = None,
         rag_source_type: str = "ai_case",
+        doc_segments: Optional[list] = None,       # 全文分段索引，用于精准定位
+        anchor_keywords: Optional[List[str]] = None,  # 该模块在文档中的标识性词汇
     ) -> Dict[str, Any]:
-        """为单个功能模块生成测试用例，数量根据功能点数量动态调整（8-20条）。
-        rag_source_id 不为 None 时优先用 RAG 检索相关段落替代硬截断。
+        """为单个功能模块生成测试用例，数量根据功能点数量动态调整。
+        上下文优先级：RAG向量检索 > 分段精准定位 > 全文开头截断（兜底）
         """
-        features_text = "\n".join(f"  - {f}" for f in features[:6])
-        case_limit = max(8, min(len(features) * 2, 20))
+        features_text = "\n".join(f"  - {f}" for f in features[:10])   # 最多10个功能点
 
-        # 尝试 RAG 检索，失败则回退截断
+        # case_limit 动态计算：功能点数量 × 权重，核心模块额外加成
+        # 核心模块（登录/支付/下单/注册/权限等）优先保障更多用例
+        _CORE_KEYWORDS = {
+            "登录", "注册", "支付", "下单", "购买", "结算", "权限", "鉴权",
+            "认证", "审批", "审核", "订单", "用户", "账户", "密码", "安全",
+        }
+        is_core = any(kw in module_name for kw in _CORE_KEYWORDS)
+        base_limit = len(features) * 4
+        if is_core:
+            # 核心模块：功能点 × 5，上限 35 条
+            case_limit = max(15, min(base_limit + len(features), 35))
+            logger.debug(f"核心模块「{module_name}」case_limit={case_limit}")
+        else:
+            # 普通模块：功能点 × 4，上限 25 条
+            case_limit = max(10, min(base_limit, 25))
+
+        # RAG 检索：top_k 从 5 提升到 8，注入上下文从 2000 扩到 6000 字
         context = None
         if rag_source_id is not None:
             try:
                 from skills.rag import search_chunks
-                query = f"{module_name} {' '.join(features[:4])}"
-                retrieved = await search_chunks(query, rag_source_id, rag_source_type, top_k=5)
+                # query 扩展：模块名 + 功能点关键词，提升语义匹配召回率
+                query = f"{module_name} {' '.join(features[:8])}"
+                retrieved = await search_chunks(query, rag_source_id, rag_source_type, top_k=10)
                 if retrieved:
-                    context = "\n\n".join(retrieved)
-                    logger.info(f"RAG: module '{module_name}' retrieved {len(retrieved)} chunks")
+                    joined = "\n\n".join(retrieved)
+                    context = joined[:8000]  # 最多注入 8000 字（原 6000）
+                    logger.info(f"RAG: module '{module_name}' retrieved {len(retrieved)} chunks ({len(context)}字)")
             except Exception as e:
                 logger.warning(f"RAG search failed for '{module_name}': {e}")
 
         if context is None:
-            context = content[:2000]
+            # 无 RAG 时：优先用分段索引精准定位模块专属需求，兜底才取全文开头
+            if doc_segments:
+                context = self._locate_module_context(
+                    module_name, features, doc_segments,
+                    anchor_keywords=anchor_keywords,
+                    window=8000,
+                )
+                logger.info(f"模块「{module_name}」使用分段定位上下文 ({len(context)}字)")
+            else:
+                context = content[:8000]
+                logger.debug(f"模块「{module_name}」无分段索引，使用文档开头 8000 字")
 
         from skills.prompt_loader import get_system, render_user
         system_prompt = get_system("ai_case_gen.yaml", "generate_module_cases")
@@ -519,13 +885,22 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
                              case_limit=case_limit)
 
         try:
-            raw = await self._run_claude_subprocess(system_prompt, prompt, timeout_secs=90)
+            raw = await self._run_claude_subprocess(system_prompt, prompt, timeout_secs=120)
             data = json.loads(raw)
+            import re as _re_step
+            for case in data.get("cases", []):
+                steps = case.get("steps", [])
+                if isinstance(steps, list):
+                    case["steps"] = [_re_step.sub(r'^\s*\d+\.\s*', '', str(s)) for s in steps]
             return data
         except json.JSONDecodeError as e:
-            logger.error(f"模块「{module_name}」返回非法 JSON: {e}")
+            _raw_preview = raw[:600] if 'raw' in dir() else '(未获取到)'
+            logger.error(
+                f"模块「{module_name}」返回非法 JSON: {e}\n"
+                f"原始内容(前600字):\n{_raw_preview}"
+            )
         except Exception as e:
-            logger.warning(f"模块「{module_name}」生成失败: {e}")
+            logger.warning(f"模块「{module_name}」生成失败: {type(e).__name__}: {e}")
         return {"name": module_name, "cases": []}
 
     # ------------------------------------------------------------------
@@ -545,7 +920,7 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
 
 参考需求（节选）：
 ---
-{content[:4000]}
+{content[:8000]}
 ---
 
 覆盖以下场景（每类1-2条）：
@@ -581,7 +956,7 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
 
 参考需求（节选）：
 ---
-{content[:4000]}
+{content[:8000]}
 ---
 
 覆盖以下场景（每类1-2条）：
@@ -619,6 +994,7 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
         return {"name": dim_name, "cases": []}
 
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # 分段生成 Step-3：并发调度 + 合并结果（含性能 + 兼容性）
     # ------------------------------------------------------------------
     async def _call_llm_staged(
@@ -628,10 +1004,14 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
         modules_info: list,
         _p,
         rag_source_id: Optional[int] = None,
+        doc_segments: Optional[list] = None,
     ) -> Dict[str, Any]:
-        """并发（最多2路）逐模块生成功能用例，同时生成性能和兼容性用例，统一编号合并。"""
-        total_all = len(modules_info) + 2  # +2：性能 + 兼容性
-        sem = asyncio.Semaphore(2)
+        """并发（最多4路）逐模块生成功能用例，同时生成性能和兼容性用例，统一编号合并。
+        生成失败的模块自动重试一次（换更短的 prompt 兜底）。
+        doc_segments: 全文分段索引，用于精准定位各模块专属需求文本。
+        """
+        total_all = len(modules_info) + 2   # +2：性能 + 兼容性
+        sem = asyncio.Semaphore(4)           # 并发数从 2 提升到 4
         completed = [0]
 
         async def _progress_done(label: str):
@@ -643,16 +1023,33 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
 
         async def _gen_func(i: int, module: dict):
             async with sem:
-                name = module.get("name", f"模块{i+1}")
-                features = module.get("features", [])
+                name            = module.get("name", f"模块{i+1}")
+                features        = module.get("features", [])
+                anchor_keywords = module.get("anchor_keywords", [])
                 await _p(
                     20 + int(i / total_all * 65),
-                    f"正在生成功能模块 {i+1}/{len(modules_info)}：{name}...",
+                    f"正在生成模块 {i+1}/{len(modules_info)}：{name}...",
                 )
                 result = await self._call_llm_for_module(
                     name, features, content,
                     rag_source_id=rag_source_id,
+                    doc_segments=doc_segments,
+                    anchor_keywords=anchor_keywords,
                 )
+                # 生成0条时自动重试一次（用更简短的 prompt）
+                if not result.get("cases"):
+                    logger.warning(f"模块「{name}」生成0条，触发重试...")
+                    await asyncio.sleep(3)
+                    result = await self._call_llm_for_module(
+                        name, features[:3], content,
+                        rag_source_id=rag_source_id,
+                        doc_segments=doc_segments,
+                        anchor_keywords=anchor_keywords,
+                    )
+                    if result.get("cases"):
+                        logger.info(f"模块「{name}」重试成功，生成 {len(result['cases'])} 条")
+                    else:
+                        logger.warning(f"模块「{name}」重试仍为0条，跳过")
                 await _progress_done(name)
                 return result
 
@@ -674,38 +1071,79 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
             [_gen_func(i, m) for i, m in enumerate(modules_info)]
             + [_gen_perf(), _gen_compat()]
         )
-        all_results = await asyncio.gather(*all_tasks)
+        all_results = await asyncio.gather(*all_tasks, return_exceptions=True)
 
-        func_results = all_results[:len(modules_info)]
-        perf_result  = all_results[-2]
+        func_results  = all_results[:len(modules_info)]
+        perf_result   = all_results[-2]
         compat_result = all_results[-1]
 
-        # 统一重新编号 TC001, TC002...
-        counter = 1
+        # 统一重新编号（模块前缀-序号），并做跨模块去重
+        # ID 格式：模块拼音/首字母缩写-序号，如 LOGIN-001，便于需求追踪
+        # 去重指纹：用例名称 + 步骤第一条，相同视为重复（保留先出现的）
+        seen_fingerprints: set = set()
         merged_modules = []
+        dup_count = 0
+
+        def _fingerprint(case: dict) -> str:
+            name = (case.get("name") or "").strip()
+            steps = case.get("steps") or []
+            first_step = (steps[0] if isinstance(steps, list) and steps else str(steps)).strip()[:60]
+            return f"{name}||{first_step}"
+
+        def _module_prefix(mod_name: str) -> str:
+            """从模块名生成 2-5 位大写前缀，供用例 ID 使用。
+            优先用常见模块的固定缩写，其次取中文首字符拼音首字母，兜底取前4个字符。
+            """
+            _ABBR = {
+                "登录": "LOGIN", "注册": "REG", "用户": "USER", "权限": "AUTH",
+                "支付": "PAY", "订单": "ORDER", "购物车": "CART", "商品": "PROD",
+                "搜索": "SRCH", "首页": "HOME", "名师": "TCHR", "课程": "COUR",
+                "评论": "CMT", "消息": "MSG", "通知": "NOTF", "上传": "UPLD",
+                "下载": "DWNL", "设置": "SET", "统计": "STAT", "报表": "RPT",
+                "性能测试": "PERF", "兼容性测试": "COMPAT",
+            }
+            for key, abbr in _ABBR.items():
+                if key in mod_name:
+                    return abbr
+            # 取模块名前 4 个非空字符（中文或英文），转大写
+            chars = [c for c in mod_name if c.strip()][:4]
+            prefix = "".join(chars).upper()
+            return prefix if prefix else "MOD"
+
         for mod in list(func_results) + [perf_result, compat_result]:
-            if not mod:
+            if not mod or isinstance(mod, Exception):
                 continue
             cases = mod.get("cases", [])
             if not cases:
                 continue
+            prefix = _module_prefix(mod["name"])
+            idx = 1
             renamed = []
             for case in cases:
+                fp = _fingerprint(case)
+                if fp in seen_fingerprints:
+                    dup_count += 1
+                    continue
+                seen_fingerprints.add(fp)
                 c = dict(case)
-                c["id"] = f"TC{counter:03d}"
-                counter += 1
+                c["id"] = f"{prefix}-{idx:03d}"
+                idx += 1
                 renamed.append(c)
-            merged_modules.append({"name": mod["name"], "cases": renamed})
+            if renamed:
+                merged_modules.append({"name": mod["name"], "cases": renamed})
 
         total_cases = sum(len(m["cases"]) for m in merged_modules)
+        if dup_count:
+            logger.info(f"跨模块去重：移除 {dup_count} 条重复用例")
         logger.info(f"分段生成完成: {len(merged_modules)} 个模块，共 {total_cases} 条用例")
         return {
             "title": f"{task_name} 完整测试用例集",
             "modules": merged_modules,
         }
     async def _call_llm(self, content: str, task_name: str, _p=None) -> Dict[str, Any]:
-        # 内容截断：10000 字保证覆盖完整需求，同时保证输出 token 可控
-        max_content = 10000
+        # 内容截断：提升至 30000 字，覆盖更完整的需求文档
+        # 分段生成模式已能处理更长文档，此处兜底路径也适当放宽
+        max_content = 30000
         if len(content) > max_content:
             content = content[:max_content] + f"\n\n[内容已截断，以上为前 {max_content} 字]"
 
@@ -763,7 +1201,7 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
 
 生成要求：
 1. 优先级：P0（核心主流程）、P1（主要功能）、P2（边界/异常/兼容）
-2. 覆盖正常流程 + 异常场景 + 边界值
+2. 覆盖正常流程 + 异常场景 + 边界值，不设总数上限，充分覆盖所有功能点
 3. 步骤具体可操作，预期结果可量化验证
 4. 第一个字符必须是 {{，最后一个字符必须是 }}"""
 
@@ -778,7 +1216,7 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
         if not api_key or not base_url:
             raise RuntimeError("未配置 AI_API_KEY 或 AI_API_URL，请在大模型配置页填写后重试")
 
-        is_anthropic = "anthropic.com" in base_url or model.startswith("claude")
+        is_anthropic = "anthropic.com" in base_url
 
         if is_anthropic:
             url     = f"{base_url}/v1/messages"
@@ -789,7 +1227,7 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
             }
             payload = {
                 "model": model,
-                "max_tokens": 8192,
+                "max_tokens": 16000,
                 "system": system_prompt,
                 "messages": [{"role": "user", "content": prompt}],
             }
@@ -801,7 +1239,7 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
             }
             payload = {
                 "model": model,
-                "max_tokens": 8192,
+                "max_tokens": 16000,
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user",   "content": prompt},
@@ -829,11 +1267,26 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
             sim_task.cancel()
 
         if is_anthropic:
-            # content 可能包含 thinking block（扩展思考），取第一个 type=="text" 的 block
-            text_blocks = [b for b in data["content"] if b.get("type") == "text"]
-            if not text_blocks:
-                raise ValueError(f"Anthropic API 未返回 text block，content={data['content']}")
-            raw = text_blocks[0]["text"]
+            # 兼容多种代理响应格式（与 _run_claude_subprocess 保持一致）
+            content_field = data.get("content")
+            if not content_field:
+                raise ValueError(f"Anthropic API 返回无内容，响应: {json.dumps(data, ensure_ascii=False)[:200]}")
+
+            if isinstance(content_field, str):
+                raw = content_field
+            elif isinstance(content_field, list):
+                text_blocks = [b for b in content_field if isinstance(b, dict) and b.get("type") == "text"]
+                if not text_blocks:
+                    raise ValueError(f"Anthropic API 未返回 text block，content={content_field}")
+                block = text_blocks[0]
+                raw = block.get("text", "")
+                if not raw:
+                    raw = (block.get("content", "") or block.get("value", "")
+                           or block.get("message", ""))
+                    if not raw:
+                        raise ValueError(f"Anthropic text block 无文本内容（'text' 字段缺失）: {block}")
+            else:
+                raise ValueError(f"Anthropic content 格式异常: {type(content_field)}")
         else:
             raw = data["choices"][0]["message"]["content"]
 
@@ -1026,7 +1479,7 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
             "files": {},
             "diff_summary": diff_summary,
             "doc_hash": self._compute_doc_hash(new_doc_content),
-            "doc_content": new_doc_content[:20000],
+            "doc_content": new_doc_content[:40000],
         }
 
         if "md" in formats:
@@ -1398,26 +1851,41 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
         opt_results    = all_results[:len(existing_modules)]
         extra_results  = all_results[len(existing_modules):]
 
-        # 合并：原有用例 + 新增用例，重新统一编号
-        counter = 1
+        # 合并：原有用例 + 新增用例，重新按模块前缀编号
+        def _mod_prefix(mod_name: str) -> str:
+            _ABBR = {
+                "登录": "LOGIN", "注册": "REG", "用户": "USER", "权限": "AUTH",
+                "支付": "PAY", "订单": "ORDER", "购物车": "CART", "商品": "PROD",
+                "搜索": "SRCH", "首页": "HOME", "名师": "TCHR", "课程": "COUR",
+                "评论": "CMT", "消息": "MSG", "通知": "NOTF", "上传": "UPLD",
+                "下载": "DWNL", "设置": "SET", "统计": "STAT", "报表": "RPT",
+                "性能测试": "PERF", "兼容性测试": "COMPAT",
+            }
+            for key, abbr in _ABBR.items():
+                if key in mod_name:
+                    return abbr
+            chars = [c for c in mod_name if c.strip()][:4]
+            prefix = "".join(chars).upper()
+            return prefix if prefix else "MOD"
+
         merged_modules = []
         for module, new_cases in opt_results:
             combined = list(module.get("cases", [])) + list(new_cases)
+            prefix = _mod_prefix(module["name"])
             renamed = []
-            for c in combined:
+            for idx, c in enumerate(combined, 1):
                 c = dict(c)
-                c["id"] = f"TC{counter:03d}"
-                counter += 1
+                c["id"] = f"{prefix}-{idx:03d}"
                 renamed.append(c)
             merged_modules.append({"name": module["name"], "cases": renamed})
 
         for extra_mod in extra_results:
             if extra_mod and extra_mod.get("cases"):
+                prefix = _mod_prefix(extra_mod["name"])
                 renamed = []
-                for c in extra_mod["cases"]:
+                for idx, c in enumerate(extra_mod["cases"], 1):
                     c = dict(c)
-                    c["id"] = f"TC{counter:03d}"
-                    counter += 1
+                    c["id"] = f"{prefix}-{idx:03d}"
                     renamed.append(c)
                 merged_modules.append({"name": extra_mod["name"], "cases": renamed})
 
@@ -1446,53 +1914,228 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
     async def _optimize_one_module(
         self, module_name: str, existing_cases: list
     ) -> list:
-        """分析单模块现有用例的覆盖盲区，返回仅新增用例列表。"""
+        """分析单模块现有用例的覆盖盲区，分两轮输出新增用例。
+        第一轮：多维度系统检查（8大维度）
+        第二轮：对第一轮结果做盲区确认，防止「自认为已覆盖」遗漏
+        """
+        # 展示全部已有用例（最多 40 条），让 LLM 充分了解已有覆盖
         case_summary = "\n".join(
-            f"  - {c.get('id','')}: {c.get('name','')} [{c.get('test_method') or c.get('type','')}]"
-            for c in existing_cases[:20]
+            f"  [{c.get('id','')}] {c.get('name','')} "
+            f"| {c.get('test_method') or c.get('type','')} "
+            f"| {c.get('priority','')}"
+            for c in existing_cases[:40]
         )
         system_prompt = (
             "You are a QA coverage expert. Given existing test cases for one module, "
             "identify coverage gaps and output ONLY NEW test cases to add. "
             "Never repeat or copy existing cases. Output ONLY valid JSON."
         )
-        prompt = f"""分析「{module_name}」模块现有用例的覆盖盲区，补充缺失场景（3-5条新用例）。
+
+        # ── 第一轮：8 大维度全面检查 ──────────────────────────────────────
+        prompt_round1 = f"""深度分析「{module_name}」模块现有用例的覆盖盲区，补充缺失场景（3-8条新用例）。
 
 已有用例（{len(existing_cases)}条）：
 {case_summary}
 
-逐项检查是否存在盲区：
-1. 等价类：是否覆盖全部有效/无效等价类？
-2. 边界值：最大值/最小值/空值/特殊字符是否测试？
-3. 异常分支：权限不足/重复操作/网络异常是否覆盖？
-4. 状态转换：合法/非法状态转换是否完整？
+请逐项检查以下8个维度，找出还没有被覆盖的场景：
+1. **等价类**：有效/无效输入的所有代表值是否都有？
+2. **边界值**：最大值、最小值、临界值±1、空值、超长字符串是否测试？
+3. **异常分支**：网络超时/断开、接口报错、数据库异常、文件上传失败是否覆盖？
+4. **权限控制**：未登录访问、越权访问、不同角色操作差异是否测试？
+5. **并发/重复**：重复提交、连续快速点击、多用户同时操作是否覆盖？
+6. **状态转换**：功能的合法/非法状态流转（如订单状态机、审批流）是否完整？
+7. **数据完整性**：脏数据、特殊字符（`<>'"&`）、SQL注入关键字输入是否验证？
+8. **UI/交互**：分页加载、排序、筛选、搜索关键词高亮是否覆盖？
 
-只输出纯JSON，只包含新增用例：
+只输出纯JSON，只包含新增用例（不重复已有用例）：
 {{
   "new_cases": [
     {{
       "id": "NEW001",
-      "name": "用例名称-覆盖盲区描述",
-      "priority": "P2",
+      "name": "用例名称（格式：功能点-测试维度-具体场景）",
+      "priority": "P1",
       "type": "功能测试",
-      "test_method": "边界值分析",
+      "test_method": "等价类划分",
       "preconditions": "前置条件",
-      "steps": ["1. 操作（含具体数据）"],
+      "steps": ["1. 具体操作（含测试数据）", "2. 操作"],
       "expected": "预期结果（可量化验证）"
     }}
   ]
 }}"""
 
+        round1_cases = []
         try:
-            raw = await self._run_claude_subprocess(system_prompt, prompt, timeout_secs=90)
-            data = json.loads(raw)
-            return data.get("new_cases", [])
+            raw1 = await self._run_claude_subprocess(system_prompt, prompt_round1, timeout_secs=90)
+            data1 = json.loads(raw1)
+            round1_cases = data1.get("new_cases", [])
+            logger.info(f"模块「{module_name}」第一轮优化: 新增 {len(round1_cases)} 条")
         except json.JSONDecodeError as e:
-            logger.error(f"模块「{module_name}」优化返回非法 JSON: {e}")
+            logger.error(f"模块「{module_name}」第一轮优化返回非法 JSON: {e}")
         except Exception as e:
-            logger.warning(f"模块「{module_name}」优化失败: {e}")
-        return []
+            logger.warning(f"模块「{module_name}」第一轮优化失败: {e}")
 
+        if not round1_cases:
+            return []
+
+        # ── 第二轮：盲区确认——让另一视角判断第一轮是否还有遗漏 ──────────
+        all_cases_summary = case_summary + "\n" + "\n".join(
+            f"  [NEW{i+1:03d}] {c.get('name','')} | {c.get('test_method','')}"
+            for i, c in enumerate(round1_cases)
+        )
+        prompt_round2 = f"""你是一位严格的QA审核员。针对「{module_name}」模块，第一轮已有如下测试用例：
+
+{all_cases_summary}
+
+请以批判性视角审视：**以上用例还缺少哪些场景？**
+重点关注容易被忽视的盲区：
+- 异常恢复：操作失败后重试、回滚是否有用例？
+- 跨模块联动：本模块操作影响其他模块数据是否有断言？
+- 极端数据：emoji、全角字符、超大文件（>100MB）、0/负数/小数输入？
+- 定时/异步：延迟执行、后台任务完成通知是否验证？
+
+如果已经覆盖充分，返回空列表。只在真正发现盲区时才补充（最多3条）。
+
+只输出纯JSON：
+{{
+  "new_cases": [
+    {{
+      "id": "NEW001",
+      "name": "用例名称",
+      "priority": "P2",
+      "type": "功能测试",
+      "test_method": "错误推测",
+      "preconditions": "前置条件",
+      "steps": ["1. 操作"],
+      "expected": "预期结果"
+    }}
+  ]
+}}"""
+
+        round2_cases = []
+        try:
+            raw2 = await self._run_claude_subprocess(system_prompt, prompt_round2, timeout_secs=60)
+            data2 = json.loads(raw2)
+            round2_cases = data2.get("new_cases", [])
+            if round2_cases:
+                logger.info(f"模块「{module_name}」第二轮盲区确认: 补充 {len(round2_cases)} 条")
+        except Exception as e:
+            logger.debug(f"模块「{module_name}」第二轮盲区确认跳过: {e}")
+
+        return round1_cases + round2_cases
+
+    # ------------------------------------------------------------------
+    # 全文分段索引：覆盖任意长度文档，供精准上下文定位使用
+    # ------------------------------------------------------------------
+    def _build_segment_index(self, doc_text: str, doc_hash: str = "") -> list:
+        """将文档切为覆盖全文的滑动窗口段落列表。
+
+        每段 _SEGMENT_SIZE 字，相邻段重叠 _SEGMENT_OVERLAP 字，避免功能描述
+        被切割到两段边界而两边都只看到半截。结果以 doc_hash 为 key 缓存。
+
+        返回：[{"seg_id": 0, "start": 0, "end": 22000, "text": "..."}, ...]
+        """
+        if doc_hash and doc_hash in self._segment_cache:
+            return self._segment_cache[doc_hash]
+
+        size    = self._SEGMENT_SIZE
+        overlap = self._SEGMENT_OVERLAP
+        step    = size - overlap
+        total   = len(doc_text)
+        segments = []
+        i = 0
+        while i < total:
+            end = min(i + size, total)
+            segments.append({
+                "seg_id": len(segments),
+                "start":  i,
+                "end":    end,
+                "text":   doc_text[i:end],
+            })
+            if end >= total:
+                break
+            i += step
+
+        logger.info(f"文档分段索引构建完成: {total} 字 → {len(segments)} 段 "
+                    f"（每段 {size} 字，重叠 {overlap} 字）")
+        if doc_hash:
+            self._segment_cache[doc_hash] = segments
+        return segments
+
+    def _locate_module_context(
+        self,
+        module_name: str,
+        features: list,
+        segments: list,
+        anchor_keywords: Optional[List[str]] = None,
+        window: int = 8000,
+    ) -> str:
+        """在分段索引中定位模块专属需求段落，返回 window 字的上下文字符串。
+
+        打分规则：
+        - 模块名命中次数 × 3（最高权重）
+        - anchor_keywords 命中次数 × 2
+        - features 关键词命中次数 × 1
+
+        命中后从首次命中位置向前后各延伸 window/2 字，保证关键内容居中。
+        若全段无命中，回退为文档第一段前 window 字（保底）。
+        """
+        if not segments:
+            return ""
+
+        # 组装关键词列表，过短的词（1字）排除以降低噪音
+        kw_weighted: List[tuple] = []
+        if module_name and len(module_name) >= 2:
+            kw_weighted.append((module_name, 3))
+        for kw in (anchor_keywords or []):
+            if len(kw) >= 2:
+                kw_weighted.append((kw, 2))
+        for feat in (features or [])[:6]:
+            if len(feat) >= 2:
+                kw_weighted.append((feat, 1))
+
+        if not kw_weighted:
+            return segments[0]["text"][:window]
+
+        # 对每段打分
+        scored = []
+        for seg in segments:
+            text = seg["text"]
+            score = sum(text.count(kw) * w for kw, w in kw_weighted)
+            if score > 0:
+                scored.append((score, seg))
+
+        if not scored:
+            logger.debug(f"模块「{module_name}」在文档中无关键词命中，使用文档开头")
+            return segments[0]["text"][:window]
+
+        # 得分最高的段；若相邻段也有命中，合并以扩大上下文
+        scored.sort(key=lambda x: x[0], reverse=True)
+        best = scored[0][1]
+        best_text = best["text"]
+
+        # 尝试与得分第2高的相邻段合并（提供更多上下文）
+        if len(scored) > 1:
+            second = scored[1][1]
+            if abs(second["seg_id"] - best["seg_id"]) == 1:
+                if second["seg_id"] < best["seg_id"]:
+                    best_text = second["text"] + best_text
+                else:
+                    best_text = best_text + second["text"]
+
+        # 在合并文本中找第一个关键词的位置，以此为中心截取 window 字
+        first_hit = len(best_text)
+        for kw, _ in kw_weighted:
+            pos = best_text.find(kw)
+            if pos != -1:
+                first_hit = min(first_hit, pos)
+
+        half  = window // 2
+        start = max(0, first_hit - half)
+        end   = min(len(best_text), start + window)
+        result = best_text[start:end]
+        logger.debug(f"模块「{module_name}」精准定位: 段{best['seg_id']} "
+                     f"score={scored[0][0]} context={len(result)}字")
+        return result
 
     # ------------------------------------------------------------------
     # 保存 Markdown
@@ -1552,7 +2195,10 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
                     "",
                 ]
                 for i, step in enumerate(steps, 1):
-                    lines.append(f"{i}. {step}")
+                    # 去掉 AI 返回步骤文本中已有的 "1. " "2. " 前缀，避免双重编号
+                    import re as _re_step
+                    step_text = _re_step.sub(r'^\d+\.\s*', '', str(step))
+                    lines.append(f"{i}. {step_text}")
                 lines += ["", f"**预期结果：** {expected}", "", "---", ""]
 
         md_path = self.output_dir / f"cases_{ts}.md"

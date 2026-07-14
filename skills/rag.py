@@ -14,8 +14,8 @@ from loguru import logger
 
 
 # ── 常量 ──────────────────────────────────────────────────────────────────────
-CHUNK_SIZE    = 500   # 每段目标字符数
-CHUNK_OVERLAP = 100   # 相邻段重叠字符数
+CHUNK_SIZE    = 900   # 每段目标字符数（原 500，增大后减少跨段信息丢失）
+CHUNK_OVERLAP = 200   # 相邻段重叠字符数（原 100，增大后保留更多上下文连接）
 EMBED_DIM     = 1536  # OpenAI text-embedding-3-small / DeepSeek 维度
 TOP_K         = 5     # 默认检索返回段数
 
@@ -145,8 +145,10 @@ async def index_document(
 ) -> int:
     """将文档分段并存入 document_chunks 表。返回写入的段数。
     同一 source_id + source_type 的旧记录先删除（重建索引）。
+    注意：调用方（ai_case_generator）已用 BeautifulSoup 深度清洗过文本，
+    不再重复调用 clean_text()，避免正则误删正文内容。
     """
-    chunks = split_text(clean_text(text))
+    chunks = split_text(text)   # 直接分段，不再二次 clean_text
     if not chunks:
         return 0
 

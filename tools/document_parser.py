@@ -10,6 +10,14 @@ from typing import Dict, List, Any, Optional
 from loguru import logger
 
 # ── 可选依赖，缺失时优雅降级 ──────────────────────────────────────────
+# pymupdf (fitz) 优先，中文 PDF 兼容性更好；不可用时降级到 PyPDF2
+try:
+    import fitz as _fitz  # pymupdf
+    _HAS_FITZ = True
+except ImportError:
+    _fitz = None
+    _HAS_FITZ = False
+
 try:
     from PyPDF2 import PdfReader
 except ImportError:
@@ -108,15 +116,31 @@ class DocumentParser:
 
     # ── PDF ──────────────────────────────────────────────────────────
     async def _parse_pdf(self, file_path: str) -> Dict[str, Any]:
-        if PdfReader is None:
-            raise ImportError("请安装 PyPDF2：pip install pypdf2")
-        reader = PdfReader(file_path)
+        """
+        PDF 文本提取：优先使用 pymupdf(fitz)，中文兼容性更好；
+        不可用时降级到 PyPDF2。
+        """
         pages_text = []
-        for i, page in enumerate(reader.pages):
-            t = page.extract_text() or ""
-            pages_text.append({"page": i + 1, "text": t})
+
+        if _HAS_FITZ:
+            # pymupdf — 正确处理中文 PDF（Unicode 直接提取）
+            doc = _fitz.open(file_path)
+            for i, page in enumerate(doc):
+                t = page.get_text() or ""
+                pages_text.append({"page": i + 1, "text": t})
+            doc.close()
+            logger.info(f"PDF 解析完成 (pymupdf): {len(pages_text)} 页")
+        elif PdfReader is not None:
+            # PyPDF2 降级（部分中文 PDF 可能乱码）
+            reader = PdfReader(file_path)
+            for i, page in enumerate(reader.pages):
+                t = page.extract_text() or ""
+                pages_text.append({"page": i + 1, "text": t})
+            logger.info(f"PDF 解析完成 (PyPDF2): {len(pages_text)} 页")
+        else:
+            raise ImportError("请安装 PDF 解析库：pip install pymupdf")
+
         content = "\n".join(p["text"] for p in pages_text)
-        logger.info(f"PDF 解析完成: {len(pages_text)} 页")
         return {
             "content": content,
             "page_count": len(pages_text),
@@ -242,18 +266,22 @@ class DocumentParser:
         enc = _detect_encoding(raw)
         html_text = raw.decode(enc, errors="replace")
 
-        # 先提取可见文字
-        if _HAS_HTML_PARSER:
-            extractor = _TextExtractor()
-            extractor.feed(html_text)
-            content = extractor.get_text()
-        else:
-            content = re.sub(r"<[^>]+>", " ", html_text)
-        content = re.sub(r"\s{3,}", "\n\n", content).strip()
+        # 优先用 BeautifulSoup 精准提取主内容区域
+        content = self._extract_html_main_content(html_text)
 
-        # 如果可见文字太少（SPA/数据导出类 HTML），尝试从 script 标签里提取 JSON 数据
+        # 如果主内容提取结果太少（SPA/数据导出类 HTML），尝试从 script 标签里提取 JSON 数据
         if len(content) < 200:
             content = self._extract_script_data(html_text) or content
+
+        # BeautifulSoup 不可用时，退回轻量提取器
+        if not content:
+            if _HAS_HTML_PARSER:
+                extractor = _TextExtractor()
+                extractor.feed(html_text)
+                content = extractor.get_text()
+            else:
+                content = re.sub(r"<[^>]+>", " ", html_text)
+            content = re.sub(r"\s{3,}", "\n\n", content).strip()
 
         lines = [l for l in content.splitlines() if l.strip()]
         logger.info(f"HTML 解析完成: {len(lines)} 行")
@@ -264,6 +292,83 @@ class DocumentParser:
             "structured": self._structure_content(content),
             "metadata": {"format": "html", "encoding": enc},
         }
+
+    def _extract_html_main_content(self, html_text: str) -> str:
+        """用 BeautifulSoup 清洗 HTML，提取主需求内容区域。
+        策略（保守优先，避免误删正文）：
+        1. 只删语义明确的噪音标签（script/style/nav/footer 等 HTML5 结构标签）
+        2. 优先从语义主内容容器提取，找到就只取那一块
+        3. 找不到则全文 get_text，再做行级过滤去掉明显 UI 碎片
+        """
+        try:
+            from bs4 import BeautifulSoup, Comment
+
+            soup = BeautifulSoup(html_text, "html.parser")
+
+            # Step1: 只删语义明确的噪音标签（不做 class 关键词匹配，避免误伤正文）
+            _NOISE_TAGS = [
+                "script", "style", "head", "meta", "link", "noscript",
+                "nav", "footer", "aside", "iframe", "svg", "canvas",
+            ]
+            for tag in soup(_NOISE_TAGS):
+                tag.decompose()
+            # 删 HTML 注释
+            for comment in soup.find_all(string=lambda s: isinstance(s, Comment)):
+                comment.extract()
+
+            # Step2: 优先从语义主内容区提取（找到就只取那一块，大幅减少噪音）
+            _MAIN_SELECTORS = [
+                "main", "article",
+                "[role='main']",
+                "#content", "#main", "#main-content", "#page-content",
+                "#app-content", "#editor-content",
+                ".main-content", ".page-content", ".article-content",
+                ".wiki-content", ".doc-content", ".markdown-body",
+                ".ql-editor", ".ProseMirror",           # 富文本编辑器
+                ".requirement-content", ".spec-content",
+            ]
+            raw_text = ""
+            for sel in _MAIN_SELECTORS:
+                try:
+                    node = soup.select_one(sel)
+                    if node:
+                        candidate = node.get_text(separator="\n", strip=True)
+                        if len(candidate) >= 200:
+                            raw_text = candidate
+                            logger.info(f"HTML 主内容区命中: {sel}，{len(raw_text)} 字")
+                            break
+                except Exception:
+                    continue
+
+            # 未命中主内容区，退回全文 get_text
+            if not raw_text:
+                raw_text = soup.get_text(separator="\n", strip=True)
+                logger.info(f"HTML 未命中主内容区，使用全文 get_text，{len(raw_text)} 字")
+
+            # Step3: 行级过滤——只去掉极短碎片和纯符号行，保留所有正文
+            lines_kept = []
+            for line in raw_text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                # 过滤：纯空白 / 纯数字符号行（如页码、分隔线）
+                if re.fullmatch(r'[\d\s\-–—|/\\·•○●□■◆▷▶→←★☆※…。，,\.]+', line):
+                    continue
+                # 过滤：极短行（3字以内），通常是图标/数字/单字按钮
+                if len(line) <= 3:
+                    continue
+                lines_kept.append(line)
+
+            result = re.sub(r'\n{3,}', '\n\n', "\n".join(lines_kept)).strip()
+            logger.info(f"HTML 主内容提取: {len(html_text)} → {len(result)} 字")
+            return result
+
+        except ImportError:
+            logger.debug("BeautifulSoup 不可用，跳过主内容提取")
+            return ""
+        except Exception as e:
+            logger.warning(f"HTML 主内容提取失败: {e}")
+            return ""
 
     def _extract_script_data(self, html_text: str) -> str:
         """从 script 标签中提取 JS 变量赋值的 JSON 数据，转为可读文本。"""

@@ -14,9 +14,22 @@
             <el-button type="primary" @click="showCreateDialog = true">
               <el-icon><Plus /></el-icon>新建用例
             </el-button>
-            <el-button type="success" @click="generateCases" :loading="generating">
-              <el-icon><MagicStick /></el-icon>AI生成用例
-            </el-button>
+            <el-button-group>
+              <el-button type="success" @click="generateCases" :loading="generating" :disabled="!filterTaskId">
+                <el-icon><MagicStick /></el-icon>AI生成用例
+              </el-button>
+              <el-tooltip :content="reparseBeforeGen ? '已开启：生成前重新抓取页面元素（点击关闭）' : '点击开启：生成前重新抓取页面最新元素'" placement="bottom">
+                <el-button
+                  :type="reparseBeforeGen ? 'success' : 'default'"
+                  style="padding: 0 8px;"
+                  :disabled="!filterTaskId"
+                  @click.stop="reparseBeforeGen = !reparseBeforeGen"
+                >
+                  <el-icon><RefreshRight /></el-icon>
+                  <span style="font-size:11px;margin-left:2px">{{ reparseBeforeGen ? 'ON' : 'OFF' }}</span>
+                </el-button>
+              </el-tooltip>
+            </el-button-group>
             <el-button type="warning" @click="openDocDiffDialog" :disabled="!filterTaskId">
               <el-icon><Refresh /></el-icon>文档变更更新
             </el-button>
@@ -396,6 +409,9 @@ const progressStage = ref('')
 const showCoverageDrawer = ref(false)
 const coverageData = ref(null)
 
+// ── 生成用例选项 ──
+const reparseBeforeGen = ref(false)
+
 // ── WebSocket ──
 let ws = null
 
@@ -463,11 +479,11 @@ const generateCases = async () => {
   connectWs('cases_gen')
   progressTitle.value = 'AI 生成用例'
   progressPct.value = 0
-  progressStage.value = '正在启动...'
+  progressStage.value = reparseBeforeGen.value ? '正在重新抓取页面元素...' : '正在启动...'
   showProgress.value = true
   generating.value = true
   try {
-    await taskStore.generateCases(filterTaskId.value)
+    await taskStore.generateCases(filterTaskId.value, { reparse_page: reparseBeforeGen.value })
     await taskStore.fetchCases(filterTaskId.value)
     ElMessage.success('用例生成成功')
     taskStore.fetchTotalCaseCount()

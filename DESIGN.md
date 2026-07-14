@@ -226,9 +226,95 @@ SQLAlchemy ORM，启动时自动建表。新字段通过 `ALTER TABLE ... ADD CO
 
 ---
 
-## 十四、一句话总结
+## 十四、RAG 知识库：文档全文检索替代硬截断
 
-> 平台的设计主线是**把 AI 能力嵌入测试生命周期的每个环节**：用插件化架构保证可扩展，用 WebSocket 保证实时体验，用需求变更增量更新避免旧用例丢失，用废弃/禁用字段分离保证执行精度，用可配置网络层适配真实测试环境，用共享变量池打通接口链路，用统一 HTTP API 适配任意大模型，用 Prompt YAML 配置化支持无代码调优，用 JWT 鉴权支持多账号团队使用，用接口代码驱动消除文档依赖，用代码可行性分析在代码阶段提前暴露需求偏差——整体目标是让测试工程师从重复劳动中解放出来，专注于测试策略和质量判断。
+AI 用例生成时面临一个矛盾：文档越长，信息越丰富，但单次 prompt 塞不下；简单截取前 N 字会遗漏后半部分的功能点。RAG 用分段检索解决这个问题：
+
+```
+文档入库（index_document）
+  ↓ split_text：500字/段，100字重叠，段落优先
+  ↓ get_embeddings：调 /v1/embeddings 获取向量（失败则 None）
+  ↓ DocumentChunk 表写入（pgvector 存向量 / SQLite 存 None）
+
+逐模块生成时（_call_llm_for_module）
+  ↓ search_chunks(query=模块名+功能点, top_k=5)
+  ↓ pgvector + 有向量 → 余弦相似度排序
+  ↓ 无向量或 SQLite → 关键词 TF 匹配降级
+  ↓ 检索到的相关段落替代 content[:2000] 硬截断
+```
+
+**降级策略**：DeepSeek / Anthropic 不支持 `/v1/embeddings`，检测到后自动退到关键词匹配，不报错、不中断生成流程。真正有向量检索能力需接入 OpenAI / 智谱 / 阿里等支持 embedding 的模型。
+
+**超大文档保护**：BeautifulSoup 深度清洗 HTML 噪音后，若文档仍超过 10 万字则截取前 10 万字，避免后续每批 API 调用超时或触发限流。
+
+---
+
+## 十五、超大文档的三层稳定性保障
+
+文档驱动用例生成面对超大文档（50 万字以上）时，容易出现 LLM 超时、批次无限累积、输出截断三类问题，平台针对性地设计了三个机制：
+
+**批次上限防卡死**：模块提取阶段按 10000 字/批分段处理，最多处理 20 批（约 20 万字），发现足够数量的模块或连续 3 批失败时提前退出，不做无效等待。
+
+**截断 JSON 自动修复**：LLM 因 `max_tokens` 被截断时，输出的 JSON 末尾不完整。修复器逐字符扫描，找到最后一个完整闭合的顶层元素，截断到该位置并补齐缺失的 `}` / `]`，保留已生成的内容而不是整批丢弃。
+
+**HTML 噪音深度清洗**：从 HTML 文件导出的需求文档会携带大量 CSS 选择器、JS 代码、样式声明。BeautifulSoup 先移除 `<script>` / `<style>` / `<noscript>` 等标签，再提取纯文本，可将 778543 字的 HTML 压缩到真实需求文本量级，避免噪音稀释 LLM 理解能力。
+
+---
+
+## 十六、WebUI 用例生成的三级兜底策略
+
+页面元素爬取质量直接影响 WebUI 用例生成效果。针对不同场景设计了三级降级机制：
+
+**第一级：正常元素分析**（页面元素 > 3 个）
+分析交互元素，提取功能模块，并发调用 AI 逐模块生成含 selector 的可执行用例。
+
+**第二级：文档驱动兜底**（页面元素 ≤ 3 个，或第一级 LLM 返回 0 条）
+当页面爬取结果不足时，自动切换为纯文档驱动模式，基于上传的需求文档生成功能测试用例，不依赖页面结构。
+
+**第三级：页面正文兜底**（无上传文档）
+parse_page 时同步提取页面 body 正文（最多 5 万字），移除 script/style 噪音后作为 document_data 注入，即便没有上传文档也能有上下文可用。
+
+配合**分屏自动滚动**（最多 40 屏，连续 2 步高度不变则停止），确保懒加载列表类页面的元素尽量被完整抓取，降低触发兜底策略的概率。
+
+---
+
+## 十七、中文 PDF 兼容：pymupdf 优先策略
+
+PyPDF2 对部分中文 PDF 存在编码问题，提取出的文本为乱码，LLM 无法理解，导致返回空响应进而引发 JSON 解析失败。
+
+改造方案：优先使用 **pymupdf（fitz）** 提取 PDF 文本，其直接读取字体 Unicode 映射，中文字符正确还原；pymupdf 不可用时降级到 PyPDF2。
+
+```python
+if _HAS_FITZ:
+    # pymupdf — 正确处理中文 PDF（Unicode 直接提取）
+    doc = _fitz.open(file_path)
+    for page in doc:
+        t = page.get_text() or ""
+elif PdfReader is not None:
+    # PyPDF2 降级（部分中文 PDF 可能乱码）
+    ...
+```
+
+---
+
+## 十八、Anthropic 代理兼容：防御性响应解析
+
+直接对接 Anthropic 官方 API 时，响应格式固定；但通过第三方代理（如企业内网代理、中转网关）时，`content` 字段可能出现多种变体：
+
+| 代理类型 | content 格式 | 原代码问题 |
+| --- | --- | --- |
+| 标准 Anthropic | `[{"type":"text","text":"..."}]` | 正常 |
+| 部分代理 | text block 有 `type` 无 `text` 字段 | `KeyError: 'text'` |
+| 部分代理 | `content` 直接是字符串 | `TypeError` |
+| Claude 扩展思考 | content 含 `type=thinking` block | 取第一个 text block 之前卡死 |
+
+改造后采用防御性解析：过滤 thinking block 只取 `type=text` 的 block，`block.get("text", "")` 取不到时依次尝试 `content`/`value`/`message` 备选字段，最终仍为空才抛出含完整响应的可读错误。
+
+---
+
+## 十九、一句话总结
+
+> 平台的设计主线是**把 AI 能力嵌入测试生命周期的每个环节**：用插件化架构保证可扩展，用 WebSocket 保证实时体验，用需求变更增量更新避免旧用例丢失，用废弃/禁用字段分离保证执行精度，用可配置网络层适配真实测试环境，用共享变量池打通接口链路，用统一 HTTP API 适配任意大模型，用 Prompt YAML 配置化支持无代码调优，用 JWT 鉴权支持多账号团队使用，用接口代码驱动消除文档依赖，用代码可行性分析在代码阶段提前暴露需求偏差，用 RAG 分段检索替代硬截断让超长文档也能被充分理解，用三层兜底策略保证 WebUI 用例在各种页面条件下都能生成，用 pymupdf 优先策略修复中文 PDF 乱码，用截断 JSON 修复机制保留 LLM 已生成的内容，用防御性 API 解析兼容各类第三方代理——整体目标是让测试工程师从重复劳动中解放出来，专注于测试策略和质量判断。
 
 ---
 
@@ -238,7 +324,7 @@ SQLAlchemy ORM，启动时自动建表。新字段通过 `ALTER TABLE ... ADD CO
 | --- | --- | --- |
 | 异步 HTTP 服务 | FastAPI + Uvicorn | 原生 async/await，自动生成 API 文档 |
 | 数据库 | SQLite / PostgreSQL | 零配置适合开发，PG 适合生产；ORM 层无缝切换 |
-| 浏览器自动化 | Playwright | 多浏览器，async API，networkidle 适合 SPA |
+| 浏览器自动化 | Playwright | 多浏览器，async API，networkidle + 分屏滚动适合 SPA 和懒加载页面 |
 | 接口执行 | httpx | 原生异步，支持自定义 Transport（Hosts 映射依赖） |
 | 实时通信 | WebSocket | 服务端主动推送，拒绝轮询 |
 | 前端框架 | Vue 3 + Element Plus | 组件成熟，适合工具类产品 |
@@ -246,3 +332,5 @@ SQLAlchemy ORM，启动时自动建表。新字段通过 `ALTER TABLE ... ADD CO
 | 鉴权 | JWT + bcrypt | python-jose 签发，中间件统一验证，密码安全存储 |
 | Prompt 管理 | YAML + prompt_loader | 与代码解耦，修改无需重启 |
 | 状态管理 | Pinia | 比 Vuex 更轻，支持 Token 持久化 |
+| PDF 解析 | pymupdf 优先 / PyPDF2 降级 | pymupdf 正确处理中文字体映射，PyPDF2 作为兜底 |
+| HTML 清洗 | BeautifulSoup4 | 精准移除 CSS/JS 噪音，提取主内容区域 |

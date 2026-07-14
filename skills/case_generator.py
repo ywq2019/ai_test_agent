@@ -44,11 +44,19 @@ class CaseGenerator:
                 await _p(100, f"生成完成，共 {len(cases)} 条用例")
                 logger.info(f"Staged LLM generated {len(cases)} test cases")
                 return cases
+            # LLM 返回了0条：尝试文档驱动兜底
+            logger.warning("LLM 生成 0 条，尝试文档驱动兜底生成")
+            await _p(70, "正在使用需求文档补充生成...")
+            doc_cases = await self._generate_doc_driven(url, document_data, _p)
+            if doc_cases:
+                await _p(100, f"生成完成，共 {len(doc_cases)} 条用例")
+                logger.info(f"Doc-driven fallback generated {len(doc_cases)} test cases")
+                return doc_cases
         except Exception as e:
             logger.warning(f"Staged LLM generation failed, falling back to template: {e}")
             await _p(80, "LLM 失败，使用模板生成兜底...")
 
-        # 兜底：模板生成
+        # 最终兜底：模板生成（页面元素足够时才有意义）
         cases = []
         cases.extend(self._generate_normal_cases(page_elements))
         cases.extend(self._generate_validation_cases(page_elements))
@@ -59,8 +67,12 @@ class CaseGenerator:
             ))
         cases = self._deduplicate_cases(cases)
         cases = self._assign_priorities(cases)
-        await _p(100, f"模板生成完成，共 {len(cases)} 条用例")
-        logger.info(f"Template generated {len(cases)} test cases")
+        if cases:
+            await _p(100, f"模板生成完成，共 {len(cases)} 条用例")
+            logger.info(f"Template generated {len(cases)} test cases")
+        else:
+            await _p(100, "未能生成用例，请确认任务已上传需求文档并成功解析页面元素")
+            logger.warning("All generation methods returned 0 cases")
         return cases
 
     # ------------------------------------------------------------------
@@ -76,12 +88,19 @@ class CaseGenerator:
         elements_summary = self._build_elements_summary(page_elements)
         doc_context = self._build_doc_context(document_data)
 
+        # 页面元素太少（≤3个）时，跳过元素分析，直接以文档为主生成
+        FEW_ELEMENTS = len(page_elements) <= 3
+        if FEW_ELEMENTS:
+            logger.info(f"页面元素太少({len(page_elements)}个)，以需求文档为主生成用例")
+            await _p(15, f"页面元素较少，以需求文档为主生成用例...")
+            return await self._generate_doc_driven(url, document_data, _p)
+
         await _p(8, "正在分析页面结构...")
         modules = await self._extract_page_modules(elements_summary, doc_context)
 
         if not modules:
             logger.warning("Module extraction returned empty, falling back to single-call LLM")
-            await _p(20, "模块提取失败，使用单次生成...")
+            await _p(20, "正在调用 AI 整体生成用例...")
             return await self._generate_single_call(url, elements_summary, doc_context)
 
         logger.info(f"Extracted {len(modules)} modules: {[m['name'] for m in modules]}")
@@ -200,8 +219,15 @@ class CaseGenerator:
     }}
   ]
 }}"""
-        raw = await self._run_claude_subprocess(system_prompt, prompt, timeout_secs=90)
-        data = json.loads(raw)
+        try:
+            raw = await self._run_claude_subprocess(system_prompt, prompt, timeout_secs=90)
+            if not raw.strip().startswith("{") and not raw.strip().startswith("["):
+                logger.warning(f"模块「{module_name}」LLM 返回非 JSON 内容: {raw[:200]}")
+                return []
+            data = json.loads(raw)
+        except Exception as e:
+            logger.warning(f"模块「{module_name}」LLM 调用失败: {e}")
+            return []
         cases = data.get("cases", [])
         if not isinstance(cases, list):
             return []
@@ -214,7 +240,11 @@ class CaseGenerator:
             case.setdefault("element_selector", "")
             steps = case.get("steps", "")
             if isinstance(steps, list):
-                case["steps"] = "\n".join(f"{j + 1}. {s}" for j, s in enumerate(steps))
+                # 同时去掉步骤文本中 AI 自带的数字前缀
+                import re as _re_step
+                case["steps"] = "\n".join(
+                    _re_step.sub(r'^\s*\d+\.\s*', '', str(s)) for s in steps
+                )
             elif not isinstance(steps, str):
                 case["steps"] = str(steps)
         return cases
@@ -222,6 +252,89 @@ class CaseGenerator:
     # ------------------------------------------------------------------
     # 单次兜底
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # 文档驱动生成（页面元素极少时，纯靠需求文档生成功能用例）
+    # ------------------------------------------------------------------
+    async def _generate_doc_driven(
+        self, url: str, document_data: Optional[Dict[str, Any]], _p: Callable
+    ) -> List[Dict[str, Any]]:
+        """当页面元素太少无法分析时，以需求文档为主生成功能测试用例。"""
+        doc_text = ""
+        if document_data:
+            doc_text = document_data.get("content", "")
+            # 也尝试从结构化数据拼出可用文本
+            if not doc_text:
+                structured = document_data.get("structured", {})
+                pts = structured.get("functional_points", [])
+                if pts:
+                    doc_text = "\n".join(pts)
+
+        if not doc_text or len(doc_text.strip()) < 30:
+            logger.warning("文档内容为空，无法生成用例")
+            await _p(100, "文档内容不足，无法生成用例，请上传需求文档后重试")
+            return []
+
+        system_prompt = (
+            "You are a senior QA engineer. Your ONLY task is to generate test cases as a JSON object. "
+            "You MUST output a single valid JSON object. Do NOT refuse, do NOT ask questions, "
+            "do NOT output any text outside the JSON. Generate test cases directly from the provided document."
+        )
+        prompt = f"""根据以下需求文档生成功能测试用例（15-25条）。
+
+【重要】直接输出JSON，不要拒绝，不要提问，不要解释。
+
+需求文档内容：
+---
+{doc_text[:12000]}
+---
+
+必须直接输出以下格式的JSON（不要输出任何其他内容）：
+{{
+  "cases": [
+    {{
+      "name": "模块-场景描述",
+      "module": "所属功能模块",
+      "priority": "P0",
+      "preconditions": "前置条件",
+      "steps": "1. 操作步骤\\n2. 操作步骤",
+      "expected_results": "可断言的预期结果",
+      "element_selector": ""
+    }}
+  ]
+}}"""
+
+        await _p(30, "正在调用 AI 生成功能用例...")
+        try:
+            raw = await self._run_claude_subprocess(system_prompt, prompt, timeout_secs=120)
+            # 如果 LLM 返回的不是 JSON（比如拒绝回答的纯文本），记录详细日志
+            if not raw.strip().startswith("{") and not raw.strip().startswith("["):
+                logger.warning(f"文档驱动生成：LLM 返回非 JSON 内容（前200字）: {raw[:200]}")
+                return []
+            data = json.loads(raw)
+            cases = data.get("cases", [])
+            if not isinstance(cases, list):
+                return []
+            for case in cases:
+                case.setdefault("name", "未命名用例")
+                case.setdefault("module", "通用")
+                case.setdefault("priority", "P1")
+                case.setdefault("preconditions", "")
+                case.setdefault("expected_results", "")
+                case.setdefault("element_selector", "")
+                steps = case.get("steps", "")
+                if isinstance(steps, list):
+                    import re as _re_s
+                    case["steps"] = "\n".join(_re_s.sub(r'^\s*\d+\.\s*', '', str(s)) for s in steps)
+                elif not isinstance(steps, str):
+                    case["steps"] = str(steps)
+            logger.info(f"文档驱动生成完成: {len(cases)} 条用例")
+            await _p(95, f"生成完成，共 {len(cases)} 条用例")
+            return cases
+        except Exception as e:
+            logger.warning(f"文档驱动生成失败: {e}")
+            await _p(95, "AI 生成失败，请稍后重试")
+            return []
+
     async def _generate_single_call(
         self, url: str, elements_summary: str, doc_context: str
     ) -> List[Dict]:
@@ -477,8 +590,15 @@ class CaseGenerator:
     def _build_elements_summary(self, elements: List[Dict[str, Any]]) -> str:
         if not elements:
             return "（无页面元素数据）"
+        # 按类型分组：交互元素（input/button/a/select 等）优先，文字节点补充语义
+        interactive_tags = {"input", "button", "a", "select", "textarea"}
+        interactive = [e for e in elements if e.get("tag", "") in interactive_tags]
+        text_nodes   = [e for e in elements if e.get("tag", "") not in interactive_tags and e.get("text", "")]
+        # 最多取120个交互元素 + 100个文字节点，总量220；
+        # 列表型页面（名师专区/课程列表）以文字节点为主，确保每位教师的姓名/职称不丢失
+        selected = interactive[:120] + text_nodes[:100]
         lines = []
-        for elem in elements[:80]:
+        for elem in selected:
             tag = elem.get("tag", "")
             typ = elem.get("type", "")
             name = elem.get("name", "") or elem.get("placeholder", "") or elem.get("text", "")
@@ -488,7 +608,7 @@ class CaseGenerator:
                 parts.append(f" type={typ}")
             if name:
                 parts.append(f" name/text={name!r}")
-            if selector:
+            if selector and selector not in ("div", "span", "p", "li", "h1", "h2", "h3", "h4", "h5", "h6"):
                 parts.append(f" selector={selector!r}")
             parts.append(">")
             lines.append("".join(parts))
@@ -499,14 +619,18 @@ class CaseGenerator:
             return ""
         structured = document_data.get("structured", {})
         text = document_data.get("content", "")
+        meta_fmt = (document_data.get("metadata") or {}).get("format", "")
         sections = []
         if structured.get("title"):
             sections.append(f"文档标题：{structured['title']}")
         if structured.get("functional_points"):
-            points = "\n".join(f"  - {p}" for p in structured["functional_points"][:20])
+            points = "\n".join(f"  - {p}" for p in structured["functional_points"][:30])
             sections.append(f"功能点：\n{points}")
         if not sections and text:
-            sections.append(f"需求摘要：\n{text[:2000]}")
+            # 页面正文（page_text）比需求文档更丰富，多注入内容；
+            # 列表型页面（名师专区/课程列表等）每条数据~200字，6000字≈30条记录
+            text_limit = 6000 if meta_fmt == "page_text" else 3000
+            sections.append(f"页面内容摘要：\n{text[:text_limit]}")
         if sections:
             return "需求文档信息：\n" + "\n".join(sections)
         return ""
@@ -528,7 +652,7 @@ class CaseGenerator:
         if not api_key or not base_url:
             raise RuntimeError("未配置 AI_API_KEY 或 AI_API_URL，请在大模型配置页填写后重试")
 
-        is_anthropic = "anthropic.com" in base_url or model.startswith("claude")
+        is_anthropic = "anthropic.com" in base_url
 
         if is_anthropic:
             url     = f"{base_url}/v1/messages"
@@ -559,13 +683,58 @@ class CaseGenerator:
             }
 
         logger.info(f"Calling LLM API: {url}, model={model}")
-        async with httpx.AsyncClient(verify=False, timeout=timeout_secs) as client:
-            resp = await client.post(url, json=payload, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
+        _RETRYABLE = {502, 503, 504}
+        _MAX_RETRY  = 3
+        last_exc: Exception = RuntimeError("未知错误")
+        for _attempt in range(1, _MAX_RETRY + 1):
+            try:
+                async with httpx.AsyncClient(verify=False, timeout=timeout_secs) as client:
+                    resp = await client.post(url, json=payload, headers=headers)
+                    if resp.status_code in _RETRYABLE:
+                        raise httpx.HTTPStatusError(
+                            f"Server error '{resp.status_code}' (retryable)",
+                            request=resp.request, response=resp,
+                        )
+                    resp.raise_for_status()
+                    data = resp.json()
+                break
+            except (httpx.TimeoutException, httpx.HTTPStatusError) as e:
+                last_exc = e
+                is_retryable = isinstance(e, httpx.TimeoutException) or (
+                    isinstance(e, httpx.HTTPStatusError)
+                    and e.response.status_code in _RETRYABLE
+                )
+                if is_retryable and _attempt < _MAX_RETRY:
+                    wait = _attempt * 5
+                    logger.warning(f"LLM 请求失败（第{_attempt}次）: {e}，{wait}s 后重试...")
+                    await asyncio.sleep(wait)
+                    continue
+                raise
+        else:
+            raise last_exc
 
         if is_anthropic:
-            raw = data["content"][0]["text"]
+            # 兼容多种代理响应格式（部分代理 text block 缺少 "text" 字段）
+            content_field = data.get("content")
+            if not content_field:
+                raise ValueError(f"Anthropic API 返回无内容，响应: {json.dumps(data, ensure_ascii=False)[:200]}")
+
+            if isinstance(content_field, str):
+                # 部分代理直接把 content 作为字符串返回
+                raw = content_field
+            elif isinstance(content_field, list):
+                text_blocks = [b for b in content_field if isinstance(b, dict) and b.get("type") == "text"]
+                if not text_blocks:
+                    raise ValueError(f"Anthropic API 未返回 text block，content={content_field}")
+                block = text_blocks[0]
+                raw = block.get("text", "")
+                if not raw:
+                    raw = (block.get("content", "") or block.get("value", "")
+                           or block.get("message", ""))
+                    if not raw:
+                        raise ValueError(f"Anthropic text block 无文本内容（'text' 字段缺失）: {block}")
+            else:
+                raise ValueError(f"Anthropic content 格式异常: {type(content_field)}")
         else:
             raw = data["choices"][0]["message"]["content"]
 

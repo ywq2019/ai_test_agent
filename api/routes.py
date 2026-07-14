@@ -487,10 +487,15 @@ def _resolve_doc_path(document_path: str) -> Optional[Path]:
 @router.post("/cases/generate/{task_id}", response_model=List[CaseResponse])
 async def generate_cases(
     task_id: int,
+    request: dict = None,
     db: AsyncSession = Depends(get_db)
 ):
+    if request is None:
+        request = {}
+    reparse_page: bool = request.get("reparse_page", False)
+
     try:
-        logger.info(f"Generating cases for task: {task_id}")
+        logger.info(f"Generating cases for task: {task_id}, reparse_page={reparse_page}")
 
         from sqlalchemy import select
         result = await db.execute(select(TestTask).where(TestTask.id == task_id))
@@ -499,12 +504,36 @@ async def generate_cases(
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
 
+        # ── 重新抓取页面元素（可选）────────────────────────────────────────
+        if reparse_page and task.url:
+            try:
+                await ws_manager.broadcast(
+                    {"type": "cases_gen_progress", "percent": 5, "stage": "正在重新抓取页面元素..."},
+                    client_id="cases_gen",
+                )
+                elements = await uitest_agent.parse_page(task.url, task.browser or "chromium")
+                if elements:
+                    task.page_elements = elements
+                    await db.commit()
+                    logger.info(f"重新抓取页面元素成功: task_id={task_id}，共 {len(elements)} 个")
+                else:
+                    logger.warning(f"重新抓取页面元素返回空，保留旧元素")
+            except Exception as e:
+                logger.warning(f"页面重新抓取失败，使用旧元素: {e}")
+                await ws_manager.broadcast(
+                    {"type": "cases_gen_progress", "percent": 5, "stage": f"页面抓取失败，使用已有元素继续生成..."},
+                    client_id="cases_gen",
+                )
+
         if not task.page_elements:
             raise HTTPException(status_code=400, detail="No page elements found for this task")
 
         uitest_agent._get_state(task_id).page_elements = task.page_elements
         uitest_agent._get_state(task_id).current_url = task.url or ""
-        uitest_agent._get_state(task_id).document_data = None
+        # document_data 先清空；reparse_page 时 parse_page 会写入页面正文作为兜底
+        # 有上传文档时再覆盖（文档优先级高于页面正文）
+        if not reparse_page:
+            uitest_agent._get_state(task_id).document_data = None
 
         if task.document_path:
             doc_path = _resolve_doc_path(task.document_path)
@@ -524,7 +553,7 @@ async def generate_cases(
                 client_id="cases_gen"
             )
 
-        cases = await uitest_agent.generate_cases(progress_cb=_progress)
+        cases = await uitest_agent.generate_cases(task_id=task_id, progress_cb=_progress)
 
         # ── 保存文档快照（用于后续增量更新的 Diff 分析） ──────────────────
         if uitest_agent._get_state(task_id).document_data:
@@ -1698,11 +1727,32 @@ class AICaseFileResponse(_BaseModel):
     parent_id: _Optional[int] = None
     diff_summary: _Optional[str] = None
     record_status: str = "active"
+    # 生成状态：generating / done / failed
+    gen_status: str = "done"
 
 
 def _ai_case_response(record) -> AICaseFileResponse:
     """统一构建 AICaseFileResponse，避免在每个端点重复写相同字段。"""
-    modules = (record.cases_data or {}).get("modules", [])
+    import re as _re_step
+    _step_prefix = _re_step.compile(r'^\s*\d+\.\s*')
+
+    def _clean_steps(modules):
+        """兼容存量数据：去掉步骤文本中 AI 自带的数字前缀（如 '1. xxx' → 'xxx'）"""
+        cleaned = []
+        for mod in (modules or []):
+            mod = dict(mod)
+            cases = []
+            for case in mod.get("cases", []):
+                case = dict(case)
+                steps = case.get("steps", [])
+                if isinstance(steps, list):
+                    case["steps"] = [_step_prefix.sub('', str(s)) for s in steps]
+                cases.append(case)
+            mod["cases"] = cases
+            cleaned.append(mod)
+        return cleaned
+
+    modules = _clean_steps((record.cases_data or {}).get("modules", []))
     return AICaseFileResponse(
         id=record.id,
         task_name=record.task_name,
@@ -1715,12 +1765,14 @@ def _ai_case_response(record) -> AICaseFileResponse:
         parent_id=record.parent_id,
         diff_summary=record.diff_summary,
         record_status=getattr(record, "record_status", "active") or "active",
+        gen_status=getattr(record, "gen_status", "done") or "done",
     )
 
 
 @router.post("/ai-cases/generate", response_model=AICaseFileResponse)
 async def generate_ai_cases(
     request: AICaseGenerateRequest,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db)
 ):
     from skills.ai_case_generator import ai_case_generator
@@ -1730,58 +1782,80 @@ async def generate_ai_cases(
     if not request.document_path and not request.content:
         raise HTTPException(status_code=400, detail="请提供文档路径或需求文本内容")
 
-    # ── 步骤1：先写占位记录，获取 record.id 供 RAG 使用 ──────────────────
+    # ── 步骤1：先写占位记录（gen_status=generating），立即返回前端 ────────
     placeholder = AICaseFile(
         task_name=request.task_name,
         case_count=0,
         cases_data=None,
+        gen_status="generating",
     )
     db.add(placeholder)
     await db.commit()
     await db.refresh(placeholder)
     rag_source_id = placeholder.id
 
-    async def _progress(pct: int, stage: str):
-        await ws_manager.broadcast(
-            {"type": "ai_gen_progress", "percent": pct, "stage": stage},
-            client_id="ai_gen",
-        )
+    # ── 步骤2：后台真正执行生成，完成后写库 + 推 WebSocket ───────────────
+    async def _do_generate_bg(record_id: int, task_name: str, document_path: _Optional[str],
+                               content: _Optional[str], formats: _List[str]):
+        from tools.database import async_session_maker
+        async with async_session_maker() as bg_db:
+            from sqlalchemy import select as _select
+            res = await bg_db.execute(_select(AICaseFile).where(AICaseFile.id == record_id))
+            record = res.scalar_one_or_none()
+            if not record:
+                return
 
-    # ── 步骤2：传入 rag_source_id，generate() 内部先入库再生成 ────────────
-    try:
-        result = await ai_case_generator.generate(
-            task_name=request.task_name,
-            document_path=request.document_path,
-            content=request.content,
-            formats=request.formats,
-            progress_cb=_progress,
-            rag_source_id=rag_source_id,
-        )
-    except RuntimeError as e:
-        # 清理占位记录
-        await db.delete(placeholder)
-        await db.commit()
-        await ws_manager.broadcast(
-            {"type": "ai_gen_progress", "percent": 0, "stage": f"生成失败: {e}", "error": True},
-            client_id="ai_gen",
-        )
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        await db.delete(placeholder)
-        await db.commit()
-        logger.exception("AI 用例生成失败: {}", repr(e))
-        raise HTTPException(status_code=500, detail=f"生成失败: {type(e).__name__}: {e}")
+            async def _progress(pct: int, stage: str):
+                await ws_manager.broadcast(
+                    {"type": "ai_gen_progress", "percent": pct, "stage": stage},
+                    client_id="ai_gen",
+                )
 
-    # ── 步骤3：更新占位记录为完整数据 ────────────────────────────────────
-    placeholder.case_count  = result.get("case_count", 0)
-    placeholder.md_path     = result["files"].get("md")
-    placeholder.xmind_path  = result["files"].get("xmind")
-    placeholder.cases_data  = result.get("cases_data")
-    placeholder.doc_hash    = result.get("doc_hash")
-    placeholder.doc_content = result.get("doc_content")
-    await db.commit()
-    await db.refresh(placeholder)
+            try:
+                result = await ai_case_generator.generate(
+                    task_name=task_name,
+                    document_path=document_path,
+                    content=content,
+                    formats=formats,
+                    progress_cb=_progress,
+                    rag_source_id=record_id,
+                )
+                record.case_count  = result.get("case_count", 0)
+                record.md_path     = result["files"].get("md")
+                record.xmind_path  = result["files"].get("xmind")
+                record.cases_data  = result.get("cases_data")
+                record.doc_hash    = result.get("doc_hash")
+                record.doc_content = result.get("doc_content")
+                record.gen_status  = "done"
+                await bg_db.commit()
+                await bg_db.refresh(record)
+                # 通知前端生成完成，携带 record id 方便刷新
+                await ws_manager.broadcast(
+                    {"type": "ai_gen_done", "record_id": record_id,
+                     "case_count": record.case_count, "task_name": task_name},
+                    client_id="ai_gen",
+                )
+                logger.info(f"AI 用例后台生成完成: record_id={record_id}，{record.case_count} 条")
+            except Exception as e:
+                record.gen_status = "failed"
+                await bg_db.commit()
+                logger.exception("AI 用例后台生成失败: record_id={}, err={}", record_id, repr(e))
+                await ws_manager.broadcast(
+                    {"type": "ai_gen_progress", "percent": 0,
+                     "stage": f"生成失败: {type(e).__name__}: {e}", "error": True},
+                    client_id="ai_gen",
+                )
 
+    background_tasks.add_task(
+        _do_generate_bg,
+        record_id=rag_source_id,
+        task_name=request.task_name,
+        document_path=request.document_path,
+        content=request.content,
+        formats=request.formats,
+    )
+
+    # 立即返回占位记录（gen_status=generating），前端根据 WebSocket 事件刷新
     return _ai_case_response(placeholder)
 
 
@@ -2299,6 +2373,22 @@ async def diff_check_ai_case(
             from tools.document_parser import document_parser
             parsed = await document_parser.parse(request.new_document_path)
             new_content = parsed.get("content", "")
+            # 与 ai_case_generator.generate() 保持一致：BeautifulSoup 深度清洗 HTML 噪音
+            try:
+                from bs4 import BeautifulSoup
+                import re as _re
+                soup = BeautifulSoup(new_content, "html.parser")
+                for tag in soup(["script", "style", "head", "meta", "link"]):
+                    tag.decompose()
+                cleaned = soup.get_text(separator="\n", strip=True)
+                cleaned = _re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+                if len(cleaned) >= 200:
+                    new_content = cleaned
+            except Exception:
+                pass
+            # 清洗后截断保护
+            if len(new_content) > 100000:
+                new_content = new_content[:100000]
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"新文档解析失败: {e}")
     else:
@@ -2397,6 +2487,22 @@ async def incremental_update_ai_case(
             from tools.document_parser import document_parser
             parsed = await document_parser.parse(request.new_document_path)
             new_content = parsed.get("content", "")
+            # BeautifulSoup 深度清洗 HTML 噪音，与 generate() 保持一致
+            try:
+                from bs4 import BeautifulSoup
+                import re as _re
+                soup = BeautifulSoup(new_content, "html.parser")
+                for tag in soup(["script", "style", "head", "meta", "link"]):
+                    tag.decompose()
+                cleaned = soup.get_text(separator="\n", strip=True)
+                cleaned = _re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+                if len(cleaned) >= 200:
+                    new_content = cleaned
+            except Exception:
+                pass
+            # 清洗后截断保护
+            if len(new_content) > 100000:
+                new_content = new_content[:100000]
             # 解析完删除临时文件
             from pathlib import Path as _Path
             p = _Path(request.new_document_path)

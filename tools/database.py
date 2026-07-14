@@ -119,6 +119,8 @@ class AICaseFile(Base):
     diff_summary = Column(Text, nullable=True)
     # 记录状态：active（当前有效版本） / deprecated（已被新版本替代）
     record_status = Column(String(20), default="active", nullable=False)
+    # 生成状态：generating（后台生成中） / done（已完成） / failed（失败）
+    gen_status = Column(String(20), default="done", nullable=False)
 
 
 class User(Base):
@@ -318,6 +320,7 @@ async def init_database():
             "ALTER TABLE ai_case_files ADD COLUMN parent_id INTEGER",
             "ALTER TABLE ai_case_files ADD COLUMN diff_summary TEXT",
             "ALTER TABLE ai_case_files ADD COLUMN record_status VARCHAR(20) DEFAULT 'active'",
+            "ALTER TABLE ai_case_files ADD COLUMN gen_status VARCHAR(20) DEFAULT 'done'",
             # test_tasks 文档快照字段（兼容旧库）
             "ALTER TABLE test_tasks ADD COLUMN doc_snapshot TEXT",
             "ALTER TABLE test_tasks ADD COLUMN doc_hash VARCHAR(64)",

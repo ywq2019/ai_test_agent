@@ -561,7 +561,7 @@ class ApiCaseGenerator:
         base_url = cfg["base_url"].rstrip("/")
         model    = cfg["model"]
 
-        is_anthropic = "anthropic.com" in base_url or model.startswith("claude")
+        is_anthropic = "anthropic.com" in base_url
 
         if is_anthropic:
             url     = f"{base_url}/v1/messages"
@@ -592,10 +592,34 @@ class ApiCaseGenerator:
             }
 
         logger.info(f"Calling API: {url}, model={model}")
-        async with httpx.AsyncClient(verify=False, timeout=120) as client:
-            resp = await client.post(url, json=payload, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
+        _RETRYABLE = {502, 503, 504}
+        last_exc: Exception = RuntimeError("未知错误")
+        for _attempt in range(1, 4):
+            try:
+                async with httpx.AsyncClient(verify=False, timeout=120) as client:
+                    resp = await client.post(url, json=payload, headers=headers)
+                    if resp.status_code in _RETRYABLE:
+                        raise httpx.HTTPStatusError(
+                            f"Server error '{resp.status_code}' (retryable)",
+                            request=resp.request, response=resp,
+                        )
+                    resp.raise_for_status()
+                    data = resp.json()
+                break
+            except (httpx.TimeoutException, httpx.HTTPStatusError) as e:
+                last_exc = e
+                is_retryable = isinstance(e, httpx.TimeoutException) or (
+                    isinstance(e, httpx.HTTPStatusError) and e.response.status_code in _RETRYABLE
+                )
+                if is_retryable and _attempt < 3:
+                    wait = _attempt * 5
+                    logger.warning(f"LLM 请求失败（第{_attempt}次）: {e}，{wait}s 后重试...")
+                    import asyncio as _asyncio
+                    await _asyncio.sleep(wait)
+                    continue
+                raise
+        else:
+            raise last_exc
 
         if is_anthropic:
             text_blocks = [b for b in data["content"] if b.get("type") == "text"]
@@ -751,7 +775,7 @@ class ApiCodeAnalyzer:
         if not api_key or not base_url:
             raise RuntimeError("未配置 AI_API_KEY 或 AI_API_URL")
 
-        is_anthropic = "anthropic.com" in base_url or model.startswith("claude")
+        is_anthropic = "anthropic.com" in base_url
 
         if is_anthropic:
             url     = f"{base_url}/v1/messages"
@@ -767,11 +791,32 @@ class ApiCodeAnalyzer:
                        "messages": [{"role": "system", "content": system_prompt},
                                     {"role": "user",   "content": prompt}]}
 
-        import httpx
-        async with httpx.AsyncClient(verify=False, timeout=timeout) as client:
-            resp = await client.post(url, json=payload, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
+        _RETRYABLE2 = {502, 503, 504}
+        _last_exc2: Exception = RuntimeError("未知错误")
+        for _att2 in range(1, 4):
+            try:
+                async with httpx.AsyncClient(verify=False, timeout=timeout) as client:
+                    resp = await client.post(url, json=payload, headers=headers)
+                    if resp.status_code in _RETRYABLE2:
+                        raise httpx.HTTPStatusError(
+                            f"Server error '{resp.status_code}' (retryable)",
+                            request=resp.request, response=resp,
+                        )
+                    resp.raise_for_status()
+                    data = resp.json()
+                break
+            except (httpx.TimeoutException, httpx.HTTPStatusError) as e:
+                _last_exc2 = e
+                _retryable2 = isinstance(e, httpx.TimeoutException) or (
+                    isinstance(e, httpx.HTTPStatusError) and e.response.status_code in _RETRYABLE2
+                )
+                if _retryable2 and _att2 < 3:
+                    import asyncio as _asyncio2
+                    await _asyncio2.sleep(_att2 * 5)
+                    continue
+                raise
+        else:
+            raise _last_exc2
 
         _text_blocks = [b for b in data["content"] if b.get("type") == "text"]
         raw = (_text_blocks[0]["text"] if is_anthropic and _text_blocks
