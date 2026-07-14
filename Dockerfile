@@ -29,7 +29,7 @@ COPY tools/       ./tools/
 COPY main.py      ./
 
 # 创建数据目录（会被 Volume 挂载覆盖，此处仅做占位）
-RUN mkdir -p /data/reports /data/screenshots /data/logs /data/uploads/documents
+RUN mkdir -p /data/reports /data/screenshots /data/logs /data/uploads/documents /data/ai_cases
 
 # 非 root 用户运行（安全最佳实践）
 RUN useradd -m -u 1000 appuser \

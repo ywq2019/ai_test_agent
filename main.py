@@ -187,8 +187,8 @@ _dist_dir = os.path.join(os.path.dirname(__file__), "ui", "dist")
 if os.path.exists(_dist_dir):
     app.mount("/assets", StaticFiles(directory=os.path.join(_dist_dir, "assets")), name="assets")
 
-# 挂载截图目录（执行报告中的截图查看）
-_screenshots_dir = os.path.join(os.path.dirname(__file__), "screenshots")
+# 挂载截图目录（执行报告中的截图查看），优先读 config 中的 SCREENSHOT_DIR
+_screenshots_dir = os.path.abspath(settings.SCREENSHOT_DIR)
 os.makedirs(_screenshots_dir, exist_ok=True)
 app.mount("/screenshots", StaticFiles(directory=_screenshots_dir), name="screenshots")
 

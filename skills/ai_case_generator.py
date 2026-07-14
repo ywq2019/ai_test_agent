@@ -175,8 +175,15 @@ class AICaseGenerator:
     _SEGMENT_OVERLAP =  2000
 
     def __init__(self):
-        self.output_dir = Path("ai_cases")
-        self.output_dir.mkdir(exist_ok=True)
+        # 优先读环境变量 AI_CASES_DIR，其次 REPORT_OUTPUT_DIR 同级，兜底用相对路径
+        # Docker 部署时 Volume 挂载 /data，设置 AI_CASES_DIR=/data/ai_cases 即可持久化
+        import os as _os
+        _default = _os.path.join(
+            _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+            "ai_cases"
+        )
+        self.output_dir = Path(_os.environ.get("AI_CASES_DIR", _default))
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         # 进程内分段索引缓存（doc_hash → segments 列表），避免重复切分
         self._segment_cache: Dict[str, list] = {}
 
