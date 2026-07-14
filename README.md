@@ -26,10 +26,17 @@ git clone https://github.com/ywq2019/ai_test_agent.git && cd ai_test_agent && do
 
 启动后访问 `http://服务器IP:4000`，进入**大模型配置**页填写 API Key。
 
-| 服务    | 说明                               |
-| ----- | -------------------------------- |
-| `app` | FastAPI 后端 + 前端静态文件，监听 4000 端口   |
-| `db`  | PostgreSQL 15，自动建表，数据持久化到 Volume |
+> 也可以在启动前编辑 `.env.docker`，预填 `AI_API_KEY` / `AI_API_URL` / `AI_MODEL`，首次启动即生效。
+
+| 服务    | 说明                                           |
+| ----- | -------------------------------------------- |
+| `app` | FastAPI 后端 + 前端静态文件，监听 4000 端口               |
+| `db`  | PostgreSQL 15（含 pgvector），自动建表，数据持久化到 Volume  |
+
+| Volume     | 挂载路径   | 内容                                              |
+| ---------- | ------ | ----------------------------------------------- |
+| `pg_data`  | —      | PostgreSQL 数据文件                                 |
+| `app_data` | `/data` | 截图（`/data/screenshots`）、AI 用例文件（`/data/ai_cases`）、日志（`/data/logs`）、上传文档（`/data/uploads`）|
 
 ```bash
 git pull && docker compose up -d --build  # 更新
