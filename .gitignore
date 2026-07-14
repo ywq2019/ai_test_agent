@@ -35,3 +35,7 @@ nul
 
 # Docker 敏感配置（模板 .env.docker 保留进仓库）
 .env.docker.local
+
+# 临时诊断/测试脚本（根目录）
+test_*.py
+_diag_*.py
