@@ -1707,6 +1707,67 @@ async def test_llm_connection(request: LLMTestRequest):
 from pydantic import BaseModel as _BaseModel
 from typing import List as _List, Dict as _Dict, Any as _Any, Optional as _Optional
 
+
+async def _do_generate_bg(
+    record_id: int,
+    task_name: str,
+    document_path: _Optional[str],
+    content: _Optional[str],
+    formats: _List[str],
+) -> None:
+    """AI 用例后台生成任务：生成完成后写库并通过 WebSocket 推送结果。"""
+    from tools.database import async_session_maker, AICaseFile
+    from skills.ai_case_generator import ai_case_generator
+    from api.websocket_manager import ws_manager
+    from sqlalchemy import select as _select
+
+    async with async_session_maker() as bg_db:
+        res = await bg_db.execute(_select(AICaseFile).where(AICaseFile.id == record_id))
+        record = res.scalar_one_or_none()
+        if not record:
+            logger.error(f"_do_generate_bg: record_id={record_id} 不存在，任务中止")
+            return
+
+        async def _progress(pct: int, stage: str):
+            await ws_manager.broadcast(
+                {"type": "ai_gen_progress", "percent": pct, "stage": stage},
+                client_id="ai_gen",
+            )
+
+        try:
+            result = await ai_case_generator.generate(
+                task_name=task_name,
+                document_path=document_path,
+                content=content,
+                formats=formats,
+                progress_cb=_progress,
+                rag_source_id=record_id,
+            )
+            record.case_count  = result.get("case_count", 0)
+            record.md_path     = result["files"].get("md")
+            record.xmind_path  = result["files"].get("xmind")
+            record.cases_data  = result.get("cases_data")
+            record.doc_hash    = result.get("doc_hash")
+            record.doc_content = result.get("doc_content")
+            record.gen_status  = "done"
+            await bg_db.commit()
+            await bg_db.refresh(record)
+            await ws_manager.broadcast(
+                {"type": "ai_gen_done", "record_id": record_id,
+                 "case_count": record.case_count, "task_name": task_name},
+                client_id="ai_gen",
+            )
+            logger.info(f"AI 用例后台生成完成: record_id={record_id}，{record.case_count} 条")
+        except Exception as e:
+            record.gen_status = "failed"
+            await bg_db.commit()
+            logger.exception("AI 用例后台生成失败: record_id={}, err={}", record_id, repr(e))
+            await ws_manager.broadcast(
+                {"type": "ai_gen_progress", "percent": 0,
+                 "stage": f"生成失败: {type(e).__name__}: {e}", "error": True},
+                client_id="ai_gen",
+            )
+
 class AICaseGenerateRequest(_BaseModel):
     task_name: str
     document_path: _Optional[str] = None
@@ -1775,9 +1836,7 @@ async def generate_ai_cases(
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db)
 ):
-    from skills.ai_case_generator import ai_case_generator
     from tools.database import AICaseFile
-    from api.websocket_manager import ws_manager
 
     if not request.document_path and not request.content:
         raise HTTPException(status_code=400, detail="请提供文档路径或需求文本内容")
@@ -1794,58 +1853,7 @@ async def generate_ai_cases(
     await db.refresh(placeholder)
     rag_source_id = placeholder.id
 
-    # ── 步骤2：后台真正执行生成，完成后写库 + 推 WebSocket ───────────────
-    async def _do_generate_bg(record_id: int, task_name: str, document_path: _Optional[str],
-                               content: _Optional[str], formats: _List[str]):
-        from tools.database import async_session_maker
-        async with async_session_maker() as bg_db:
-            from sqlalchemy import select as _select
-            res = await bg_db.execute(_select(AICaseFile).where(AICaseFile.id == record_id))
-            record = res.scalar_one_or_none()
-            if not record:
-                return
-
-            async def _progress(pct: int, stage: str):
-                await ws_manager.broadcast(
-                    {"type": "ai_gen_progress", "percent": pct, "stage": stage},
-                    client_id="ai_gen",
-                )
-
-            try:
-                result = await ai_case_generator.generate(
-                    task_name=task_name,
-                    document_path=document_path,
-                    content=content,
-                    formats=formats,
-                    progress_cb=_progress,
-                    rag_source_id=record_id,
-                )
-                record.case_count  = result.get("case_count", 0)
-                record.md_path     = result["files"].get("md")
-                record.xmind_path  = result["files"].get("xmind")
-                record.cases_data  = result.get("cases_data")
-                record.doc_hash    = result.get("doc_hash")
-                record.doc_content = result.get("doc_content")
-                record.gen_status  = "done"
-                await bg_db.commit()
-                await bg_db.refresh(record)
-                # 通知前端生成完成，携带 record id 方便刷新
-                await ws_manager.broadcast(
-                    {"type": "ai_gen_done", "record_id": record_id,
-                     "case_count": record.case_count, "task_name": task_name},
-                    client_id="ai_gen",
-                )
-                logger.info(f"AI 用例后台生成完成: record_id={record_id}，{record.case_count} 条")
-            except Exception as e:
-                record.gen_status = "failed"
-                await bg_db.commit()
-                logger.exception("AI 用例后台生成失败: record_id={}, err={}", record_id, repr(e))
-                await ws_manager.broadcast(
-                    {"type": "ai_gen_progress", "percent": 0,
-                     "stage": f"生成失败: {type(e).__name__}: {e}", "error": True},
-                    client_id="ai_gen",
-                )
-
+    # ── 步骤2：提交后台任务，立即返回占位记录 ────────────────────────────
     background_tasks.add_task(
         _do_generate_bg,
         record_id=rag_source_id,

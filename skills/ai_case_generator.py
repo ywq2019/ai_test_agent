@@ -211,8 +211,8 @@ class AICaseGenerator:
             if progress_cb:
                 try:
                     await progress_cb(pct, stage)
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug(f"progress_cb 推送失败（忽略）: {_e}")
 
         await _p(5, "文档上传完成，正在解析文档...")
         doc_text = await self._get_content(document_path, content)
@@ -259,7 +259,8 @@ class AICaseGenerator:
                             main_text = candidate
                             logger.info(f"主内容区命中选择器: {sel}，{len(main_text)} 字")
                             break
-                except Exception:
+                except Exception as _e:
+                    logger.debug(f"HTML 选择器 '{sel}' 匹配失败（跳过）: {_e}")
                     continue
 
             # 没有找到主内容区，退回全文 get_text
@@ -298,8 +299,8 @@ class AICaseGenerator:
                 if len(cleaned) >= 200:
                     doc_text = cleaned
                     logger.info(f"正则清洗: {original_len} → {len(doc_text)} 字")
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug(f"正则清洗降级失败（忽略）: {_e}")
         except Exception as e:
             logger.warning(f"HTML 清洗失败，使用原始内容: {e}")
 
@@ -518,8 +519,8 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
                         if "uploads" in p.parts and "documents" in p.parts:
                             p.unlink(missing_ok=True)
                             logger.info(f"临时文档已删除: {document_path}")
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        logger.debug(f"临时文档删除失败（忽略）: {_e}")
                     return text
             except Exception as e:
                 logger.warning(f"文档解析失败，回退到纯文本: {e}")
@@ -1337,8 +1338,8 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
             if progress_cb:
                 try:
                     await progress_cb(pct, stage)
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug(f"progress_cb 推送失败（忽略）: {_e}")
 
         changed_mods   = diff_result.get("changed", [])
         added_mods     = diff_result.get("added", [])
@@ -1801,8 +1802,8 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
             if progress_cb:
                 try:
                     await progress_cb(pct, stage)
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug(f"progress_cb 推送失败（忽略）: {_e}")
 
         existing_modules = cases_data.get("modules", [])
         total_existing = sum(len(m.get("cases", [])) for m in existing_modules)
