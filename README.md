@@ -221,7 +221,12 @@ ai_test_agent/
 ├── Dockerfile / docker-compose.yml
 ├── api/
 │   ├── auth.py             # JWT 工具 + get_current_user 依赖注入
-│   ├── routes.py           # 全部 REST 端点（含用户管理、增量更新、代码分析）
+│   ├── routes/             # REST 路由（按功能域拆分）
+│   │   ├── __init__.py     # 汇总四个子路由，导出合并 router
+│   │   ├── auth.py         # 鉴权与用户管理（/auth/*、/health、/logs）
+│   │   ├── webui.py        # WebUI 自动化（/tasks、/cases、/execute、/reports、/agent、/skills、/llm）
+│   │   ├── ai_cases.py     # AI 文档驱动用例（/ai-cases/*，含 diff-check、incremental-update）
+│   │   └── api_test.py     # 接口自动化（/api-test/*、/global-vars、/test-plans）
 │   ├── websocket.py        # WebSocket 端点
 │   └── websocket_manager.py
 ├── skills/
@@ -249,10 +254,11 @@ ai_test_agent/
 │   ├── views/Login.vue     # 登录页
 │   └── views/ApiTest/      # 接口测试组件（拆分后）
 │       └── ScriptDialog.vue
-└── tests/                  # 单元测试
-    ├── test_param_resolver.py   # 27 条
-    ├── test_api_executor.py     # 27 条
-    └── test_incremental.py      # 12 条
+└── tests/                  # 单元测试（96 条）
+    ├── test_param_resolver.py      # 27 条
+    ├── test_api_executor.py        # 27 条
+    ├── test_incremental.py         # 12 条
+    └── test_ai_case_generator.py   # 30 条（截断修复/字符转义/分段索引/定位/增量合并）
 ```
 
 ***
