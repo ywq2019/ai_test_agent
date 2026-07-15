@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from loguru import logger
 
 from api.routes import router as api_router
+from api.routes import auth_router, webui_router, ai_cases_router, api_test_router
 from api.websocket import websocket_endpoint
 from tools.database import init_database
 from tools.config import settings
@@ -192,7 +193,7 @@ _screenshots_dir = os.path.abspath(settings.SCREENSHOT_DIR)
 os.makedirs(_screenshots_dir, exist_ok=True)
 app.mount("/screenshots", StaticFiles(directory=_screenshots_dir), name="screenshots")
 
-app.include_router(api_router, prefix="/api/v1")
+app.include_router(api_router, prefix="/api/v1")   # 聚合所有子路由
 app.websocket("/ws")(websocket_endpoint)
 
 
