@@ -193,6 +193,7 @@ async def get_ai_case(record_id: int, db: AsyncSession = Depends(get_db)):
 async def download_ai_case(record_id: int, format: str = "md", db: AsyncSession = Depends(get_db)):
     from fastapi.responses import FileResponse
     from urllib.parse import quote
+    from datetime import datetime
     result = await db.execute(select(AICaseFile).where(AICaseFile.id == record_id))
     record = result.scalar_one_or_none()
     if not record:
@@ -205,11 +206,34 @@ async def download_ai_case(record_id: int, format: str = "md", db: AsyncSession 
         raise HTTPException(status_code=400, detail="不支持的格式，请使用 md 或 xmind")
     if not file_path:
         raise HTTPException(status_code=404, detail=f"该记录未生成 {format} 文件")
+
+    # 解析路径
     p = Path(file_path)
     if not p.is_absolute():
         p = Path(__file__).parent.parent.parent / file_path
+
+    # 文件不存在时，从 cases_data 重新生成
     if not p.exists():
-        raise HTTPException(status_code=404, detail=f"文件不存在: {file_path}")
+        cases_data = record.cases_data
+        if not cases_data or not cases_data.get("modules"):
+            raise HTTPException(status_code=404, detail="文件已丢失且无法重新生成（用例数据为空）")
+        try:
+            from skills.ai_case_generator import ai_case_generator
+            ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+            if format == "md":
+                p = await ai_case_generator._save_markdown(cases_data, record.task_name, ts)
+                record.md_path = str(p)
+            else:
+                p = await ai_case_generator._save_xmind(cases_data, record.task_name, ts)
+                record.xmind_path = str(p)
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(record, "md_path" if format == "md" else "xmind_path")
+            await db.commit()
+            logger.info(f"下载时文件不存在，已重新生成: record_id={record_id}, format={format}, path={p}")
+        except Exception as e:
+            logger.error(f"重新生成下载文件失败: record_id={record_id}, err={e}")
+            raise HTTPException(status_code=500, detail=f"文件已丢失，重新生成失败: {e}")
+
     encoded = quote(record.task_name.replace("/", "_") + ext, safe="")
     return FileResponse(path=str(p), media_type=media_type,
                         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded}"})
