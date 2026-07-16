@@ -660,3 +660,546 @@ async def incremental_update_ai_case(
 
     logger.info(f"增量更新完成: 旧记录 #{old_record.id} → 新记录 #{new_record.id}，{new_record.case_count} 条")
     return _ai_case_response(new_record)
+
+
+# ── 需求追踪：提取需求条目（后台任务） ────────────────────────────────────────
+
+async def _do_extract_requirements_bg(record_id: int) -> None:
+    """后台提取需求条目，完成后通过 WebSocket 推送结果。"""
+    from datetime import datetime as _dt
+    from tools.database import async_session_maker
+    from skills.ai_case_generator import ai_case_generator
+    from skills.prompt_loader import get_system, render_user
+    import json as _json
+
+    async def _push(pct: int, stage: str, **kwargs):
+        await ws_manager.broadcast(
+            {"type": "trac_gen_progress", "percent": pct, "stage": stage, **kwargs},
+            client_id="trac_gen",
+        )
+
+    async with async_session_maker() as db:
+        result = await db.execute(select(AICaseFile).where(AICaseFile.id == record_id))
+        record = result.scalar_one_or_none()
+        if not record:
+            await _push(0, "记录不存在", error=True)
+            return
+
+        doc_content = record.doc_content or ""
+        if not doc_content.strip():
+            await _push(0, "该记录未保存需求文档内容，无法提取需求", error=True)
+            return
+
+        modules = (record.cases_data or {}).get("modules", [])
+        modules_hint = "\n".join(f"  - {m.get('name','')}" for m in modules) or "  （无）"
+
+        await _push(20, "正在调用 AI 提取需求条目，请稍候...")
+        try:
+            system_prompt = get_system("ai_case_gen.yaml", "extract_requirements")
+            user_prompt = render_user("ai_case_gen.yaml", "extract_requirements",
+                                      modules_hint=modules_hint,
+                                      content=doc_content[:30000])
+            raw = await ai_case_generator._run_claude_subprocess(system_prompt, user_prompt, timeout_secs=180)
+            data = _json.loads(raw)
+            requirements = data.get("requirements", [])
+        except _json.JSONDecodeError as e:
+            logger.error(f"需求提取返回非法 JSON: record_id={record_id}, err={e}")
+            await _push(0, "AI 返回格式异常，请稍后重试", error=True)
+            return
+        except Exception as e:
+            logger.exception("需求提取失败: record_id={}", record_id)
+            await _push(0, f"需求提取失败: {e}", error=True)
+            return
+
+        if not requirements:
+            await _push(0, "AI 未能从文档中提取到需求条目，请检查文档内容", error=True)
+            return
+
+        extracted_at = _dt.utcnow().isoformat()
+        record.requirements_data = {"extracted_at": extracted_at, "requirements": requirements}
+        record.traceability_data = None
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(record, "requirements_data")
+        flag_modified(record, "traceability_data")
+        await db.commit()
+
+        logger.info(f"需求提取完成: record_id={record_id}，共 {len(requirements)} 条需求")
+        await ws_manager.broadcast(
+            {"type": "trac_extract_done", "record_id": record_id,
+             "count": len(requirements), "extracted_at": extracted_at,
+             "requirements": requirements},
+            client_id="trac_gen",
+        )
+
+
+@router.post("/ai-cases/{record_id}/extract-requirements")
+async def extract_requirements(
+    record_id: int,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """从已保存的需求文档中提取结构化需求条目（后台任务，进度通过 WebSocket trac_gen 推送）。"""
+    result = await db.execute(select(AICaseFile).where(AICaseFile.id == record_id))
+    record = result.scalar_one_or_none()
+    if not record:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    if not (record.doc_content or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail="该记录未保存需求文档内容，无法提取需求（旧记录请重新生成用例后再使用此功能）"
+        )
+    background_tasks.add_task(_do_extract_requirements_bg, record_id)
+    return {"record_id": record_id, "status": "extracting", "message": "需求提取任务已启动，请通过 WebSocket 接收进度"}
+
+
+# ── 需求追踪：用例-需求映射（后台任务） ──────────────────────────────────────
+
+async def _do_map_cases_bg(record_id: int) -> None:
+    """后台执行用例-需求映射，完成后通过 WebSocket 推送结果。"""
+    from datetime import datetime as _dt
+    from tools.database import async_session_maker
+    from skills.ai_case_generator import ai_case_generator
+    from skills.prompt_loader import get_system, render_user
+    import json as _json
+
+    async def _push(pct: int, stage: str, **kwargs):
+        await ws_manager.broadcast(
+            {"type": "trac_gen_progress", "percent": pct, "stage": stage, **kwargs},
+            client_id="trac_gen",
+        )
+
+    async with async_session_maker() as db:
+        result = await db.execute(select(AICaseFile).where(AICaseFile.id == record_id))
+        record = result.scalar_one_or_none()
+        if not record:
+            await _push(0, "记录不存在", error=True)
+            return
+
+        requirements = (record.requirements_data or {}).get("requirements", [])
+        if not requirements:
+            await _push(0, "请先提取需求条目", error=True)
+            return
+
+        modules = (record.cases_data or {}).get("modules", [])
+        all_cases = []
+        for mod in modules:
+            for case in mod.get("cases", []):
+                if case.get("status") != "deprecated":
+                    all_cases.append({"case_id": case.get("id", ""), "name": case.get("name", "")})
+
+        if not all_cases:
+            await _push(0, "该记录暂无有效用例", error=True)
+            return
+
+        requirements_text = "\n".join(
+            f"  {r['id']} | {r['module']} | {r['title']} | {r.get('description','')}"
+            for r in requirements
+        )
+
+        BATCH = 50
+        total_batches = (len(all_cases) + BATCH - 1) // BATCH
+        all_mappings: list = []
+
+        for i in range(0, len(all_cases), BATCH):
+            batch_num = i // BATCH + 1
+            pct = 20 + int(batch_num / total_batches * 70)
+            await _push(pct, f"正在映射用例 {batch_num}/{total_batches} 批...")
+
+            batch = all_cases[i:i + BATCH]
+            cases_text = "\n".join(f"  {c['case_id']} | {c['name']}" for c in batch)
+            system_prompt = get_system("ai_case_gen.yaml", "map_cases_to_requirements")
+            user_prompt = render_user("ai_case_gen.yaml", "map_cases_to_requirements",
+                                      requirements_text=requirements_text,
+                                      cases_text=cases_text)
+            try:
+                raw = await ai_case_generator._run_claude_subprocess(system_prompt, user_prompt, timeout_secs=180)
+                data = _json.loads(raw)
+                all_mappings.extend(data.get("mappings", []))
+            except Exception as e:
+                logger.warning(f"映射批次 {batch_num} 失败（忽略）: {e}")
+
+        if not all_mappings:
+            await _push(0, "映射失败，请稍后重试", error=True)
+            return
+
+        mapped_at = _dt.utcnow().isoformat()
+        record.traceability_data = {"mapped_at": mapped_at, "mappings": all_mappings}
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(record, "traceability_data")
+        await db.commit()
+
+        logger.info(f"用例-需求映射完成: record_id={record_id}，{len(all_mappings)} 条用例已映射")
+        await ws_manager.broadcast(
+            {"type": "trac_map_done", "record_id": record_id,
+             "case_count": len(all_mappings), "req_count": len(requirements),
+             "mapped_at": mapped_at},
+            client_id="trac_gen",
+        )
+
+
+@router.post("/ai-cases/{record_id}/map-cases-to-reqs")
+async def map_cases_to_requirements(
+    record_id: int,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """对现有用例做需求映射（后台任务，进度通过 WebSocket trac_gen 推送）。"""
+    result = await db.execute(select(AICaseFile).where(AICaseFile.id == record_id))
+    record = result.scalar_one_or_none()
+    if not record:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    if not (record.requirements_data or {}).get("requirements"):
+        raise HTTPException(status_code=400, detail="请先调用「提取需求」接口，生成需求列表后再进行映射")
+    background_tasks.add_task(_do_map_cases_bg, record_id)
+    return {"record_id": record_id, "status": "mapping", "message": "映射任务已启动，请通过 WebSocket 接收进度"}
+
+
+# ── 需求追踪：追踪矩阵 ───────────────────────────────────────────────────────
+
+@router.get("/ai-cases/{record_id}/traceability")
+async def get_traceability(record_id: int, db: AsyncSession = Depends(get_db)):
+    """返回完整需求-用例追踪矩阵。"""
+    result = await db.execute(select(AICaseFile).where(AICaseFile.id == record_id))
+    record = result.scalar_one_or_none()
+    if not record:
+        raise HTTPException(status_code=404, detail="记录不存在")
+
+    requirements_data = record.requirements_data or {}
+    traceability_data = record.traceability_data or {}
+    requirements = requirements_data.get("requirements", [])
+    mappings = traceability_data.get("mappings", [])
+
+    if not requirements:
+        return {
+            "ready":        False,
+            "message":      "请先提取需求条目",
+            "extracted_at": None,
+            "mapped_at":    None,
+        }
+
+    # case_id → req_refs 索引
+    case_to_reqs: dict = {m["case_id"]: m.get("req_refs", []) for m in mappings}
+
+    # req_id → 覆盖用例列表 索引
+    modules = (record.cases_data or {}).get("modules", [])
+    all_cases: dict = {}
+    for mod in modules:
+        for case in mod.get("cases", []):
+            if case.get("status") != "deprecated":
+                cid = case.get("id", "")
+                all_cases[cid] = {
+                    "id":       cid,
+                    "name":     case.get("name", ""),
+                    "module":   mod.get("name", ""),
+                    "priority": case.get("priority", "P1"),
+                    "req_refs": case_to_reqs.get(cid, []),
+                }
+
+    req_to_cases: dict = {r["id"]: [] for r in requirements}
+    for cid, info in all_cases.items():
+        for req_id in info["req_refs"]:
+            if req_id in req_to_cases:
+                req_to_cases[req_id].append({
+                    "case_id":  cid,
+                    "name":     info["name"],
+                    "priority": info["priority"],
+                })
+
+    # 构建矩阵行
+    matrix_rows = []
+    for req in requirements:
+        req_id = req["id"]
+        linked = req_to_cases.get(req_id, [])
+        count  = len(linked)
+        status = "uncovered" if count == 0 else ("insufficient" if count == 1 else "covered")
+        matrix_rows.append({
+            "req_id":      req_id,
+            "module":      req.get("module", ""),
+            "title":       req.get("title", ""),
+            "description": req.get("description", ""),
+            "priority":    req.get("priority", "P1"),
+            "case_count":  count,
+            "status":      status,   # covered / insufficient / uncovered
+            "cases":       linked,
+        })
+
+    total        = len(requirements)
+    covered      = sum(1 for r in matrix_rows if r["status"] == "covered")
+    insufficient = sum(1 for r in matrix_rows if r["status"] == "insufficient")
+    uncovered    = sum(1 for r in matrix_rows if r["status"] == "uncovered")
+
+    # 用例视角：未关联任何需求的用例
+    orphan_cases = [
+        {"case_id": cid, "name": info["name"], "module": info["module"]}
+        for cid, info in all_cases.items()
+        if not info["req_refs"]
+    ]
+
+    return {
+        "ready":        True,
+        "extracted_at": requirements_data.get("extracted_at"),
+        "mapped_at":    traceability_data.get("mapped_at"),
+        "summary": {
+            "total":         total,
+            "covered":       covered,
+            "insufficient":  insufficient,
+            "uncovered":     uncovered,
+            "coverage_rate": round((covered + insufficient) / total * 100, 1) if total else 0,
+        },
+        "matrix":       matrix_rows,
+        "orphan_cases": orphan_cases,
+    }
+
+
+# ── 需求追踪：分析覆盖缺口 ───────────────────────────────────────────────────
+
+@router.post("/ai-cases/{record_id}/analyze-gap")
+async def analyze_coverage_gap(record_id: int, data: dict, db: AsyncSession = Depends(get_db)):
+    """
+    分析指定需求的测试覆盖缺口。
+    body: { req_id: str }
+    返回：缺失维度列表 + 补充建议
+    """
+    from skills.ai_case_generator import ai_case_generator
+    from skills.prompt_loader import get_system, render_user
+    import json as _json
+
+    result = await db.execute(select(AICaseFile).where(AICaseFile.id == record_id))
+    record = result.scalar_one_or_none()
+    if not record:
+        raise HTTPException(status_code=404, detail="记录不存在")
+
+    req_id = data.get("req_id", "")
+    if not req_id:
+        raise HTTPException(status_code=400, detail="请提供 req_id")
+
+    # 找到需求信息
+    requirements = (record.requirements_data or {}).get("requirements", [])
+    req = next((r for r in requirements if r["id"] == req_id), None)
+    if not req:
+        raise HTTPException(status_code=404, detail=f"需求 {req_id} 不存在")
+
+    # 找到该需求已有的用例（从 traceability 反查）
+    mappings = (record.traceability_data or {}).get("mappings", [])
+    covered_case_ids = {
+        m["case_id"] for m in mappings
+        if req_id in m.get("req_refs", [])
+    }
+    # 从 cases_data 里取用例详情
+    modules = (record.cases_data or {}).get("modules", [])
+    existing_cases = []
+    for mod in modules:
+        for case in mod.get("cases", []):
+            if case.get("id") in covered_case_ids and case.get("status") != "deprecated":
+                existing_cases.append(case)
+
+    existing_cases_text = "\n".join(
+        f"  {c.get('id')} | {c.get('name')} | {c.get('test_method','')}"
+        for c in existing_cases
+    ) or "  （暂无关联用例）"
+
+    system_prompt = get_system("ai_case_gen.yaml", "analyze_coverage_gap")
+    user_prompt = render_user("ai_case_gen.yaml", "analyze_coverage_gap",
+                              req_id=req_id,
+                              req_title=req.get("title", ""),
+                              req_description=req.get("description", ""),
+                              req_priority=req.get("priority", "P1"),
+                              existing_cases_text=existing_cases_text)
+    try:
+        raw = await ai_case_generator._run_claude_subprocess(system_prompt, user_prompt, timeout_secs=90)
+        gap_data = _json.loads(raw)
+    except _json.JSONDecodeError as e:
+        logger.error(f"缺口分析返回非法 JSON: {e}")
+        raise HTTPException(status_code=500, detail="AI 返回格式异常，请稍后重试")
+    except Exception as e:
+        logger.exception("缺口分析失败: record_id={}, req_id={}", record_id, req_id)
+        raise HTTPException(status_code=500, detail=f"分析失败: {e}")
+
+    return {
+        "req_id":                req_id,
+        "req_title":             req.get("title", ""),
+        "existing_case_count":   len(existing_cases),
+        "missing_dimensions":    gap_data.get("missing_dimensions", []),
+        "supplement_suggestion": gap_data.get("supplement_suggestion", ""),
+    }
+
+
+# ── 需求追踪：生成补充用例（后台任务） ───────────────────────────────────────
+
+async def _do_supplement_cases_bg(record_id: int, req_id: str, missing_dimensions: list) -> None:
+    """后台生成补充用例，完成后通过 WebSocket 推送。"""
+    from tools.database import async_session_maker
+    from skills.ai_case_generator import ai_case_generator
+    from skills.prompt_loader import get_system, render_user
+    from sqlalchemy.orm.attributes import flag_modified
+    import json as _json
+    import re as _re
+
+    async def _push(pct: int, stage: str, **kwargs):
+        await ws_manager.broadcast(
+            {"type": "trac_gen_progress", "percent": pct, "stage": stage, **kwargs},
+            client_id="trac_gen",
+        )
+
+    async with async_session_maker() as db:
+        result = await db.execute(select(AICaseFile).where(AICaseFile.id == record_id))
+        record = result.scalar_one_or_none()
+        if not record:
+            await _push(0, "记录不存在", error=True)
+            return
+
+        requirements = (record.requirements_data or {}).get("requirements", [])
+        req = next((r for r in requirements if r["id"] == req_id), None)
+        if not req:
+            await _push(0, f"需求 {req_id} 不存在", error=True)
+            return
+
+        # 已有用例文本
+        mappings = (record.traceability_data or {}).get("mappings", [])
+        covered_ids = {m["case_id"] for m in mappings if req_id in m.get("req_refs", [])}
+        modules = (record.cases_data or {}).get("modules", [])
+        existing_cases = []
+        for mod in modules:
+            for case in mod.get("cases", []):
+                if case.get("id") in covered_ids and case.get("status") != "deprecated":
+                    existing_cases.append(case)
+
+        existing_cases_text = "\n".join(
+            f"  {c.get('id')} | {c.get('name')}"
+            for c in existing_cases
+        ) or "  （暂无）"
+
+        missing_dimensions_text = "\n".join(
+            f"  - {d['dimension']}：{d['reason']}\n    举例：{'; '.join(d.get('examples', []))}"
+            for d in missing_dimensions
+        )
+
+        # 从 doc_content 中定位需求上下文
+        doc_content = record.doc_content or ""
+        doc_context = ""
+        if doc_content:
+            keywords = [req.get("title", ""), req_id, req.get("module", "")]
+            for kw in keywords:
+                if kw and len(kw) >= 2:
+                    idx = doc_content.find(kw)
+                    if idx != -1:
+                        start = max(0, idx - 200)
+                        end = min(len(doc_content), idx + 1000)
+                        doc_context = doc_content[start:end]
+                        break
+            if not doc_context:
+                doc_context = doc_content[:2000]
+
+        await _push(30, f"正在为需求 {req_id} 生成补充用例...")
+
+        system_prompt = get_system("ai_case_gen.yaml", "generate_supplement_cases")
+        user_prompt = render_user("ai_case_gen.yaml", "generate_supplement_cases",
+                                  req_id=req_id,
+                                  req_title=req.get("title", ""),
+                                  req_description=req.get("description", ""),
+                                  req_priority=req.get("priority", "P1"),
+                                  existing_cases_text=existing_cases_text,
+                                  missing_dimensions_text=missing_dimensions_text,
+                                  doc_context=doc_context)
+        try:
+            raw = await ai_case_generator._run_claude_subprocess(system_prompt, user_prompt, timeout_secs=120)
+            # 清理步骤前缀
+            _step_prefix = _re.compile(r'^\s*\d+\.\s*')
+            new_cases_raw = _json.loads(raw).get("cases", [])
+            for case in new_cases_raw:
+                if isinstance(case.get("steps"), list):
+                    case["steps"] = [_step_prefix.sub('', str(s)) for s in case["steps"]]
+        except Exception as e:
+            logger.exception("补充用例生成失败: record_id={}, req_id={}", record_id, req_id)
+            await _push(0, f"生成失败: {e}", error=True)
+            return
+
+        if not new_cases_raw:
+            await _push(0, "AI 未能生成补充用例，请稍后重试", error=True)
+            return
+
+        # 找到目标模块（用需求的 module 字段）
+        target_module_name = req.get("module", "通用")
+        cases_data = dict(record.cases_data or {})
+        mods = list(cases_data.get("modules", []))
+        target_mod = next((m for m in mods if m["name"] == target_module_name), None)
+        if not target_mod:
+            target_mod = {"name": target_module_name, "cases": []}
+            mods.append(target_mod)
+
+        # 生成唯一 ID
+        all_nums = []
+        prefix_map = {
+            "登录": "LOGIN", "注册": "REG", "用户": "USER", "权限": "AUTH",
+            "支付": "PAY", "订单": "ORDER", "会员": "MEMBER", "首页": "HOME",
+        }
+        mod_prefix = next(
+            (v for k, v in prefix_map.items() if k in target_module_name), None
+        ) or "".join(c for c in target_module_name if c.strip())[:4].upper() or "SUP"
+
+        for mod in mods:
+            for c in mod.get("cases", []):
+                cid = c.get("id", "")
+                if cid.startswith(mod_prefix + "-"):
+                    try:
+                        all_nums.append(int(cid.split("-")[-1]))
+                    except ValueError:
+                        pass
+        next_num = max(all_nums, default=0) + 1
+
+        added_cases = []
+        for case in new_cases_raw:
+            case["id"] = f"{mod_prefix}-SUP-{next_num:03d}"
+            case["is_supplement"] = True   # 标记为补充用例
+            next_num += 1
+            target_mod["cases"].append(case)
+            added_cases.append({"id": case["id"], "name": case["name"]})
+
+        cases_data["modules"] = mods
+        record.cases_data = cases_data
+        record.case_count = sum(len(m.get("cases", [])) for m in mods)
+        flag_modified(record, "cases_data")
+
+        # 更新 traceability_data：给新用例加映射
+        trac = dict(record.traceability_data or {"mapped_at": "", "mappings": []})
+        existing_mappings = list(trac.get("mappings", []))
+        for case in new_cases_raw:
+            existing_mappings.append({"case_id": case["id"], "req_refs": [req_id]})
+        trac["mappings"] = existing_mappings
+        record.traceability_data = trac
+        flag_modified(record, "traceability_data")
+
+        await db.commit()
+        logger.info(f"补充用例生成完成: record_id={record_id}, req_id={req_id}, 新增 {len(added_cases)} 条")
+
+        await ws_manager.broadcast(
+            {"type": "trac_supplement_done", "record_id": record_id,
+             "req_id": req_id, "added": added_cases, "count": len(added_cases)},
+            client_id="trac_gen",
+        )
+
+
+@router.post("/ai-cases/{record_id}/supplement-cases")
+async def supplement_cases(
+    record_id: int,
+    data: dict,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    针对覆盖不足的需求生成补充用例（后台任务）。
+    body: { req_id: str, missing_dimensions: [...] }
+    """
+    result = await db.execute(select(AICaseFile).where(AICaseFile.id == record_id))
+    record = result.scalar_one_or_none()
+    if not record:
+        raise HTTPException(status_code=404, detail="记录不存在")
+
+    req_id = data.get("req_id", "")
+    missing_dimensions = data.get("missing_dimensions", [])
+    if not req_id:
+        raise HTTPException(status_code=400, detail="请提供 req_id")
+
+    background_tasks.add_task(_do_supplement_cases_bg, record_id, req_id, missing_dimensions)
+    return {"record_id": record_id, "req_id": req_id, "status": "generating",
+            "message": "补充用例生成任务已启动，请通过 WebSocket 接收进度"}

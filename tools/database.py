@@ -122,6 +122,12 @@ class AICaseFile(Base):
     # 生成状态：generating（后台生成中） / done（已完成） / failed（失败）
     gen_status = Column(String(20), default="done", nullable=False)
 
+    # ── 需求追踪字段 ────────────────────────────────────────────────────
+    # 结构化需求列表：[{id, module, title, description, priority}]
+    requirements_data = Column(JSON, nullable=True)
+    # 用例-需求映射：{mapped_at, mappings: [{case_id, req_refs:[...]}]}
+    traceability_data = Column(JSON, nullable=True)
+
 
 class User(Base):
     __tablename__ = "users"
@@ -321,6 +327,8 @@ async def init_database():
             "ALTER TABLE ai_case_files ADD COLUMN diff_summary TEXT",
             "ALTER TABLE ai_case_files ADD COLUMN record_status VARCHAR(20) DEFAULT 'active'",
             "ALTER TABLE ai_case_files ADD COLUMN gen_status VARCHAR(20) DEFAULT 'done'",
+            "ALTER TABLE ai_case_files ADD COLUMN requirements_data JSON",
+            "ALTER TABLE ai_case_files ADD COLUMN traceability_data JSON",
             # test_tasks 文档快照字段（兼容旧库）
             "ALTER TABLE test_tasks ADD COLUMN doc_snapshot TEXT",
             "ALTER TABLE test_tasks ADD COLUMN doc_hash VARCHAR(64)",

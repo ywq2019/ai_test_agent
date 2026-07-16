@@ -120,6 +120,13 @@
                   >
                     <el-icon><DataAnalysis /></el-icon>覆盖度分析
                   </el-button>
+                  <el-button
+                    type="primary" size="small" plain
+                    @click="openTraceability(current)"
+                    :loading="tracLoading && tracTarget?.id === current.id"
+                  >
+                    <el-icon><Connection /></el-icon>需求追踪
+                  </el-button>
                 </div>
                 <!-- 下载组 -->
                 <div class="btn-group" v-if="current.has_md || current.has_xmind">
@@ -331,6 +338,211 @@
       </div>
       <div v-else class="coverage-empty"><el-empty description="暂无数据" /></div>
     </el-drawer>
+
+    <!-- 需求追踪矩阵抽屉 -->
+    <el-drawer v-model="tracDrawerVisible" title="需求追踪矩阵" size="700px" direction="rtl" :destroy-on-close="false">
+      <div class="trac-panel">
+
+        <!-- 步骤区：未提取或未映射时显示操作引导 -->
+        <div v-if="!tracData || !tracData.ready" class="trac-guide">
+          <el-steps :active="tracStep" finish-status="success" style="margin-bottom:24px">
+            <el-step title="提取需求" description="从需求文档识别结构化需求条目" />
+            <el-step title="建立映射" description="AI 分析每条用例覆盖哪些需求" />
+            <el-step title="查看矩阵" description="需求覆盖率报告" />
+          </el-steps>
+
+          <!-- 进度条（提取/映射进行中时显示） -->
+          <div v-if="tracExtracting || tracMapping" class="trac-progress-box">
+            <el-progress :percentage="tracPercent" :status="tracPercent >= 100 ? 'success' : ''" :stroke-width="10" />
+            <p class="trac-stage-text">{{ tracStage }}</p>
+          </div>
+
+          <div v-else-if="tracStep === 0" style="text-align:center">
+            <p style="color:#666;margin-bottom:16px">点击下方按钮，AI 将从需求文档中提取结构化需求条目</p>
+            <el-button type="primary" :loading="tracExtracting" @click="doExtractRequirements">
+              <el-icon><Document /></el-icon> 开始提取需求
+            </el-button>
+          </div>
+          <div v-else-if="tracStep === 1" style="text-align:center">
+            <p style="color:#666;margin-bottom:8px">已提取 <b>{{ tracRequirements.length }}</b> 条需求，点击下方建立用例映射</p>
+            <p style="color:#999;font-size:12px;margin-bottom:16px">AI 将分析每条用例对应哪些需求（用例较多时需要几分钟）</p>
+            <el-button type="primary" :loading="tracMapping" @click="doMapCases">
+              <el-icon><Connection /></el-icon> 建立用例-需求映射
+            </el-button>
+          </div>
+        </div>
+
+        <!-- 矩阵展示区 -->
+        <div v-else>
+          <!-- 汇总数据 -->
+          <div class="trac-summary">
+            <el-progress
+              :percentage="tracData.summary.coverage_rate"
+              :color="tracCoverageColor(tracData.summary.coverage_rate)"
+              :stroke-width="14"
+              style="margin-bottom:12px"
+            />
+            <div class="trac-stats">
+              <div class="trac-stat"><span class="num">{{ tracData.summary.total }}</span><span class="lbl">需求总数</span></div>
+              <div class="trac-stat ok"><span class="num">{{ tracData.summary.covered }}</span><span class="lbl">充分覆盖</span></div>
+              <div class="trac-stat warn"><span class="num">{{ tracData.summary.insufficient }}</span><span class="lbl">覆盖不足</span></div>
+              <div class="trac-stat bad"><span class="num">{{ tracData.summary.uncovered }}</span><span class="lbl">未覆盖</span></div>
+            </div>
+            <div style="font-size:12px;color:#999;margin-top:8px">
+              提取于 {{ formatDate(tracData.extracted_at) }}
+              · 映射于 {{ formatDate(tracData.mapped_at) }}
+              <el-button link size="small" @click="doExtractRequirements" :loading="tracExtracting" style="margin-left:8px">重新提取</el-button>
+              <el-button link size="small" @click="doMapCases" :loading="tracMapping">重新映射</el-button>
+            </div>
+
+            <!-- 重新提取/映射时的进度条（在已有矩阵基础上操作） -->
+            <div v-if="tracExtracting || tracMapping" class="trac-progress-box" style="margin-top:12px">
+              <el-progress :percentage="tracPercent" :stroke-width="8" />
+              <p class="trac-stage-text">{{ tracStage }}</p>
+            </div>
+          </div>
+
+          <!-- 未覆盖警告 -->
+          <el-alert
+            v-if="tracData.summary.uncovered > 0"
+            :title="`有 ${tracData.summary.uncovered} 条需求未被任何用例覆盖，存在漏测风险`"
+            type="warning" show-icon :closable="false"
+            style="margin-bottom:12px"
+          />
+
+          <!-- 视角切换 -->
+          <el-tabs v-model="tracTab" style="margin-bottom:8px">
+            <el-tab-pane label="需求视角" name="req" />
+            <el-tab-pane :label="`用例视角（${tracData.orphan_cases?.length || 0} 条未关联）`" name="case" />
+          </el-tabs>
+
+          <!-- 需求视角 -->
+          <el-table v-if="tracTab==='req'" :data="tracMatrixFiltered" size="small" border
+            row-class-name="trac-row" :row-style="tracRowStyle" height="520"
+            style="width:100%" :table-layout="'fixed'">
+            <el-table-column label="需求ID" prop="req_id" width="100" />
+            <el-table-column label="模块" prop="module" width="90" show-overflow-tooltip />
+            <el-table-column label="需求描述" prop="title" show-overflow-tooltip>
+              <template #default="{row}">
+                <el-tooltip :content="row.description" placement="top" :disabled="!row.description">
+                  <span>{{ row.title }}</span>
+                </el-tooltip>
+              </template>
+            </el-table-column>
+            <el-table-column label="级别" prop="priority" width="55" align="center">
+              <template #default="{row}">
+                <el-tag :type="row.priority==='P0'?'danger':row.priority==='P1'?'warning':'info'" size="small">{{ row.priority }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="用例" prop="case_count" width="50" align="center" />
+            <el-table-column label="状态" width="85" align="center">
+              <template #default="{row}">
+                <el-tag v-if="row.status==='covered'"           type="success" size="small">✅ 充分</el-tag>
+                <el-tag v-else-if="row.status==='insufficient'" type="warning" size="small">⚠️ 不足</el-tag>
+                <el-tag v-else                                  type="danger"  size="small">❌ 未覆盖</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="60" align="center">
+              <template #default="{row}">
+                <el-button
+                  v-if="row.status !== 'covered'"
+                  link size="small" type="primary"
+                  :loading="supplementingReqId === row.req_id"
+                  @click="openGapAnalysis(row)"
+                >补充</el-button>
+              </template>
+            </el-table-column>
+            <template #header>
+              <div style="display:flex;align-items:center;gap:8px">
+                <el-select v-model="tracFilter" size="small" style="width:110px" placeholder="全部状态">
+                  <el-option label="全部" value="" />
+                  <el-option label="充分覆盖" value="covered" />
+                  <el-option label="覆盖不足" value="insufficient" />
+                  <el-option label="未覆盖" value="uncovered" />
+                </el-select>
+              </div>
+            </template>
+          </el-table>
+
+          <!-- 用例视角 -->
+          <el-table v-else :data="tracOrphanCases" size="small" border height="520" style="width:100%">
+            <el-table-column label="用例ID" prop="case_id" width="100" />
+            <el-table-column label="用例名称" prop="name" show-overflow-tooltip />
+            <el-table-column label="所属模块" prop="module" width="120" show-overflow-tooltip />
+            <el-table-column label="操作" width="70" align="center">
+              <template #default="{row}">
+                <el-button link size="small" type="danger" @click="deleteOrphanCase(row)">删除</el-button>
+              </template>
+            </el-table-column>
+            <template #empty>
+              <el-empty description="所有用例均已关联需求 🎉" />
+            </template>
+          </el-table>
+        </div>
+      </div>
+    </el-drawer>
+
+    <!-- 缺口分析 & 补充用例对话框 -->
+    <el-dialog v-model="gapDialogVisible" title="覆盖缺口分析" width="600px" :close-on-click-modal="false">
+      <div v-if="gapLoading" style="text-align:center;padding:40px 0">
+        <el-icon class="is-loading" :size="32"><Loading /></el-icon>
+        <p style="color:#666;margin-top:12px">正在分析覆盖缺口...</p>
+      </div>
+      <div v-else-if="gapData">
+        <div class="gap-req-info">
+          <el-tag type="primary" size="small">{{ gapData.req_id }}</el-tag>
+          <span style="margin-left:8px;font-weight:600">{{ gapData.req_title }}</span>
+          <el-tag style="margin-left:8px" size="small">已有 {{ gapData.existing_case_count }} 条用例</el-tag>
+        </div>
+
+        <div v-if="gapData.missing_dimensions.length === 0" style="padding:20px 0;text-align:center">
+          <el-result icon="success" title="覆盖已充分" :sub-title="gapData.supplement_suggestion" />
+        </div>
+        <div v-else>
+          <p style="color:#666;margin:12px 0 8px">
+            {{ gapData.supplement_suggestion }}，缺少以下 {{ gapData.missing_dimensions.length }} 个维度：
+          </p>
+          <div class="gap-dimensions">
+            <div
+              v-for="(dim, i) in gapData.missing_dimensions" :key="i"
+              class="gap-dim-item"
+              :class="{ selected: selectedDimensions.includes(i) }"
+              @click="toggleDimension(i)"
+            >
+              <div class="gap-dim-header">
+                <el-checkbox :model-value="selectedDimensions.includes(i)" @change="toggleDimension(i)" />
+                <span class="gap-dim-name">{{ dim.dimension }}</span>
+              </div>
+              <p class="gap-dim-reason">{{ dim.reason }}</p>
+              <div class="gap-dim-examples">
+                <el-tag v-for="(ex, j) in dim.examples" :key="j" size="small" type="info" style="margin:2px">{{ ex }}</el-tag>
+              </div>
+            </div>
+          </div>
+          <p style="font-size:12px;color:#999;margin-top:8px">
+            已选 {{ selectedDimensions.length }} 个维度，AI 将针对这些维度生成补充用例
+          </p>
+        </div>
+
+        <!-- 补充进行中进度条 -->
+        <div v-if="supplementing" class="gap-progress">
+          <el-progress :percentage="supplementPercent" :stroke-width="8" />
+          <p style="font-size:13px;color:#666;margin-top:6px">{{ supplementStage }}</p>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="gapDialogVisible = false" :disabled="supplementing">取消</el-button>
+        <el-button
+          v-if="gapData && gapData.missing_dimensions.length > 0"
+          type="primary"
+          :loading="supplementing"
+          :disabled="selectedDimensions.length === 0"
+          @click="doSupplementCases"
+        >
+          生成补充用例（{{ selectedDimensions.length }} 个维度）
+        </el-button>
+      </template>
+    </el-dialog>
 
     <!-- 优化对话框 -->
     <el-dialog
@@ -1011,6 +1223,274 @@ const showCoverage = async (r) => {
   }
 }
 
+// ── 需求追踪矩阵 ──────────────────────────────────────────────────────────
+const tracDrawerVisible = ref(false)
+const tracTarget        = ref(null)
+const tracLoading       = ref(false)
+const tracData          = ref(null)
+const tracRequirements  = ref([])
+const tracExtracting    = ref(false)
+const tracMapping       = ref(false)
+const tracTab           = ref('req')
+const tracFilter        = ref('')
+const tracPercent       = ref(0)
+const tracStage         = ref('')
+const tracOrphanCases   = ref([])   // 用例视角：未关联需求的用例（可操作）
+let   tracWs            = null
+
+const tracStep = computed(() => {
+  if (!tracRequirements.value.length) return 0
+  if (!tracData.value?.ready) return 1
+  return 2
+})
+
+const tracMatrixFiltered = computed(() => {
+  if (!tracData.value?.matrix) return []
+  if (!tracFilter.value) return tracData.value.matrix
+  return tracData.value.matrix.filter(r => r.status === tracFilter.value)
+})
+
+const tracCoverageColor = (rate) =>
+  rate >= 80 ? '#67c23a' : rate >= 50 ? '#e6a23c' : '#f56c6c'
+
+const tracRowStyle = ({ row }) => {
+  if (row.status === 'uncovered')    return { background: '#fff0f0' }
+  if (row.status === 'insufficient') return { background: '#fffbe6' }
+  return {}
+}
+
+function connectTracWS() {
+  if (tracWs && tracWs.readyState < 2) return
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+  tracWs = new WebSocket(`${proto}://${location.host}/ws?client_id=trac_gen`)
+  tracWs.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data)
+      if (msg.type === 'trac_gen_progress') {
+        tracPercent.value = msg.percent ?? tracPercent.value
+        tracStage.value   = msg.stage ?? tracStage.value
+        if (msg.error) {
+          ElMessage.error(msg.stage || '操作失败')
+          tracExtracting.value = false
+          tracMapping.value    = false
+          disconnectTracWS()
+        }
+      } else if (msg.type === 'trac_extract_done') {
+        // 提取完成
+        tracRequirements.value = msg.requirements || []
+        tracPercent.value = 100
+        tracStage.value   = `已提取 ${msg.count} 条需求，请点「重新映射」建立用例关联`
+        tracExtracting.value = false
+        // 若当前已有矩阵（重新提取场景），不清空矩阵，保留视图，只提示用户
+        if (!tracData.value?.ready) {
+          tracData.value = null   // 首次提取：进入映射步骤
+        }
+        ElMessage.success(`已提取 ${msg.count} 条需求`)
+        disconnectTracWS()
+      } else if (msg.type === 'trac_map_done') {
+        // 映射完成，拉取矩阵
+        tracPercent.value = 100
+        tracStage.value   = '映射完成，正在加载矩阵...'
+        tracMapping.value = false
+        aiCaseApi.getTraceability(tracTarget.value.id).then(res => {
+          _applyTracData(res)
+          ElMessage.success('追踪矩阵已生成')
+        }).catch(() => {})
+        disconnectTracWS()
+      }
+    } catch (_) {}
+  }
+  tracWs.onerror = () => {}
+  tracWs.onclose = () => {}
+}
+
+function disconnectTracWS() {
+  if (tracWs) { tracWs.close(); tracWs = null }
+}
+
+// 统一设置矩阵数据，同步 tracOrphanCases
+const _applyTracData = (res) => {
+  tracData.value = res
+  tracOrphanCases.value = res?.orphan_cases ? [...res.orphan_cases] : []
+  if (res?.ready) {
+    tracRequirements.value = res.matrix?.map(row => ({ id: row.req_id })) || []
+  }
+}
+
+const openTraceability = async (r) => {
+  tracTarget.value = r
+  tracDrawerVisible.value = true
+  tracData.value = null
+  tracOrphanCases.value = []
+  tracRequirements.value = []
+  tracTab.value = 'req'
+  tracFilter.value = ''
+  tracPercent.value = 0
+  tracStage.value = ''
+  tracLoading.value = true
+  try {
+    const res = await aiCaseApi.getTraceability(r.id)
+    _applyTracData(res)
+    if (!res.ready && res.extracted_at) {
+      tracRequirements.value = [{ id: 'placeholder' }]
+    }
+  } catch (e) {
+    ElMessage.error('获取追踪数据失败: ' + (e.response?.data?.detail || e.message))
+  } finally {
+    tracLoading.value = false
+  }
+}
+
+const doExtractRequirements = async () => {
+  if (!tracTarget.value) return
+  tracExtracting.value = true
+  tracPercent.value = 10
+  tracStage.value = '正在启动需求提取...'
+  connectTracWS()
+  try {
+    await aiCaseApi.extractRequirements(tracTarget.value.id)
+    // 接口立即返回，结果通过 WebSocket 推送
+  } catch (e) {
+    ElMessage.error('需求提取失败: ' + (e.response?.data?.detail || e.message))
+    tracExtracting.value = false
+    disconnectTracWS()
+  }
+}
+
+const doMapCases = async () => {
+  if (!tracTarget.value) return
+  tracMapping.value = true
+  tracPercent.value = 10
+  tracStage.value = '正在启动用例映射...'
+  connectTracWS()
+  try {
+    await aiCaseApi.mapCasesToReqs(tracTarget.value.id)
+    // 接口立即返回，结果通过 WebSocket 推送
+  } catch (e) {
+    ElMessage.error('映射失败: ' + (e.response?.data?.detail || e.message))
+    tracMapping.value = false
+    disconnectTracWS()
+  }
+}
+
+// ── 缺口分析 & 补充用例 ───────────────────────────────────────────────────────
+const gapDialogVisible    = ref(false)
+const gapLoading          = ref(false)
+const gapData             = ref(null)
+const gapRow              = ref(null)
+const selectedDimensions  = ref([])
+const supplementing       = ref(false)
+const supplementPercent   = ref(0)
+const supplementStage     = ref('')
+const supplementingReqId  = ref('')
+
+const toggleDimension = (i) => {
+  const idx = selectedDimensions.value.indexOf(i)
+  if (idx === -1) selectedDimensions.value.push(i)
+  else selectedDimensions.value.splice(idx, 1)
+}
+
+const openGapAnalysis = async (row) => {
+  gapRow.value = row
+  gapData.value = null
+  selectedDimensions.value = []
+  gapDialogVisible.value = true
+  gapLoading.value = true
+  try {
+    const res = await aiCaseApi.analyzeGap(tracTarget.value.id, { req_id: row.req_id })
+    gapData.value = res
+    // 默认全选缺失维度
+    selectedDimensions.value = res.missing_dimensions.map((_, i) => i)
+  } catch (e) {
+    ElMessage.error('缺口分析失败: ' + (e.response?.data?.detail || e.message))
+    gapDialogVisible.value = false
+  } finally {
+    gapLoading.value = false
+  }
+}
+
+const doSupplementCases = async () => {
+  if (!tracTarget.value || !gapData.value) return
+  supplementing.value = true
+  supplementPercent.value = 10
+  supplementStage.value = '正在启动补充用例生成...'
+  supplementingReqId.value = gapData.value.req_id
+  connectTracWS()
+
+  // 监听补充完成事件（复用 tracWs，追加 trac_supplement_done 处理）
+  const originalOnMessage = tracWs.onmessage
+  tracWs.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data)
+      if (msg.type === 'trac_gen_progress') {
+        supplementPercent.value = msg.percent ?? supplementPercent.value
+        supplementStage.value   = msg.stage ?? supplementStage.value
+        if (msg.error) {
+          ElMessage.error(msg.stage || '补充用例生成失败')
+          supplementing.value = false
+          supplementingReqId.value = ''
+          disconnectTracWS()
+        }
+      } else if (msg.type === 'trac_supplement_done') {
+        supplementPercent.value = 100
+        supplementStage.value = `已生成 ${msg.count} 条补充用例`
+        supplementing.value = false
+        supplementingReqId.value = ''
+        gapDialogVisible.value = false
+        ElMessage.success(`成功为需求 ${msg.req_id} 生成 ${msg.count} 条补充用例`)
+        // 重新加载追踪矩阵（含新增用例），同时刷新主列表
+        aiCaseApi.getTraceability(tracTarget.value.id).then(res => {
+          _applyTracData(res)
+        }).catch(() => {})
+        // 同步刷新右侧用例预览（current）
+        aiCaseApi.getById(tracTarget.value.id).then(r => {
+          const idx = records.value.findIndex(x => x.id === r.id)
+          if (idx !== -1) records.value[idx] = r
+          if (current.value?.id === r.id) current.value = r
+        }).catch(() => {})
+        disconnectTracWS()
+      }
+    } catch (_) {}
+  }
+
+  try {
+    const missing = selectedDimensions.value.map(i => gapData.value.missing_dimensions[i])
+    await aiCaseApi.supplementCases(tracTarget.value.id, {
+      req_id: gapData.value.req_id,
+      missing_dimensions: missing,
+    })
+  } catch (e) {
+    ElMessage.error('补充用例失败: ' + (e.response?.data?.detail || e.message))
+    supplementing.value = false
+    supplementingReqId.value = ''
+    disconnectTracWS()
+  }
+}
+
+// ── 用例视角：删除未关联需求的用例 ──────────────────────────────────────────
+const deleteOrphanCase = async (row) => {
+  try {
+    await ElMessageBox.confirm(
+      `确认删除用例「${row.case_id} ${row.name}」？删除后不可恢复。`,
+      '删除用例', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
+    )
+  } catch { return }
+
+  try {
+    await aiCaseApi.deleteCase(tracTarget.value.id, row.case_id)
+    // 从用例视角列表里移除
+    tracOrphanCases.value = tracOrphanCases.value.filter(c => c.case_id !== row.case_id)
+    // 同步刷新主列表（用例数减少）
+    const r = await aiCaseApi.getById(tracTarget.value.id)
+    const idx = records.value.findIndex(x => x.id === r.id)
+    if (idx !== -1) records.value[idx] = r
+    if (current.value?.id === r.id) current.value = r
+    ElMessage.success('用例已删除')
+  } catch (e) {
+    ElMessage.error('删除失败: ' + (e.response?.data?.detail || e.message))
+  }
+}
+
 // 生成对话框
 const genDialogVisible = ref(false)
 const genFormRef = ref(null)
@@ -1585,6 +2065,32 @@ onUnmounted(disconnectGenWS)
 .suggestions li { line-height: 1.8; color: #606266; font-size: 13px; }
 .zero-warn { color: #f56c6c; font-weight: 600; }
 .coverage-empty { display: flex; justify-content: center; align-items: center; height: 200px; }
+
+/* 需求追踪矩阵 */
+.trac-panel { padding: 0 4px; }
+.trac-guide { padding: 16px 0; }
+.trac-progress-box { padding: 20px 0; text-align: center; }
+.trac-stage-text { color: #666; font-size: 13px; margin-top: 10px; }
+.trac-summary { background: #f8f9fa; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+.trac-stats { display: flex; gap: 16px; margin-top: 8px; }
+.trac-stat { text-align: center; flex: 1; }
+.trac-stat .num { display: block; font-size: 24px; font-weight: 700; color: #303133; }
+.trac-stat .lbl { font-size: 12px; color: #909399; }
+.trac-stat.ok .num  { color: #67c23a; }
+.trac-stat.warn .num { color: #e6a23c; }
+.trac-stat.bad .num  { color: #f56c6c; }
+
+/* 缺口分析对话框 */
+.gap-req-info { padding: 8px 0 12px; border-bottom: 1px solid #f0f0f0; margin-bottom: 12px; }
+.gap-dimensions { display: flex; flex-direction: column; gap: 8px; max-height: 320px; overflow-y: auto; }
+.gap-dim-item { border: 1px solid #e4e7ed; border-radius: 6px; padding: 10px 12px; cursor: pointer; transition: all .2s; }
+.gap-dim-item:hover { border-color: #409eff; }
+.gap-dim-item.selected { border-color: #409eff; background: #ecf5ff; }
+.gap-dim-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.gap-dim-name { font-weight: 600; font-size: 13px; }
+.gap-dim-reason { font-size: 12px; color: #666; margin: 4px 0; }
+.gap-dim-examples { margin-top: 4px; }
+.gap-progress { margin-top: 16px; padding: 12px; background: #f8f9fa; border-radius: 6px; }
 
 /* 生成对话框 */
 .generating-tip {

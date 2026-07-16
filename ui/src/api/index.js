@@ -112,6 +112,12 @@ export const aiCaseApi = {
   // 文档变更检测与增量更新
   diffCheck: (id, data) => api.post(`/ai-cases/${id}/diff-check`, data, { timeout: 120000 }),
   incrementalUpdate: (id, data, signal) => api.post(`/ai-cases/${id}/incremental-update`, data, { timeout: 420000, signal }),
+  // 需求追踪矩阵
+  extractRequirements: (id) => api.post(`/ai-cases/${id}/extract-requirements`, {}, { timeout: 180000 }),
+  mapCasesToReqs: (id) => api.post(`/ai-cases/${id}/map-cases-to-reqs`, {}, { timeout: 300000 }),
+  getTraceability: (id) => api.get(`/ai-cases/${id}/traceability`),
+  analyzeGap: (id, data) => api.post(`/ai-cases/${id}/analyze-gap`, data, { timeout: 120000 }),
+  supplementCases: (id, data) => api.post(`/ai-cases/${id}/supplement-cases`, data, { timeout: 30000 }),
 }
 
 export const apiTestApi = {

@@ -304,3 +304,158 @@ optimize_module_cases:
         }}
       ]
     }}
+
+# ── 需求条目提取 ─────────────────────────────────────────────────────────────
+extract_requirements:
+  system: |
+    You are a requirements analyst. Extract structured requirement items from a product requirements document.
+    Each requirement item represents ONE testable functional behavior — specific, atomic, and verifiable.
+    Output ONLY valid JSON. No markdown, no explanation.
+
+  user_template: |
+    从以下需求文档中提取结构化需求条目，每条需求代表一个可独立测试的功能点。
+
+    已识别的功能模块（供参考）：
+    {modules_hint}
+
+    需求文档：
+    ---
+    {content}
+    ---
+
+    提取规则：
+    1. 每条需求必须是「可测试的具体行为」，如「用户输入手机号和验证码后点击登录，系统验证通过后跳转首页」
+    2. 不要提取技术实现细节（如「使用 JWT 鉴权」）
+    3. 粒度适中：一个功能点一条需求，不要太粗（整个模块一条）也不要太细（一个字段一条）
+    4. 优先级判断：P0=核心主流程，P1=主要功能，P2=边界/异常/次要功能
+    5. 需求 ID 格式：模块缩写-序号，如 LOGIN-001、MEMBER-002
+
+    只输出纯JSON：
+    {{
+      "requirements": [
+        {{
+          "id": "LOGIN-001",
+          "module": "登录",
+          "title": "手机号验证码登录",
+          "description": "用户输入手机号和验证码，验证通过后登录成功并跳转首页",
+          "priority": "P0"
+        }}
+      ]
+    }}
+
+# ── 用例-需求映射 ─────────────────────────────────────────────────────────────
+map_cases_to_requirements:
+  system: |
+    You are a QA traceability analyst. Given a list of test cases and a list of requirements,
+    determine which requirements each test case covers.
+    A test case may cover 0, 1, or multiple requirements.
+    Output ONLY valid JSON. No markdown, no explanation.
+
+  user_template: |
+    请分析以下测试用例，判断每条用例覆盖了哪些需求条目。
+
+    【需求列表】
+    {requirements_text}
+
+    【测试用例列表】
+    {cases_text}
+
+    映射规则：
+    1. 只在用例的测试目标与需求描述实质相关时才建立关联
+    2. 一条用例可以覆盖多条需求（填多个 ID），也可以不覆盖任何需求（填空数组）
+    3. 通用测试用例（性能/兼容性/安全等）填空数组 []
+    4. 严格使用需求列表中的原始 ID，不得自创
+
+    只输出纯JSON：
+    {{
+      "mappings": [
+        {{
+          "case_id": "TC001",
+          "req_refs": ["LOGIN-001", "LOGIN-002"]
+        }}
+      ]
+    }}
+
+# ── 覆盖缺口分析 ─────────────────────────────────────────────────────────────
+analyze_coverage_gap:
+  system: |
+    You are a senior QA analyst. Given a requirement and its existing test cases,
+    identify which testing dimensions are missing and explain why they matter.
+    Output ONLY valid JSON. No markdown, no explanation.
+
+  user_template: |
+    分析以下需求的测试覆盖缺口，找出已有用例未覆盖的测试维度。
+
+    【需求信息】
+    ID：{req_id}
+    描述：{req_title} - {req_description}
+    优先级：{req_priority}
+
+    【已有用例】
+    {existing_cases_text}
+
+    请从以下8个维度逐一检查，找出缺失的：
+    1. 正常主流程（核心成功路径）
+    2. 边界值（最大/最小/临界值）
+    3. 异常分支（失败/错误/超时）
+    4. 权限控制（未登录/越权/角色差异）
+    5. 并发/重复（重复操作/多设备/快速点击）
+    6. 状态转换（状态流转的合法/非法路径）
+    7. 数据完整性（特殊字符/空值/超长输入）
+    8. 恢复场景（操作失败后的重试/回滚）
+
+    只输出纯JSON：
+    {{
+      "missing_dimensions": [
+        {{
+          "dimension": "维度名称（如：边界值、异常分支）",
+          "reason": "为什么需要覆盖这个维度（一句话）",
+          "examples": ["具体场景举例1", "具体场景举例2"]
+        }}
+      ],
+      "supplement_suggestion": "一句话总结建议补充的方向"
+    }}
+
+    若已有用例覆盖充分，返回 {{"missing_dimensions": [], "supplement_suggestion": "覆盖已充分"}}
+
+# ── 针对性补充用例生成 ───────────────────────────────────────────────────────
+generate_supplement_cases:
+  system: |
+    You are a senior QA engineer. Generate targeted test cases to fill specific coverage gaps.
+    Focus ONLY on the missing dimensions provided. Do NOT repeat existing test cases.
+    Output ONLY valid JSON. No markdown, no explanation.
+
+  user_template: |
+    为以下需求补充测试用例，专门覆盖缺失的测试维度。
+
+    【需求信息】
+    ID：{req_id}
+    描述：{req_title} - {req_description}
+    优先级：{req_priority}
+
+    【已有用例（不要重复）】
+    {existing_cases_text}
+
+    【需要补充的维度】
+    {missing_dimensions_text}
+
+    参考需求上下文：
+    ---
+    {doc_context}
+    ---
+
+    针对每个缺失维度生成1-3条具体用例，只输出纯JSON：
+    {{
+      "cases": [
+        {{
+          "name": "需求ID-维度-具体场景（如：REQ-002-边界值-第2次密码错误提示剩余次数）",
+          "priority": "P1",
+          "type": "功能测试",
+          "test_method": "边界值分析",
+          "preconditions": "前置条件",
+          "steps": ["1. 具体操作（含测试数据）"],
+          "expected": "预期结果（可量化验证）",
+          "req_refs": ["{req_id}"]
+        }}
+      ]
+    }}
