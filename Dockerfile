@@ -9,14 +9,15 @@ RUN npm run build
 
 # ── Stage 2：生产镜像 ────────────────────────────────────────────────────
 # 使用官方 Playwright Python 镜像，已内置 Chromium 及所有系统依赖
+# 不需要再次执行 playwright install，镜像内置版本与 playwright==1.39.0 匹配
 FROM mcr.microsoft.com/playwright/python:v1.39.0-jammy
 
 WORKDIR /app
 
-# 安装 Python 依赖
+# 安装 Python 依赖（跳过浏览器下载，镜像已内置）
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt \
-    && playwright install chromium --with-deps
+RUN pip install --no-cache-dir -r requirements.txt
 
 # 从 Stage 1 拷贝前端构建产物
 COPY --from=frontend-builder /app/ui/dist ./ui/dist

@@ -4,15 +4,17 @@ services:
   db:
     image: pgvector/pgvector:pg15
     container_name: ai-test-db
+    env_file:
+      - .env.docker
     environment:
-      POSTGRES_DB: uitest
-      POSTGRES_USER: uitest
-      POSTGRES_PASSWORD: uitest123456
+      POSTGRES_DB: ${POSTGRES_DB:-uitest}
+      POSTGRES_USER: ${POSTGRES_USER:-uitest}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-uitest123456}
     volumes:
       - pg_data:/var/lib/postgresql/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U uitest -d uitest"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-uitest} -d ${POSTGRES_DB:-uitest}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -37,6 +39,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 40s
 
 volumes:
   pg_data:

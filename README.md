@@ -21,12 +21,18 @@
 服务器已安装 Docker 和 Docker Compose 即可：
 
 ```bash
-git clone https://github.com/ywq2019/ai_test_agent.git && cd ai_test_agent && docker compose up -d
+git clone https://github.com/ywq2019/ai_test_agent.git
+cd ai_test_agent
+
+# 生产部署前修改 .env.docker 中的两处默认值：
+# 1. SECRET_KEY=<随机字符串>  生成命令：python -c "import secrets; print(secrets.token_hex(32))"
+# 2. POSTGRES_PASSWORD=<强密码>  同时改同文件 DATABASE_URL 里的密码
+vim .env.docker
+
+docker compose up -d
 ```
 
-启动后访问 `http://服务器IP:4000`，进入**大模型配置**页填写 API Key。
-
-> 也可以在启动前编辑 `.env.docker`，预填 `AI_API_KEY` / `AI_API_URL` / `AI_MODEL`，首次启动即生效。
+启动后访问 `http://服务器IP:4000`，进入**大模型配置**页填写 API Key（无需重启）。
 
 | 服务    | 说明                                           |
 | ----- | -------------------------------------------- |
@@ -113,7 +119,7 @@ New-NetFirewallRule -DisplayName "AI测试平台" -Direction Inbound -Protocol T
 | --- | --- | --- |
 | `SECRET_KEY` | `.env` 或 `.env.docker` | JWT 签名密钥，默认值存在伪造 Token 风险；生成命令：`python -c "import secrets; print(secrets.token_hex(32))"` |
 | 管理员密码 | 登录后「用户管理」页修改 | 默认 `admin123`，部署后立即改 |
-| 数据库密码 | `.env.docker` + `docker-compose.yml` 同步修改 | 默认 `uitest123456`，修改 `POSTGRES_PASSWORD` 和 `DATABASE_URL` 里的密码需保持一致 |
+| 数据库密码 | **只改 `.env.docker`** 一处即可 | `POSTGRES_PASSWORD` 和 `DATABASE_URL` 里的密码保持一致，`docker-compose.yml` 会自动读取 |
 
 
 ***
