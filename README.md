@@ -107,28 +107,14 @@ New-NetFirewallRule -DisplayName "AI测试平台" -Direction Inbound -Protocol T
 
 ### 生产环境安全配置（重要）
 
-正式部署时必须修改以下三项默认值，否则启动日志会输出安全警告：
+正式部署时必须修改以下三项默认值，启动时若检测到默认值会打印 WARNING：
 
-**① JWT 密钥**（`.env` 文件）
-```bash
-# 生成随机密钥
-python -c "import secrets; print(secrets.token_hex(32))"
-# 写入 .env
-SECRET_KEY=<上面生成的随机字符串>
-```
+| 配置项 | 修改位置 | 说明 |
+| --- | --- | --- |
+| `SECRET_KEY` | `.env` 或 `.env.docker` | JWT 签名密钥，默认值存在伪造 Token 风险；生成命令：`python -c "import secrets; print(secrets.token_hex(32))"` |
+| 管理员密码 | 登录后「用户管理」页修改 | 默认 `admin123`，部署后立即改 |
+| 数据库密码 | `.env.docker` + `docker-compose.yml` 同步修改 | 默认 `uitest123456`，修改 `POSTGRES_PASSWORD` 和 `DATABASE_URL` 里的密码需保持一致 |
 
-**② 管理员密码**
-
-首次登录后，在「用户管理」页立即修改默认密码 `admin123`。
-
-**③ 数据库密码**（Docker 部署，`.env.docker` + `docker-compose.yml` 同步修改）
-```yaml
-# docker-compose.yml
-POSTGRES_PASSWORD: your_strong_password
-
-# .env.docker
-DATABASE_URL=postgresql+asyncpg://uitest:your_strong_password@db:5432/uitest
-```
 
 ***
 
