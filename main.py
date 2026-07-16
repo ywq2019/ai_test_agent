@@ -161,11 +161,19 @@ _AUTH_WHITELIST = (
     "/reports",
 )
 
+# 下载类接口：浏览器直接跳转无法带 token，单独用路径关键词放行
+_DOWNLOAD_PATTERNS = (
+    "/download",    # /api/v1/ai-cases/{id}/download
+)
+
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
     # 白名单路径直接放行
     if any(path.startswith(w) for w in _AUTH_WHITELIST):
+        return await call_next(request)
+    # 下载接口直接放行（浏览器跳转无法携带 Authorization header）
+    if any(p in path for p in _DOWNLOAD_PATTERNS):
         return await call_next(request)
     # 非 API 路径（前端页面）放行
     if not path.startswith("/api/"):
