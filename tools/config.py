@@ -35,6 +35,17 @@ class Settings(BaseSettings):
     SCREENSHOT_DIR: str = "./screenshots"
     LOG_DIR: str = "./logs"
     UPLOAD_DIR: str = "./uploads"
+    AI_CASES_DIR: str = ""          # 留空时由 ai_case_generator 按规则推导，Docker 下设为 /data/ai_cases
+    LOG_RETENTION_DAYS: int = 7     # 日志保留天数
+    LLM_CONCURRENCY: int = 6        # 全局 LLM 并发上限
+
+    # ── 告警推送 ───────────────────────────────────────────────────────────────
+    # 支持钉钉/企业微信/飞书 Webhook；留空则关闭告警
+    ALERT_WEBHOOK_URL: str = ""
+    # "dingtalk" | "wecom" | "feishu"
+    ALERT_WEBHOOK_TYPE: str = "wecom"
+    # 同一条错误在此秒数内只推送一次（防刷屏），默认 5 分钟
+    ALERT_RATE_LIMIT_SECONDS: int = 300
 
     # ── 鉴权 ──────────────────────────────────────────────────────────────────
     SECRET_KEY: str = "ai-test-agent-secret-key-change-in-production-2024"

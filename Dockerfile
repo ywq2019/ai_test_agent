@@ -14,6 +14,10 @@ FROM mcr.microsoft.com/playwright/python:v1.39.0-jammy
 
 WORKDIR /app
 
+# 安装 curl（供 docker-compose healthcheck 使用）
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
 # 安装 Python 依赖（跳过浏览器下载，镜像已内置）
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 COPY requirements.txt .
@@ -33,8 +37,10 @@ COPY main.py      ./
 RUN mkdir -p /data/reports /data/screenshots /data/logs /data/uploads/documents /data/ai_cases
 
 # 非 root 用户运行（安全最佳实践）
+# 同时将官方镜像内置的 Playwright 浏览器目录授权给 appuser，避免 Permission denied
 RUN useradd -m -u 1000 appuser \
-    && chown -R appuser:appuser /app /data
+    && chown -R appuser:appuser /app /data \
+    && if [ -d /ms-playwright ]; then chown -R appuser:appuser /ms-playwright; fi
 USER appuser
 
 EXPOSE 4000

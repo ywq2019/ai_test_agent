@@ -7,6 +7,28 @@ from loguru import logger
 from pathlib import Path
 from tools.config import settings
 
+# ── 告警推送 sink ─────────────────────────────────────────────────────────────
+# loguru 每条 ERROR / CRITICAL 日志自动触发 fire_alert，无需在业务代码手动调用
+def _alert_sink(message):
+    """loguru sink：将 ERROR/CRITICAL 消息推送到告警通道。"""
+    try:
+        from tools.alerter import fire_alert
+        record = message.record
+        level = record["level"].name
+        name = record["name"]
+        func = record["function"]
+        lineno = record["line"]
+        text = record["message"]
+        title = f"⚠️ AI测试平台 [{level}]"
+        body = (
+            f"> **{level}** `{name}:{func}:{lineno}`\n\n"
+            f"```\n{text}\n```"
+        )
+        # fingerprint 用原始错误文本做去重，行号不同的同一错误不会反复推送
+        fire_alert(body, title=title, fingerprint=text)
+    except Exception:
+        pass  # sink 内绝不抛异常
+
 log_dir = Path(settings.LOG_DIR)
 log_dir.mkdir(exist_ok=True)
 
@@ -28,6 +50,8 @@ logger.add(
     encoding="utf-8",
     format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}"
 )
+# 告警 sink：ERROR 及以上级别自动推送到 Webhook（未配置 ALERT_WEBHOOK_URL 时静默）
+logger.add(_alert_sink, level="ERROR", format="{message}")
 
 
 def clean_logs(retention_days: int = LOG_RETENTION_DAYS) -> dict:

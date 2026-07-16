@@ -54,12 +54,16 @@ async def lifespan(app: FastAPI):
     logger.info("Starting Automated UI Testing Agent...")
 
     # ── 生产安全检查 ──────────────────────────────────────────────────────
-    _DEFAULT_SECRET = "ai-test-agent-secret-key-change-in-production-2024"
+    # 列出所有已知的默认/占位值，任意一个匹配都触发警告
+    _DEFAULT_SECRETS = {
+        "ai-test-agent-secret-key-change-in-production-2024",
+        "change-me-in-production-use-python-secrets-token-hex-32",
+    }
     _DEFAULT_PWD    = "admin123"
     _DEFAULT_DB_PWD = "uitest123456"
     _WARN = "\n" + "!" * 70
 
-    if settings.SECRET_KEY == _DEFAULT_SECRET:
+    if settings.SECRET_KEY in _DEFAULT_SECRETS:
         logger.warning(
             _WARN +
             "\n!  安全警告：SECRET_KEY 使用默认值，JWT Token 存在伪造风险！" +
@@ -165,6 +169,13 @@ app = FastAPI(
 
 # ── 全局异常处理：屏蔽堆栈信息，统一返回格式 ─────────────────────────────────
 from fastapi import HTTPException as FastAPIHTTPException
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from api.limiter import limiter
+
+# 限流器：以客户端 IP 为维度
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 @app.exception_handler(FastAPIHTTPException)
 async def http_exception_handler(request: Request, exc: FastAPIHTTPException):
@@ -182,6 +193,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 反向代理支持：让 request.client.host 反映真实客户端 IP
+# trusted_hosts 限定只信任本机和私有网段的代理，防止客户端伪造 X-Forwarded-For
+from starlette.middleware.trustedhost import TrustedHostMiddleware  # noqa: F401 (已内置)
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
 
 # ── JWT 鉴权中间件 ────────────────────────────────────────────────────────────
 # 白名单：不需要 token 的路径前缀
@@ -233,6 +250,11 @@ if os.path.exists(_dist_dir):
 _screenshots_dir = os.path.abspath(settings.SCREENSHOT_DIR)
 os.makedirs(_screenshots_dir, exist_ok=True)
 app.mount("/screenshots", StaticFiles(directory=_screenshots_dir), name="screenshots")
+
+# 挂载报告目录（HTML 报告文件直接通过浏览器访问）
+_reports_dir = os.path.abspath(settings.REPORT_OUTPUT_DIR)
+os.makedirs(_reports_dir, exist_ok=True)
+app.mount("/reports", StaticFiles(directory=_reports_dir), name="reports")
 
 app.include_router(api_router, prefix="/api/v1")   # 聚合所有子路由
 app.websocket("/ws")(websocket_endpoint)

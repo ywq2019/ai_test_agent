@@ -2,12 +2,13 @@
 AI 文档驱动用例生成路由
   - /ai-cases/*  含 CRUD、diff-check、incremental-update、optimize、coverage
 """
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import List, Dict, Any, Optional
 from pathlib import Path
+from api.limiter import limiter
 from loguru import logger
 
 from tools.database import get_db, AICaseFile
@@ -153,23 +154,25 @@ async def _do_generate_bg(
 # ── 生成 / 列表 / 详情 / 下载 ─────────────────────────────────────────────────
 
 @router.post("/ai-cases/generate", response_model=AICaseFileResponse)
+@limiter.limit("5/minute")
 async def generate_ai_cases(
-    request: AICaseGenerateRequest,
+    request: Request,
+    body: AICaseGenerateRequest,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
-    if not request.document_path and not request.content:
+    if not body.document_path and not body.content:
         raise HTTPException(status_code=400, detail="请提供文档路径或需求文本内容")
     placeholder = AICaseFile(
-        task_name=request.task_name, case_count=0, cases_data=None, gen_status="generating",
+        task_name=body.task_name, case_count=0, cases_data=None, gen_status="generating",
     )
     db.add(placeholder)
     await db.commit()
     await db.refresh(placeholder)
     background_tasks.add_task(
         _do_generate_bg,
-        record_id=placeholder.id, task_name=request.task_name,
-        document_path=request.document_path, content=request.content, formats=request.formats,
+        record_id=placeholder.id, task_name=body.task_name,
+        document_path=body.document_path, content=body.content, formats=body.formats,
     )
     return _ai_case_response(placeholder)
 
@@ -319,7 +322,8 @@ async def get_ai_case_coverage(record_id: int, db: AsyncSession = Depends(get_db
 # ── 优化 ──────────────────────────────────────────────────────────────────────
 
 @router.post("/ai-cases/{record_id}/optimize", response_model=AICaseFileResponse)
-async def optimize_ai_cases(record_id: int, db: AsyncSession = Depends(get_db)):
+@limiter.limit("3/minute")
+async def optimize_ai_cases(request: Request, record_id: int, db: AsyncSession = Depends(get_db)):
     from skills.ai_case_generator import ai_case_generator
     result = await db.execute(select(AICaseFile).where(AICaseFile.id == record_id))
     record = result.scalar_one_or_none()
@@ -733,7 +737,9 @@ async def _do_extract_requirements_bg(record_id: int) -> None:
 
 
 @router.post("/ai-cases/{record_id}/extract-requirements")
+@limiter.limit("3/minute")
 async def extract_requirements(
+    request: Request,
     record_id: int,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
@@ -838,7 +844,9 @@ async def _do_map_cases_bg(record_id: int) -> None:
 
 
 @router.post("/ai-cases/{record_id}/map-cases-to-reqs")
+@limiter.limit("3/minute")
 async def map_cases_to_requirements(
+    request: Request,
     record_id: int,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
@@ -1180,7 +1188,9 @@ async def _do_supplement_cases_bg(record_id: int, req_id: str, missing_dimension
 
 
 @router.post("/ai-cases/{record_id}/supplement-cases")
+@limiter.limit("5/minute")
 async def supplement_cases(
+    request: Request,
     record_id: int,
     data: dict,
     background_tasks: BackgroundTasks,

@@ -12,6 +12,13 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional
 from loguru import logger
 
+# ── 全局 LLM 并发限制 ────────────────────────────────────────────────────────
+# 限制整个系统同时进行的 LLM 调用总数，防止多用户并发时超出代理 QPS 导致 502 风暴
+# 值 = 代理能稳定承受的最大并发数，可通过环境变量 LLM_CONCURRENCY 调整
+import os as _os
+_LLM_CONCURRENCY = int(_os.environ.get("LLM_CONCURRENCY", "6"))
+_GLOBAL_LLM_SEM  = asyncio.Semaphore(_LLM_CONCURRENCY)
+
 
 def _uid() -> str:
     return uuid.uuid4().hex[:16]
@@ -175,14 +182,15 @@ class AICaseGenerator:
     _SEGMENT_OVERLAP =  2000
 
     def __init__(self):
-        # 优先读环境变量 AI_CASES_DIR，其次 REPORT_OUTPUT_DIR 同级，兜底用相对路径
-        # Docker 部署时 Volume 挂载 /data，设置 AI_CASES_DIR=/data/ai_cases 即可持久化
+        # 优先读 settings.AI_CASES_DIR，再兜底用相对路径
+        # Docker 部署时 Volume 挂载 /data，在 .env.docker 设置 AI_CASES_DIR=/data/ai_cases 即可持久化
         import os as _os
+        from tools.config import settings as _settings
         _default = _os.path.join(
             _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
             "ai_cases"
         )
-        self.output_dir = Path(_os.environ.get("AI_CASES_DIR", _default))
+        self.output_dir = Path(_settings.AI_CASES_DIR or _os.environ.get("AI_CASES_DIR", _default))
         self.output_dir.mkdir(parents=True, exist_ok=True)
         # 进程内分段索引缓存（doc_hash → segments 列表），避免重复切分
         self._segment_cache: Dict[str, list] = {}
@@ -554,7 +562,9 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
     async def _run_claude_subprocess(
         self, system_prompt: str, prompt: str, timeout_secs: int = 90
     ) -> str:
-        """调用 LLM API，自动根据模型类型选择 Anthropic 或 OpenAI 兼容格式。"""
+        """调用 LLM API，自动根据模型类型选择 Anthropic 或 OpenAI 兼容格式。
+        受全局 Semaphore 保护，防止多用户并发超出代理 QPS。
+        """
         import httpx
         from tools.config import settings
 
@@ -599,36 +609,38 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
 
         logger.info(f"Calling LLM API: {url}, model={model}, is_anthropic={is_anthropic}")
 
-        # 临时错误（502/503/504/超时）自动重试，最多3次，间隔递增
-        _RETRYABLE = {502, 503, 504}
-        _MAX_RETRY  = 3
-        last_exc: Exception = RuntimeError("未知错误")
-        for _attempt in range(1, _MAX_RETRY + 1):
-            try:
-                async with httpx.AsyncClient(verify=False, timeout=timeout_secs) as client:
-                    resp = await client.post(url, json=payload, headers=headers)
-                    if resp.status_code in _RETRYABLE:
-                        raise httpx.HTTPStatusError(
-                            f"Server error '{resp.status_code}' (retryable)",
-                            request=resp.request, response=resp,
-                        )
-                    resp.raise_for_status()
-                    data = resp.json()
-                break  # 成功则跳出重试循环
-            except (httpx.TimeoutException, httpx.HTTPStatusError) as e:
-                last_exc = e
-                is_retryable = isinstance(e, httpx.TimeoutException) or (
-                    isinstance(e, httpx.HTTPStatusError)
-                    and e.response.status_code in _RETRYABLE
-                )
-                if is_retryable and _attempt < _MAX_RETRY:
-                    wait = _attempt * 5  # 5s, 10s, 15s
-                    logger.warning(f"LLM 请求失败（第{_attempt}次）: {e}，{wait}s 后重试...")
-                    await asyncio.sleep(wait)
-                    continue
-                raise  # 不可重试或已用完重试次数，直接抛出
-        else:
-            raise last_exc  # 全部重试失败
+        # 全局并发保护：等待 Semaphore 令牌，超过上限时排队等待
+        async with _GLOBAL_LLM_SEM:
+            # 临时错误（502/503/504/超时）自动重试，最多3次，间隔递增
+            _RETRYABLE = {502, 503, 504}
+            _MAX_RETRY  = 3
+            last_exc: Exception = RuntimeError("未知错误")
+            for _attempt in range(1, _MAX_RETRY + 1):
+                try:
+                    async with httpx.AsyncClient(verify=False, timeout=timeout_secs) as client:
+                        resp = await client.post(url, json=payload, headers=headers)
+                        if resp.status_code in _RETRYABLE:
+                            raise httpx.HTTPStatusError(
+                                f"Server error '{resp.status_code}' (retryable)",
+                                request=resp.request, response=resp,
+                            )
+                        resp.raise_for_status()
+                        data = resp.json()
+                    break  # 成功则跳出重试循环
+                except (httpx.TimeoutException, httpx.HTTPStatusError) as e:
+                    last_exc = e
+                    is_retryable = isinstance(e, httpx.TimeoutException) or (
+                        isinstance(e, httpx.HTTPStatusError)
+                        and e.response.status_code in _RETRYABLE
+                    )
+                    if is_retryable and _attempt < _MAX_RETRY:
+                        wait = _attempt * 5  # 5s, 10s, 15s
+                        logger.warning(f"LLM 请求失败（第{_attempt}次）: {e}，{wait}s 后重试...")
+                        await asyncio.sleep(wait)
+                        continue
+                    raise  # 不可重试或已用完重试次数，直接抛出
+            else:
+                raise last_exc  # 全部重试失败
 
         if is_anthropic:
             # 兼容多种代理响应格式
