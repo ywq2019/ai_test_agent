@@ -105,6 +105,31 @@ New-NetFirewallRule -DisplayName "AI测试平台" -Direction Inbound -Protocol T
 
 > 登录后点击顶栏右上角「用户管理」可新建账号，普通用户只能登录和修改自己的密码。
 
+### 生产环境安全配置（重要）
+
+正式部署时必须修改以下三项默认值，否则启动日志会输出安全警告：
+
+**① JWT 密钥**（`.env` 文件）
+```bash
+# 生成随机密钥
+python -c "import secrets; print(secrets.token_hex(32))"
+# 写入 .env
+SECRET_KEY=<上面生成的随机字符串>
+```
+
+**② 管理员密码**
+
+首次登录后，在「用户管理」页立即修改默认密码 `admin123`。
+
+**③ 数据库密码**（Docker 部署，`.env.docker` + `docker-compose.yml` 同步修改）
+```yaml
+# docker-compose.yml
+POSTGRES_PASSWORD: your_strong_password
+
+# .env.docker
+DATABASE_URL=postgresql+asyncpg://uitest:your_strong_password@db:5432/uitest
+```
+
 ***
 
 ## 核心功能

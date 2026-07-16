@@ -53,6 +53,39 @@ async def _log_cleanup_loop():
 async def lifespan(app: FastAPI):
     logger.info("Starting Automated UI Testing Agent...")
 
+    # ── 生产安全检查 ──────────────────────────────────────────────────────
+    _DEFAULT_SECRET = "ai-test-agent-secret-key-change-in-production-2024"
+    _DEFAULT_PWD    = "admin123"
+    _DEFAULT_DB_PWD = "uitest123456"
+    _WARN = "\n" + "!" * 70
+
+    if settings.SECRET_KEY == _DEFAULT_SECRET:
+        logger.warning(
+            _WARN +
+            "\n!  安全警告：SECRET_KEY 使用默认值，JWT Token 存在伪造风险！" +
+            "\n!  请在 .env 文件中设置强随机密钥：" +
+            "\n!  SECRET_KEY=<随机64位字符串>" +
+            "\n!  生成命令：python -c \"import secrets; print(secrets.token_hex(32))\"" +
+            _WARN
+        )
+
+    if settings.DEFAULT_PASSWORD == _DEFAULT_PWD:
+        logger.warning(
+            _WARN +
+            "\n!  安全警告：默认管理员密码为 admin123，建议部署后立即在用户管理页修改！" +
+            _WARN
+        )
+
+    db_url = settings.DATABASE_URL or ""
+    if _DEFAULT_DB_PWD in db_url:
+        logger.warning(
+            _WARN +
+            "\n!  安全警告：数据库密码使用默认值 uitest123456！" +
+            "\n!  请在 .env.docker 中修改 DATABASE_URL 里的密码，" +
+            "\n!  并同步修改 docker-compose.yml 中 POSTGRES_PASSWORD。" +
+            _WARN
+        )
+
     # 初始化数据库
     await init_database()
     logger.info("Database initialized")

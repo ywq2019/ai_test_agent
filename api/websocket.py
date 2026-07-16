@@ -27,7 +27,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 message_data = json.loads(data)
                 message_type = message_data.get("type")
 
-                if message_type == "command":
+                if message_type == "pong":
+                    # 客户端回应心跳，更新存活时间
+                    ws_manager.record_pong(websocket)
+
+                elif message_type == "command":
                     command = message_data.get("message", "")
                     result = await uitest_agent.handle_command(command)
                     await ws_manager.send_personal_message(result, websocket)

@@ -1266,6 +1266,8 @@ function connectTracWS() {
   tracWs.onmessage = (e) => {
     try {
       const msg = JSON.parse(e.data)
+      // 心跳 ping → 回 pong
+      if (msg.type === 'ping') { tracWs?.readyState === 1 && tracWs.send(JSON.stringify({ type: 'pong' })); return }
       if (msg.type === 'trac_gen_progress') {
         tracPercent.value = msg.percent ?? tracPercent.value
         tracStage.value   = msg.stage ?? tracStage.value
@@ -1350,6 +1352,8 @@ const doExtractRequirements = async () => {
   try {
     await aiCaseApi.extractRequirements(tracTarget.value.id)
     // 接口立即返回，结果通过 WebSocket 推送
+    // 兜底：若 WebSocket 断线，120s 后轮询数据库检查结果
+    _startTracPoll('extract')
   } catch (e) {
     ElMessage.error('需求提取失败: ' + (e.response?.data?.detail || e.message))
     tracExtracting.value = false
@@ -1366,11 +1370,68 @@ const doMapCases = async () => {
   try {
     await aiCaseApi.mapCasesToReqs(tracTarget.value.id)
     // 接口立即返回，结果通过 WebSocket 推送
+    // 兜底：若 WebSocket 断线，120s 后轮询数据库检查结果
+    _startTracPoll('map')
   } catch (e) {
     ElMessage.error('映射失败: ' + (e.response?.data?.detail || e.message))
     tracMapping.value = false
     disconnectTracWS()
   }
+}
+
+// ── 追踪任务轮询兜底 ─────────────────────────────────────────────────────────
+// WebSocket 断线时，定时拉接口检查任务是否已完成
+let _tracPollTimer = null
+
+function _startTracPoll(mode) {
+  if (_tracPollTimer) return
+  const FIRST_DELAY = 30000   // 首次轮询延迟30秒（给任务时间）
+  const INTERVAL    = 10000   // 之后每10秒查一次
+  let attempts = 0
+  const MAX_ATTEMPTS = 24     // 最多查4分钟
+
+  const check = async () => {
+    if (!tracTarget.value) { _stopTracPoll(); return }
+    attempts++
+    if (attempts > MAX_ATTEMPTS) {
+      _stopTracPoll()
+      tracExtracting.value = false
+      tracMapping.value    = false
+      ElMessage.warning('任务超时，请手动刷新')
+      return
+    }
+    try {
+      const res = await aiCaseApi.getTraceability(tracTarget.value.id)
+      if (mode === 'extract') {
+        // 有 requirements_data 说明提取完成
+        if (res.extracted_at) {
+          _stopTracPoll()
+          tracExtracting.value = false
+          tracRequirements.value = res.matrix?.map(r => ({ id: r.req_id })) || [{ id: 'placeholder' }]
+          if (!tracData.value?.ready) tracData.value = null
+          ElMessage.success('需求提取完成（轮询兜底），请建立映射')
+        }
+      } else if (mode === 'map') {
+        // ready=true 说明映射完成
+        if (res.ready) {
+          _stopTracPoll()
+          tracMapping.value = false
+          _applyTracData(res)
+          ElMessage.success('映射完成（轮询兜底），追踪矩阵已生成')
+        }
+      }
+    } catch (_) {}
+  }
+
+  // 首次延迟后再开始
+  setTimeout(() => {
+    check()
+    _tracPollTimer = setInterval(check, INTERVAL)
+  }, FIRST_DELAY)
+}
+
+function _stopTracPoll() {
+  if (_tracPollTimer) { clearInterval(_tracPollTimer); _tracPollTimer = null }
 }
 
 // ── 缺口分析 & 补充用例 ───────────────────────────────────────────────────────
@@ -1543,6 +1604,8 @@ function connectGenWS() {
   ws.onmessage = (e) => {
     try {
       const msg = JSON.parse(e.data)
+      // 心跳 ping → 回 pong
+      if (msg.type === 'ping') { ws?.readyState === 1 && ws.send(JSON.stringify({ type: 'pong' })); return }
       if (msg.type === 'ai_gen_progress') {
         genPercent.value = msg.percent ?? genPercent.value
         genStage.value = msg.stage ?? genStage.value
@@ -1590,12 +1653,54 @@ const stats = computed(() => {
 })
 
 // ---------- 数据加载 ----------
+// ── 生成状态轮询兜底 ──────────────────────────────────────────────────────
+// 当 WebSocket 断线时，通过轮询保证 generating 状态的记录最终能更新
+let _genPollTimer = null
+
+function _startGenPolling() {
+  if (_genPollTimer) return  // 已在轮询
+  _genPollTimer = setInterval(async () => {
+    const hasGenerating = records.value.some(r => r.gen_status === 'generating')
+    if (!hasGenerating) {
+      clearInterval(_genPollTimer)
+      _genPollTimer = null
+      return
+    }
+    try {
+      const fresh = await aiCaseApi.list()
+      if (!fresh) return
+      // 只更新状态发生变化的记录，避免整表刷新
+      fresh.forEach(r => {
+        const idx = records.value.findIndex(x => x.id === r.id)
+        if (idx !== -1 && records.value[idx].gen_status !== r.gen_status) {
+          records.value[idx] = r
+          if (current.value?.id === r.id) current.value = r
+          if (r.gen_status === 'done') {
+            ElMessage.success(`「${r.task_name}」生成完成，共 ${r.case_count} 条用例`)
+          } else if (r.gen_status === 'failed') {
+            ElMessage.error(`「${r.task_name}」生成失败`)
+          }
+        }
+      })
+      // 没有 generating 记录了，停止轮询
+      if (!records.value.some(r => r.gen_status === 'generating')) {
+        clearInterval(_genPollTimer)
+        _genPollTimer = null
+      }
+    } catch (_) {}
+  }, 5000)  // 每5秒轮询一次
+}
+
 const fetchRecords = async () => {
   try {
     const data = await aiCaseApi.list()
     records.value = data || []
     if (records.value.length && !current.value) {
       current.value = records.value[0]
+    }
+    // 有正在生成的记录，启动轮询兜底
+    if (records.value.some(r => r.gen_status === 'generating')) {
+      _startGenPolling()
     }
   } catch (e) {
     ElMessage.error('加载失败: ' + (e.message || e))
@@ -1931,7 +2036,12 @@ const formatDate = (str) => {
 }
 
 onMounted(fetchRecords)
-onUnmounted(disconnectGenWS)
+onUnmounted(() => {
+  disconnectGenWS()
+  disconnectTracWS()
+  if (_genPollTimer)  { clearInterval(_genPollTimer);  _genPollTimer  = null }
+  if (_tracPollTimer) { clearInterval(_tracPollTimer); _tracPollTimer = null }
+})
 </script>
 
 <style scoped>
