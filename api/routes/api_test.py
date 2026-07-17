@@ -715,6 +715,82 @@ async def _ai_analyze_report(report: dict) -> str:
     return data["content"][0]["text"] if is_anthropic else data["choices"][0]["message"]["content"]
 
 
+@router.get("/api-test/reports/{report_id}/pdf")
+async def export_api_report_pdf(report_id: int, db: AsyncSession = Depends(get_db)):
+    """将接口测试报告导出为 PDF。"""
+    from fastapi.responses import Response
+    from urllib.parse import quote
+    from tools.pdf_exporter import html_to_pdf
+
+    r = (await db.execute(select(ApiTestReport).where(ApiTestReport.id == report_id))).scalar_one_or_none()
+    if not r:
+        raise HTTPException(status_code=404, detail="报告不存在")
+
+    rdict    = _report_dict(r)
+    details  = rdict.get("details") or []
+    total    = rdict.get("total", 0)
+    passed   = rdict.get("passed", 0)
+    failed   = rdict.get("failed", 0)
+    pass_rate = round(passed / total * 100, 1) if total else 0
+    title    = f"{r.project_name or '接口测试'} 报告"
+    created  = r.created_at.strftime("%Y-%m-%d %H:%M:%S") if r.created_at else ""
+    analysis = rdict.get("analysis", "")
+
+    rows = ""
+    for d in details:
+        st = d.get("status", "")
+        cls = {"passed": "bg-success", "failed": "bg-danger"}.get(st, "bg-warning")
+        lbl = {"passed": "通过", "failed": "失败"}.get(st, st)
+        err = str(d.get("error") or d.get("error_message") or "-")[:200]
+        rows += (
+            f"<tr><td>{d.get('case_name','-')}</td>"
+            f"<td>{d.get('method','')}</td><td>{d.get('url','')[:80]}</td>"
+            f"<td>{d.get('status_code','')}</td>"
+            f"<td><span class='badge {cls}'>{lbl}</span></td>"
+            f"<td>{d.get('duration_ms',0)}ms</td>"
+            f"<td style='max-width:200px;word-break:break-all'>{err}</td></tr>"
+        )
+    analysis_block = f"<h3>AI 分析</h3><pre style='white-space:pre-wrap;background:#f9f9f9;padding:12px;border-radius:4px'>{analysis}</pre>" if analysis else ""
+
+    html_str = f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>{title}</title>
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,sans-serif;padding:24px;color:#333;font-size:13px}}
+h2{{margin-bottom:4px}}p.meta{{color:#888;margin-bottom:16px}}
+.stats{{display:flex;gap:16px;margin-bottom:20px}}
+.stat{{background:#f5f5f5;padding:10px 20px;border-radius:6px;text-align:center}}
+.stat .n{{font-size:24px;font-weight:700}}.stat .l{{font-size:12px;color:#888}}
+.green{{color:#52c41a}}.red{{color:#ff4d4f}}.blue{{color:#1890ff}}
+table{{width:100%;border-collapse:collapse;margin-bottom:20px}}
+th,td{{padding:7px 10px;border:1px solid #e8e8e8;font-size:12px}}th{{background:#fafafa;font-weight:600}}
+.badge{{padding:2px 8px;border-radius:4px;font-size:11px}}
+.bg-success{{background:#d9f7be;color:#389e0d}}.bg-danger{{background:#fff1f0;color:#cf1322}}
+.bg-warning{{background:#fffbe6;color:#ad6800}}
+</style></head><body>
+<h2>{title}</h2>
+<p class="meta">生成时间：{created}</p>
+<div class="stats">
+  <div class="stat"><div class="n blue">{total}</div><div class="l">总用例</div></div>
+  <div class="stat"><div class="n green">{passed}</div><div class="l">通过</div></div>
+  <div class="stat"><div class="n red">{failed}</div><div class="l">失败</div></div>
+  <div class="stat"><div class="n {'green' if pass_rate>=80 else 'red'}">{pass_rate}%</div><div class="l">通过率</div></div>
+</div>
+<table><thead><tr><th>用例名称</th><th>方法</th><th>URL</th><th>状态码</th><th>结果</th><th>耗时</th><th>错误信息</th></tr></thead>
+<tbody>{rows}</tbody></table>
+{analysis_block}
+</body></html>"""
+
+    try:
+        pdf_bytes = await html_to_pdf(html_str=html_str)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    encoded = quote(f"{r.project_name or 'api_report'}_{report_id}.pdf", safe="")
+    return Response(
+        content=pdf_bytes, media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded}"},
+    )
+
+
 @router.delete("/api-test/reports/batch")
 async def delete_api_reports_batch(ids: List[int], db: AsyncSession = Depends(get_db)):
     from sqlalchemy import delete as sql_del
@@ -1251,6 +1327,84 @@ async def get_plan_report(report_id: int, db: AsyncSession = Depends(get_db)):
     if not r:
         raise HTTPException(status_code=404, detail="报告不存在")
     return _plan_report_dict(r)
+
+
+@router.get("/test-plans/reports/{report_id}/pdf")
+async def export_plan_report_pdf(report_id: int, db: AsyncSession = Depends(get_db)):
+    """将测试计划报告导出为 PDF。"""
+    from fastapi.responses import Response
+    from urllib.parse import quote
+    from tools.pdf_exporter import html_to_pdf
+
+    r = (await db.execute(select(TestPlanReport).where(TestPlanReport.id == report_id))).scalar_one_or_none()
+    if not r:
+        raise HTTPException(status_code=404, detail="报告不存在")
+
+    rdict    = _plan_report_dict(r)
+    details  = rdict.get("details") or []
+    total    = rdict.get("total", 0)
+    passed   = rdict.get("passed", 0)
+    failed   = rdict.get("failed", 0)
+    pass_rate = rdict.get("pass_rate", 0)
+    title    = f"{r.plan_name or '测试计划'} 报告"
+    created  = r.created_at.strftime("%Y-%m-%d %H:%M:%S") if r.created_at else ""
+    analysis = rdict.get("analysis", "")
+
+    rows = ""
+    for d in details:
+        st  = d.get("status", "")
+        cls = {"passed": "bg-success", "failed": "bg-danger"}.get(st, "bg-warning")
+        lbl = {"passed": "通过", "failed": "失败"}.get(st, st)
+        err = str(d.get("error") or "-")[:200]
+        rows += (
+            f"<tr><td>{d.get('step','')}</td>"
+            f"<td>{d.get('case_name','-')}</td>"
+            f"<td>{d.get('project_name','')}</td>"
+            f"<td>{d.get('method','')}</td>"
+            f"<td>{d.get('status_code','')}</td>"
+            f"<td><span class='badge {cls}'>{lbl}</span></td>"
+            f"<td>{d.get('duration_ms',0)}ms</td>"
+            f"<td style='max-width:200px;word-break:break-all'>{err}</td></tr>"
+        )
+    analysis_block = f"<h3>AI 分析</h3><pre style='white-space:pre-wrap;background:#f9f9f9;padding:12px;border-radius:4px'>{analysis}</pre>" if analysis else ""
+
+    html_str = f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>{title}</title>
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,sans-serif;padding:24px;color:#333;font-size:13px}}
+h2{{margin-bottom:4px}}p.meta{{color:#888;margin-bottom:16px}}
+.stats{{display:flex;gap:16px;margin-bottom:20px}}
+.stat{{background:#f5f5f5;padding:10px 20px;border-radius:6px;text-align:center}}
+.stat .n{{font-size:24px;font-weight:700}}.stat .l{{font-size:12px;color:#888}}
+.green{{color:#52c41a}}.red{{color:#ff4d4f}}.blue{{color:#1890ff}}
+table{{width:100%;border-collapse:collapse;margin-bottom:20px}}
+th,td{{padding:7px 10px;border:1px solid #e8e8e8;font-size:12px}}th{{background:#fafafa;font-weight:600}}
+.badge{{padding:2px 8px;border-radius:4px;font-size:11px}}
+.bg-success{{background:#d9f7be;color:#389e0d}}.bg-danger{{background:#fff1f0;color:#cf1322}}
+.bg-warning{{background:#fffbe6;color:#ad6800}}
+</style></head><body>
+<h2>{title}</h2>
+<p class="meta">生成时间：{created}</p>
+<div class="stats">
+  <div class="stat"><div class="n blue">{total}</div><div class="l">总步骤</div></div>
+  <div class="stat"><div class="n green">{passed}</div><div class="l">通过</div></div>
+  <div class="stat"><div class="n red">{failed}</div><div class="l">失败</div></div>
+  <div class="stat"><div class="n {'green' if pass_rate>=80 else 'red'}">{pass_rate}%</div><div class="l">通过率</div></div>
+</div>
+<table><thead><tr><th>#</th><th>用例名称</th><th>所属项目</th><th>方法</th><th>状态码</th><th>结果</th><th>耗时</th><th>错误信息</th></tr></thead>
+<tbody>{rows}</tbody></table>
+{analysis_block}
+</body></html>"""
+
+    try:
+        pdf_bytes = await html_to_pdf(html_str=html_str)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    encoded = quote(f"{r.plan_name or 'plan_report'}_{report_id}.pdf", safe="")
+    return Response(
+        content=pdf_bytes, media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded}"},
+    )
 
 
 @router.delete("/test-plans/reports/batch")

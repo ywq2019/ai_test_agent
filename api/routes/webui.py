@@ -825,6 +825,64 @@ th{{background:#fafafa;font-weight:600;color:#555}}
     return HTMLResponse(content=html, headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}"})
 
 
+@router.get("/reports/{report_id}/pdf")
+async def export_report_pdf(report_id: int, db: AsyncSession = Depends(get_db)):
+    """将测试报告导出为 PDF 文件（复用 Playwright Chromium 渲染）。"""
+    from fastapi.responses import Response
+    from urllib.parse import quote
+    from tools.pdf_exporter import html_to_pdf
+
+    result = await db.execute(select(TestReport).where(TestReport.id == report_id))
+    report = result.scalar_one_or_none()
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    task_name = report.name or f"报告_{report_id}"
+
+    # 优先使用已落盘的 HTML 文件；若文件丢失则动态构建 HTML 字符串
+    html_path = report.report_path or ""
+    if html_path:
+        p = Path(html_path)
+        if not p.is_absolute():
+            p = Path(__file__).parent.parent.parent / html_path
+        if not p.exists():
+            html_path = ""
+
+    try:
+        if html_path:
+            pdf_bytes = await html_to_pdf(html_path=str(p))
+        else:
+            # report_path 不存在时，从 export_report 接口复用同样的 HTML 构建逻辑
+            summary = json.loads(report.summary) if isinstance(report.summary, str) else (report.summary or {})
+            details = json.loads(report.details) if isinstance(report.details, str) else (report.details or [])
+            created_at = report.created_at.strftime("%Y-%m-%d %H:%M:%S") if report.created_at else ""
+            details_rows = ""
+            for detail in details:
+                status_map = {"passed": ("success", "通过"), "failed": ("danger", "失败"), "skipped": ("warning", "跳过")}
+                cls, label = status_map.get(detail.get("status", ""), ("secondary", detail.get("status", "-")))
+                err = (detail.get("error_message") or "-")[:120]
+                details_rows += f"<tr><td>{detail.get('id','')}</td><td>{detail.get('case_name','-')}</td><td><span class='badge bg-{cls}'>{label}</span></td><td>{detail.get('duration',0)}s</td><td>{err}</td></tr>"
+            html_str = f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>{task_name}</title>
+<style>body{{font-family:-apple-system,sans-serif;padding:24px;color:#333}}
+table{{width:100%;border-collapse:collapse}}th,td{{padding:8px 12px;border:1px solid #e8e8e8;font-size:13px}}
+th{{background:#fafafa}}.badge{{padding:2px 8px;border-radius:4px;font-size:12px}}
+.bg-success{{background:#d9f7be;color:#52c41a}}.bg-danger{{background:#fff1f0;color:#ff4d4f}}
+.bg-warning{{background:#fffbe6;color:#fa8c16}}</style></head>
+<body><h2>{task_name}</h2><p>生成时间：{created_at} &nbsp;|&nbsp; 通过率：{summary.get('pass_rate',0)}%</p>
+<table><thead><tr><th>序号</th><th>用例名称</th><th>状态</th><th>耗时</th><th>错误信息</th></tr></thead>
+<tbody>{details_rows}</tbody></table></body></html>"""
+            pdf_bytes = await html_to_pdf(html_str=html_str)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    encoded_name = quote(task_name.replace("/", "_") + ".pdf", safe="")
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}"},
+    )
+
+
 @router.delete("/reports/{report_id}")
 async def delete_report(report_id: int, db: AsyncSession = Depends(get_db)):
     from sqlalchemy import delete
