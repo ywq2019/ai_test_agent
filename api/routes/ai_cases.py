@@ -9,9 +9,10 @@ from sqlalchemy import select
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 from api.limiter import limiter
+from api.auth import get_current_user, owner_filter, check_owner
 from loguru import logger
 
-from tools.database import get_db, AICaseFile
+from tools.database import get_db, AICaseFile, User
 from api.websocket_manager import ws_manager
 
 router = APIRouter()
@@ -171,6 +172,7 @@ async def generate_ai_cases(
     body: AICaseGenerateRequest,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     from skills.ai_case_generator import acquire_generate_slot, get_active_generate_count, _MAX_ACTIVE_GENERATE
     if not body.document_path and not body.content:
@@ -183,6 +185,7 @@ async def generate_ai_cases(
         )
     placeholder = AICaseFile(
         task_name=body.task_name, case_count=0, cases_data=None, gen_status="generating",
+        created_by=current_user.username,
     )
     db.add(placeholder)
     await db.commit()
@@ -196,17 +199,22 @@ async def generate_ai_cases(
 
 
 @router.get("/ai-cases", response_model=List[AICaseFileResponse])
-async def list_ai_cases(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(AICaseFile).order_by(AICaseFile.created_at.desc()))
+async def list_ai_cases(db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    stmt = select(AICaseFile).order_by(AICaseFile.created_at.desc())
+    f = owner_filter(AICaseFile, current_user)
+    if f is not None:
+        stmt = stmt.where(f)
+    result = await db.execute(stmt)
     return [_ai_case_response(r) for r in result.scalars().all()]
 
 
 @router.get("/ai-cases/{record_id}", response_model=AICaseFileResponse)
-async def get_ai_case(record_id: int, db: AsyncSession = Depends(get_db)):
+async def get_ai_case(record_id: int, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     result = await db.execute(select(AICaseFile).where(AICaseFile.id == record_id))
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="记录不存在")
+    check_owner(record, current_user, "AI用例")
     return _ai_case_response(record)
 
 
@@ -263,11 +271,12 @@ async def download_ai_case(record_id: int, format: str = "md", db: AsyncSession 
 # ── 覆盖度分析 ────────────────────────────────────────────────────────────────
 
 @router.get("/ai-cases/{record_id}/coverage")
-async def get_ai_case_coverage(record_id: int, db: AsyncSession = Depends(get_db)):
+async def get_ai_case_coverage(record_id: int, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     result = await db.execute(select(AICaseFile).where(AICaseFile.id == record_id))
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="记录不存在")
+    check_owner(record, current_user, "AI用例")
     modules_data = (record.cases_data or {}).get("modules", [])
     all_cases = []
     for mod in modules_data:
@@ -341,12 +350,13 @@ async def get_ai_case_coverage(record_id: int, db: AsyncSession = Depends(get_db
 
 @router.post("/ai-cases/{record_id}/optimize", response_model=AICaseFileResponse)
 @limiter.limit("3/minute")
-async def optimize_ai_cases(request: Request, record_id: int, db: AsyncSession = Depends(get_db)):
+async def optimize_ai_cases(request: Request, record_id: int, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     from skills.ai_case_generator import ai_case_generator
     result = await db.execute(select(AICaseFile).where(AICaseFile.id == record_id))
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="记录不存在")
+    check_owner(record, current_user, "AI用例")
     cases_data = record.cases_data or {}
     if not cases_data.get("modules"):
         raise HTTPException(status_code=400, detail="该记录没有可优化的用例数据")
@@ -386,11 +396,12 @@ async def optimize_ai_cases(request: Request, record_id: int, db: AsyncSession =
 # ── 单条用例 CRUD ─────────────────────────────────────────────────────────────
 
 @router.post("/ai-cases/{record_id}/cases", response_model=AICaseFileResponse)
-async def add_ai_case_item(record_id: int, data: dict, db: AsyncSession = Depends(get_db)):
+async def add_ai_case_item(record_id: int, data: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     result = await db.execute(select(AICaseFile).where(AICaseFile.id == record_id))
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="记录不存在")
+    check_owner(record, current_user, "AI用例")
     cases_data = dict(record.cases_data or {})
     modules = list(cases_data.get("modules", []))
     module_name = (data.get("module") or "通用").strip()
@@ -425,11 +436,12 @@ async def add_ai_case_item(record_id: int, data: dict, db: AsyncSession = Depend
 
 
 @router.put("/ai-cases/{record_id}/cases/{case_id}", response_model=AICaseFileResponse)
-async def update_ai_case_item(record_id: int, case_id: str, data: dict, db: AsyncSession = Depends(get_db)):
+async def update_ai_case_item(record_id: int, case_id: str, data: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     result = await db.execute(select(AICaseFile).where(AICaseFile.id == record_id))
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="记录不存在")
+    check_owner(record, current_user, "AI用例")
     cases_data = dict(record.cases_data or {})
     modules = list(cases_data.get("modules", []))
     found_mod_idx = found_case_idx = None
@@ -468,11 +480,12 @@ async def update_ai_case_item(record_id: int, case_id: str, data: dict, db: Asyn
 
 
 @router.delete("/ai-cases/{record_id}/cases/{case_id}", response_model=AICaseFileResponse)
-async def delete_ai_case_item(record_id: int, case_id: str, db: AsyncSession = Depends(get_db)):
+async def delete_ai_case_item(record_id: int, case_id: str, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     result = await db.execute(select(AICaseFile).where(AICaseFile.id == record_id))
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="记录不存在")
+    check_owner(record, current_user, "AI用例")
     cases_data = dict(record.cases_data or {})
     modules = list(cases_data.get("modules", []))
     found = False
@@ -498,12 +511,13 @@ async def delete_ai_case_item(record_id: int, case_id: str, db: AsyncSession = D
 
 
 @router.delete("/ai-cases/{record_id}")
-async def delete_ai_case(record_id: int, db: AsyncSession = Depends(get_db)):
+async def delete_ai_case(record_id: int, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     from sqlalchemy import delete as sql_delete
     result = await db.execute(select(AICaseFile).where(AICaseFile.id == record_id))
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="记录不存在")
+    check_owner(record, current_user, "AI用例")
 
     # 收集整条版本链（当前记录 + 所有 deprecated 父版本）的文件路径一并清理
     ids_to_delete = [record_id]
@@ -538,12 +552,13 @@ def _delete_case_files(record) -> None:
 # ── Diff 检测 ─────────────────────────────────────────────────────────────────
 
 @router.post("/ai-cases/{record_id}/diff-check")
-async def diff_check_ai_case(record_id: int, request: DiffCheckRequest, db: AsyncSession = Depends(get_db)):
+async def diff_check_ai_case(record_id: int, request: DiffCheckRequest, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     from skills.ai_case_generator import ai_case_generator
     result = await db.execute(select(AICaseFile).where(AICaseFile.id == record_id))
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="记录不存在")
+    check_owner(record, current_user, "AI用例")
     if not request.new_content and not request.new_document_path:
         raise HTTPException(status_code=400, detail="请提供新版文档路径或文本内容")
     if request.new_document_path:
@@ -598,12 +613,14 @@ async def diff_check_ai_case(record_id: int, request: DiffCheckRequest, db: Asyn
 @router.post("/ai-cases/{record_id}/incremental-update", response_model=AICaseFileResponse)
 async def incremental_update_ai_case(
     record_id: int, request: IncrementalUpdateRequest, db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     from skills.ai_case_generator import ai_case_generator
     result = await db.execute(select(AICaseFile).where(AICaseFile.id == record_id))
     old_record = result.scalar_one_or_none()
     if not old_record:
         raise HTTPException(status_code=404, detail="记录不存在")
+    check_owner(old_record, current_user, "AI用例")
     if not request.new_content and not request.new_document_path:
         raise HTTPException(status_code=400, detail="请提供新版文档路径或文本内容")
     if request.new_document_path:
@@ -689,6 +706,7 @@ async def incremental_update_ai_case(
         cases_data=upd_result.get("cases_data"), doc_hash=upd_result.get("doc_hash"),
         doc_content=upd_result.get("doc_content"), parent_id=old_record.id,
         diff_summary=upd_result.get("diff_summary"), record_status="active",
+        created_by=current_user.username,
     )
     db.add(new_record)
     await db.commit()
@@ -780,12 +798,14 @@ async def extract_requirements(
     record_id: int,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """从已保存的需求文档中提取结构化需求条目（后台任务，进度通过 WebSocket trac_gen 推送）。"""
     result = await db.execute(select(AICaseFile).where(AICaseFile.id == record_id))
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="记录不存在")
+    check_owner(record, current_user, "AI用例")
     if not (record.doc_content or "").strip():
         raise HTTPException(
             status_code=400,
@@ -887,12 +907,14 @@ async def map_cases_to_requirements(
     record_id: int,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """对现有用例做需求映射（后台任务，进度通过 WebSocket trac_gen 推送）。"""
     result = await db.execute(select(AICaseFile).where(AICaseFile.id == record_id))
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="记录不存在")
+    check_owner(record, current_user, "AI用例")
     if not (record.requirements_data or {}).get("requirements"):
         raise HTTPException(status_code=400, detail="请先调用「提取需求」接口，生成需求列表后再进行映射")
     background_tasks.add_task(_do_map_cases_bg, record_id)
@@ -902,12 +924,13 @@ async def map_cases_to_requirements(
 # ── 需求追踪：追踪矩阵 ───────────────────────────────────────────────────────
 
 @router.get("/ai-cases/{record_id}/traceability")
-async def get_traceability(record_id: int, db: AsyncSession = Depends(get_db)):
+async def get_traceability(record_id: int, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     """返回完整需求-用例追踪矩阵。"""
     result = await db.execute(select(AICaseFile).where(AICaseFile.id == record_id))
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="记录不存在")
+    check_owner(record, current_user, "AI用例")
 
     requirements_data = record.requirements_data or {}
     traceability_data = record.traceability_data or {}
@@ -999,7 +1022,7 @@ async def get_traceability(record_id: int, db: AsyncSession = Depends(get_db)):
 # ── 需求追踪：分析覆盖缺口 ───────────────────────────────────────────────────
 
 @router.post("/ai-cases/{record_id}/analyze-gap")
-async def analyze_coverage_gap(record_id: int, data: dict, db: AsyncSession = Depends(get_db)):
+async def analyze_coverage_gap(record_id: int, data: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     """
     分析指定需求的测试覆盖缺口。
     body: { req_id: str }
@@ -1013,6 +1036,7 @@ async def analyze_coverage_gap(record_id: int, data: dict, db: AsyncSession = De
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="记录不存在")
+    check_owner(record, current_user, "AI用例")
 
     req_id = data.get("req_id", "")
     if not req_id:
@@ -1232,6 +1256,7 @@ async def supplement_cases(
     data: dict,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
     针对覆盖不足的需求生成补充用例（后台任务）。
@@ -1241,6 +1266,7 @@ async def supplement_cases(
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="记录不存在")
+    check_owner(record, current_user, "AI用例")
 
     req_id = data.get("req_id", "")
     missing_dimensions = data.get("missing_dimensions", [])

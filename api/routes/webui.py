@@ -25,7 +25,7 @@ from tools.database import (
 from agent.core import uitest_agent
 from api.websocket_manager import ws_manager
 from tools.config import settings
-from api.auth import get_current_user
+from api.auth import get_current_user, owner_filter, check_owner
 
 router = APIRouter()
 
@@ -33,7 +33,7 @@ router = APIRouter()
 # ── 任务管理 ──────────────────────────────────────────────────────────────────
 
 @router.post("/tasks", response_model=TaskResponse)
-async def create_task(request: TaskCreateRequest, db: AsyncSession = Depends(get_db)):
+async def create_task(request: TaskCreateRequest, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     task = TestTask(
         name=request.name,
         url=request.url,
@@ -41,6 +41,7 @@ async def create_task(request: TaskCreateRequest, db: AsyncSession = Depends(get
         browser=request.browser,
         environment=request.environment,
         status="created",
+        created_by=current_user.username,
     )
     db.add(task)
     await db.commit()
@@ -56,8 +57,12 @@ async def create_task(request: TaskCreateRequest, db: AsyncSession = Depends(get
 
 
 @router.get("/tasks", response_model=List[TaskResponse])
-async def list_tasks(skip: int = 0, limit: int = 100, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(TestTask).offset(skip).limit(limit))
+async def list_tasks(skip: int = 0, limit: int = 100, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    stmt = select(TestTask).offset(skip).limit(limit).order_by(TestTask.created_at.desc())
+    f = owner_filter(TestTask, current_user)
+    if f is not None:
+        stmt = stmt.where(f)
+    result = await db.execute(stmt)
     tasks = result.scalars().all()
     return [
         TaskResponse(
@@ -70,11 +75,12 @@ async def list_tasks(skip: int = 0, limit: int = 100, db: AsyncSession = Depends
 
 
 @router.get("/tasks/{task_id}", response_model=TaskResponse)
-async def get_task(task_id: int, db: AsyncSession = Depends(get_db)):
+async def get_task(task_id: int, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     result = await db.execute(select(TestTask).where(TestTask.id == task_id))
     task = result.scalar_one_or_none()
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
+    check_owner(task, current_user, "任务")
     return TaskResponse(
         id=task.id, name=task.name, url=task.url, status=task.status,
         browser=task.browser, environment=task.environment,
@@ -84,12 +90,13 @@ async def get_task(task_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.delete("/tasks/{task_id}", response_model=dict)
-async def delete_task(task_id: int, db: AsyncSession = Depends(get_db)):
+async def delete_task(task_id: int, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     from sqlalchemy import delete
     result = await db.execute(select(TestTask).where(TestTask.id == task_id))
     task = result.scalar_one_or_none()
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
+    check_owner(task, current_user, "任务")
     await db.execute(delete(TestTask).where(TestTask.id == task_id))
     await db.execute(delete(TestCase).where(TestCase.task_id == task_id))
     await db.execute(delete(TestResult).where(TestResult.task_id == task_id))
@@ -158,12 +165,13 @@ async def parse_document(document_path: str):
 
 
 @router.post("/tasks/{task_id}/elements", response_model=TaskResponse)
-async def set_page_elements(task_id: int, elements: List[dict], db: AsyncSession = Depends(get_db)):
+async def set_page_elements(task_id: int, elements: List[dict], db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     try:
         result = await db.execute(select(TestTask).where(TestTask.id == task_id))
         task = result.scalar_one_or_none()
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
+        check_owner(task, current_user, "任务")
         task.page_elements = elements
         task.status = "parsed"
         await db.commit()
@@ -200,7 +208,12 @@ async def get_stats(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/tasks/{task_id}/cases", response_model=List[CaseResponse])
-async def list_cases(task_id: int, db: AsyncSession = Depends(get_db)):
+async def list_cases(task_id: int, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    result = await db.execute(select(TestTask).where(TestTask.id == task_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    check_owner(task, current_user, "任务")
     result = await db.execute(select(TestCase).where(TestCase.task_id == task_id))
     cases = result.scalars().all()
     return [
@@ -250,7 +263,7 @@ def _resolve_doc_path(document_path: str) -> Optional[Path]:
 
 
 @router.post("/cases/generate/{task_id}", response_model=List[CaseResponse])
-async def generate_cases(task_id: int, request: dict = None, db: AsyncSession = Depends(get_db)):
+async def generate_cases(task_id: int, request: dict = None, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     if request is None:
         request = {}
     reparse_page: bool = request.get("reparse_page", False)
@@ -260,6 +273,7 @@ async def generate_cases(task_id: int, request: dict = None, db: AsyncSession = 
         task = result.scalar_one_or_none()
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
+        check_owner(task, current_user, "任务")
 
         if reparse_page and task.url:
             try:
@@ -347,7 +361,7 @@ async def generate_cases(task_id: int, request: dict = None, db: AsyncSession = 
 
 
 @router.post("/cases/optimize/{task_id}")
-async def optimize_cases(task_id: int, db: AsyncSession = Depends(get_db)):
+async def optimize_cases(task_id: int, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     """分析已有用例覆盖缺口，追加补充用例。"""
     try:
         from skills.case_generator import case_generator as cg
@@ -355,6 +369,7 @@ async def optimize_cases(task_id: int, db: AsyncSession = Depends(get_db)):
         task = result.scalar_one_or_none()
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
+        check_owner(task, current_user, "任务")
         result = await db.execute(select(TestCase).where(TestCase.task_id == task_id))
         existing_db_cases = result.scalars().all()
         if not existing_db_cases:
@@ -670,6 +685,7 @@ async def _run_execution_bg(
 @router.post("/execute")
 async def execute_cases(
     request: ExecuteRequest, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     result = await db.execute(select(TestCase).where(TestCase.task_id == request.task_id))
     cases = result.scalars().all()
@@ -684,6 +700,10 @@ async def execute_cases(
     ]
     task_result = await db.execute(select(TestTask).where(TestTask.id == request.task_id))
     task = task_result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    check_owner(task, current_user, "任务")
+    check_owner(task, current_user, "任务")
     task_url  = task.url  if task else ""
     task_name = task.name if task else f"Task {request.task_id}"
     report = TestReport(

@@ -12,8 +12,9 @@ from loguru import logger
 
 from tools.database import (
     get_db, ApiProject, ApiCase, ApiLoadConfig, ApiTestReport,
-    CustomScript, GlobalVariable, TestPlan, TestPlanStep, TestPlanReport,
+    CustomScript, GlobalVariable, TestPlan, TestPlanStep, TestPlanReport, User,
 )
+from api.auth import get_current_user, owner_filter, check_owner
 from api.websocket_manager import ws_manager
 from tools.config import settings
 
@@ -130,12 +131,13 @@ async def debug_claude_subprocess():
 # ── 项目管理 ──────────────────────────────────────────────────────────────────
 
 @router.post("/api-test/projects")
-async def create_api_project(data: dict, db: AsyncSession = Depends(get_db)):
+async def create_api_project(data: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     proj = ApiProject(
         name=data.get("name", "未命名项目"), base_url=data.get("base_url", ""),
         description=data.get("description", ""), auth_type=data.get("auth_type", "none"),
         auth_config=data.get("auth_config"), global_headers=data.get("global_headers"),
         proxy_url=data.get("proxy_url", ""), hosts_map=data.get("hosts_map", ""),
+        created_by=current_user.username,
     )
     db.add(proj)
     await db.commit()
@@ -144,8 +146,12 @@ async def create_api_project(data: dict, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/api-test/projects")
-async def list_api_projects(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(ApiProject).order_by(ApiProject.created_at.desc()))
+async def list_api_projects(db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    stmt = select(ApiProject).order_by(ApiProject.created_at.desc())
+    f = owner_filter(ApiProject, current_user)
+    if f is not None:
+        stmt = stmt.where(f)
+    result = await db.execute(stmt)
     return [_proj_dict(p) for p in result.scalars().all()]
 
 
@@ -162,11 +168,12 @@ async def list_all_cases_grouped(db: AsyncSession = Depends(get_db)):
 
 
 @router.put("/api-test/projects/{project_id}")
-async def update_api_project(project_id: int, data: dict, db: AsyncSession = Depends(get_db)):
+async def update_api_project(project_id: int, data: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     result = await db.execute(select(ApiProject).where(ApiProject.id == project_id))
     proj = result.scalar_one_or_none()
     if not proj:
         raise HTTPException(status_code=404, detail="项目不存在")
+    check_owner(proj, current_user, "接口项目")
     for field in ("name", "base_url", "description", "auth_type", "auth_config", "global_headers",
                   "setup_cases", "auth_error_patterns", "proxy_url", "hosts_map"):
         if field in data:
@@ -177,8 +184,13 @@ async def update_api_project(project_id: int, data: dict, db: AsyncSession = Dep
 
 
 @router.delete("/api-test/projects/{project_id}")
-async def delete_api_project(project_id: int, db: AsyncSession = Depends(get_db)):
+async def delete_api_project(project_id: int, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     from sqlalchemy import delete as sql_del
+    result = await db.execute(select(ApiProject).where(ApiProject.id == project_id))
+    proj = result.scalar_one_or_none()
+    if not proj:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    check_owner(proj, current_user, "接口项目")
     await db.execute(sql_del(ApiCase).where(ApiCase.project_id == project_id))
     await db.execute(sql_del(ApiLoadConfig).where(ApiLoadConfig.project_id == project_id))
     await db.execute(sql_del(ApiTestReport).where(ApiTestReport.project_id == project_id))
@@ -190,7 +202,12 @@ async def delete_api_project(project_id: int, db: AsyncSession = Depends(get_db)
 # ── 用例管理 ──────────────────────────────────────────────────────────────────
 
 @router.get("/api-test/projects/{project_id}/cases")
-async def list_api_cases(project_id: int, db: AsyncSession = Depends(get_db)):
+async def list_api_cases(project_id: int, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    proj_result = await db.execute(select(ApiProject).where(ApiProject.id == project_id))
+    proj = proj_result.scalar_one_or_none()
+    if not proj:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    check_owner(proj, current_user, "接口项目")
     result = await db.execute(
         select(ApiCase).where(ApiCase.project_id == project_id).order_by(ApiCase.created_at)
     )
@@ -242,11 +259,13 @@ async def delete_api_cases(ids: List[int], db: AsyncSession = Depends(get_db)):
 @router.post("/api-test/projects/{project_id}/cases/generate")
 async def generate_api_cases(
     project_id: int, data: dict, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     result = await db.execute(select(ApiProject).where(ApiProject.id == project_id))
     proj = result.scalar_one_or_none()
     if not proj:
         raise HTTPException(status_code=404, detail="项目不存在")
+    check_owner(proj, current_user, "接口项目")
 
     swagger_text = data.get("swagger_text", "")
     description  = data.get("description", "")
@@ -291,11 +310,13 @@ async def generate_api_cases(
 @router.post("/api-test/projects/{project_id}/cases/generate-from-code")
 async def generate_cases_from_code(
     project_id: int, data: dict, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     result = await db.execute(select(ApiProject).where(ApiProject.id == project_id))
     proj = result.scalar_one_or_none()
     if not proj:
         raise HTTPException(status_code=404, detail="项目不存在")
+    check_owner(proj, current_user, "接口项目")
     code = (data.get("code") or "").strip()
     lang = data.get("lang", "python")
     if not code:
@@ -335,10 +356,12 @@ async def generate_cases_from_code(
 
 
 @router.post("/api-test/projects/{project_id}/code-analyze")
-async def analyze_code_vs_requirement(project_id: int, data: dict, db: AsyncSession = Depends(get_db)):
+async def analyze_code_vs_requirement(project_id: int, data: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     result = await db.execute(select(ApiProject).where(ApiProject.id == project_id))
-    if not result.scalar_one_or_none():
+    proj = result.scalar_one_or_none()
+    if not proj:
         raise HTTPException(status_code=404, detail="项目不存在")
+    check_owner(proj, current_user, "接口项目")
     requirement = (data.get("requirement") or "").strip()
     code = (data.get("code") or "").strip()
     lang = data.get("lang", "python")
@@ -508,11 +531,13 @@ async def delete_script(script_id: int, db: AsyncSession = Depends(get_db)):
 @router.post("/api-test/projects/{project_id}/execute")
 async def execute_api_cases(
     project_id: int, data: dict, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     proj_r = await db.execute(select(ApiProject).where(ApiProject.id == project_id))
     proj = proj_r.scalar_one_or_none()
     if not proj:
         raise HTTPException(status_code=404, detail="项目不存在")
+    check_owner(proj, current_user, "接口项目")
     case_ids = data.get("case_ids")
     proj_dict = _proj_dict(proj)
 
@@ -559,11 +584,13 @@ async def execute_api_cases(
 @router.post("/api-test/projects/{project_id}/load")
 async def run_load_test(
     project_id: int, data: dict, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     proj_r = await db.execute(select(ApiProject).where(ApiProject.id == project_id))
     proj = proj_r.scalar_one_or_none()
     if not proj:
         raise HTTPException(status_code=404, detail="项目不存在")
+    check_owner(proj, current_user, "接口项目")
     config   = {"concurrent_users": data.get("concurrent_users", 10),
                 "duration": data.get("duration", 60), "ramp_up": data.get("ramp_up", 10)}
     case_ids = data.get("case_ids")
@@ -780,9 +807,13 @@ async def delete_global_var(var_id: int, db: AsyncSession = Depends(get_db)):
 # ── 测试计划 ──────────────────────────────────────────────────────────────────
 
 @router.get("/test-plans")
-async def list_test_plans(db: AsyncSession = Depends(get_db)):
+async def list_test_plans(db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     from sqlalchemy import func
-    plans = (await db.execute(select(TestPlan).order_by(TestPlan.id.desc()))).scalars().all()
+    stmt = select(TestPlan).order_by(TestPlan.created_at.desc())
+    f = owner_filter(TestPlan, current_user)
+    if f is not None:
+        stmt = stmt.where(f)
+    plans = (await db.execute(stmt)).scalars().all()
     result = []
     for p in plans:
         step_count = (await db.execute(
@@ -795,7 +826,7 @@ async def list_test_plans(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/test-plans")
-async def create_test_plan(data: dict, db: AsyncSession = Depends(get_db)):
+async def create_test_plan(data: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     name = (data.get("name") or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="计划名称不能为空")
@@ -803,6 +834,7 @@ async def create_test_plan(data: dict, db: AsyncSession = Depends(get_db)):
         name=name, description=data.get("description", ""),
         project_id=data.get("project_id"), proxy_url=data.get("proxy_url", ""),
         hosts_map=data.get("hosts_map", ""), status="pending",
+        created_by=current_user.username,
     )
     db.add(plan)
     await db.flush()
@@ -817,10 +849,11 @@ async def create_test_plan(data: dict, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/test-plans/{plan_id}")
-async def get_test_plan(plan_id: int, db: AsyncSession = Depends(get_db)):
+async def get_test_plan(plan_id: int, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     plan = (await db.execute(select(TestPlan).where(TestPlan.id == plan_id))).scalar_one_or_none()
     if not plan:
         raise HTTPException(status_code=404, detail="测试计划不存在")
+    check_owner(plan, current_user, "测试计划")
     steps_rows = (await db.execute(
         select(TestPlanStep).where(TestPlanStep.plan_id == plan_id).order_by(TestPlanStep.sort_order)
     )).scalars().all()
@@ -844,11 +877,12 @@ async def get_test_plan(plan_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.put("/test-plans/{plan_id}")
-async def update_test_plan(plan_id: int, data: dict, db: AsyncSession = Depends(get_db)):
+async def update_test_plan(plan_id: int, data: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     from datetime import datetime as _dt
     plan = (await db.execute(select(TestPlan).where(TestPlan.id == plan_id))).scalar_one_or_none()
     if not plan:
         raise HTTPException(status_code=404, detail="测试计划不存在")
+    check_owner(plan, current_user, "测试计划")
     for field in ("name", "description", "project_id", "proxy_url", "hosts_map"):
         if field in data:
             setattr(plan, field, data[field])
@@ -859,11 +893,12 @@ async def update_test_plan(plan_id: int, data: dict, db: AsyncSession = Depends(
 
 
 @router.delete("/test-plans/{plan_id}")
-async def delete_test_plan(plan_id: int, db: AsyncSession = Depends(get_db)):
+async def delete_test_plan(plan_id: int, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     from sqlalchemy import delete as sql_delete
     plan = (await db.execute(select(TestPlan).where(TestPlan.id == plan_id))).scalar_one_or_none()
     if not plan:
         raise HTTPException(status_code=404, detail="测试计划不存在")
+    check_owner(plan, current_user, "测试计划")
     await db.execute(sql_delete(TestPlanStep).where(TestPlanStep.plan_id == plan_id))
     await db.execute(sql_delete(TestPlanReport).where(TestPlanReport.plan_id == plan_id))
     await db.delete(plan)

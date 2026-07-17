@@ -38,11 +38,10 @@ class TestTask(Base):
     page_elements = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_by = Column(String(100), nullable=True, index=True)  # 创建人用户名，NULL=历史数据全部可见
 
     # ── 需求文档快照（用于文档变更后的 Diff 分析） ─────────────────────────
-    # 上次解析的需求文档文本（截断保存前 20000 字），供 incremental-update 对比
     doc_snapshot = Column(Text, nullable=True)
-    # 上次解析文档的 MD5 哈希（16位），快速判断文档是否变更
     doc_hash = Column(String(64), nullable=True)
 
 
@@ -107,6 +106,7 @@ class AICaseFile(Base):
     xmind_path = Column(String(512), nullable=True)
     cases_data = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    created_by = Column(String(100), nullable=True, index=True)  # 创建人用户名，NULL=历史数据全部可见
 
     # ── 文档变更追踪字段 ────────────────────────────────────────────────
     # 需求文档内容的 MD5 哈希，用于检测文档是否发生变更
@@ -148,17 +148,14 @@ class ApiProject(Base):
     name = Column(String(255), nullable=False)
     base_url = Column(String(1024), nullable=False)
     description = Column(Text, nullable=True)
-    auth_type = Column(String(50), default="none")  # none/bearer/api_key/basic
+    auth_type = Column(String(50), default="none")
     auth_config = Column(JSON, nullable=True)
     global_headers = Column(JSON, nullable=True)
-    # 前置用例：执行正式用例前先跑这些用例刷新 token
-    # 格式：[{"project_id": 3, "case_id": 25, "label": "用户服务/登录"}]
     setup_cases = Column(JSON, nullable=True)
-    # 鉴权失败特征：命中则自动刷新 token 并重试
-    # 格式：[{"field": "$.status.code", "value": "40042"}, {"field": "http_status", "value": "401"}]
     auth_error_patterns = Column(JSON, nullable=True)
-    proxy_url = Column(String(512), nullable=True, default="")   # HTTP/SOCKS5 代理，留空表示直连
-    hosts_map = Column(Text, nullable=True, default="")          # hosts 映射，格式同 /etc/hosts
+    proxy_url = Column(String(512), nullable=True, default="")
+    hosts_map = Column(Text, nullable=True, default="")
+    created_by = Column(String(100), nullable=True, index=True)  # 创建人用户名，NULL=历史数据全部可见
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -242,10 +239,11 @@ class TestPlan(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True, default="")
-    project_id = Column(Integer, nullable=True, index=True)   # 关联接口项目（可选）
-    status = Column(String(50), default="pending")             # pending/running/passed/failed
-    proxy_url = Column(String(512), nullable=True, default="")  # 计划级代理，优先级高于项目代理
-    hosts_map = Column(Text, nullable=True, default="")         # 计划级 hosts 映射，覆盖项目级同名条目
+    project_id = Column(Integer, nullable=True, index=True)
+    status = Column(String(50), default="pending")
+    proxy_url = Column(String(512), nullable=True, default="")
+    hosts_map = Column(Text, nullable=True, default="")
+    created_by = Column(String(100), nullable=True, index=True)  # 创建人用户名，NULL=历史数据全部可见
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -337,6 +335,11 @@ async def init_database():
             "ALTER TABLE test_tasks ADD COLUMN doc_hash VARCHAR(64)",
             # test_cases 废弃字段（兼容旧库）
             "ALTER TABLE test_cases ADD COLUMN deprecated BOOLEAN DEFAULT 0",
+            # 权限隔离：created_by 字段（NULL = 历史数据，对所有用户可见）
+            "ALTER TABLE test_tasks ADD COLUMN created_by VARCHAR(100)",
+            "ALTER TABLE ai_case_files ADD COLUMN created_by VARCHAR(100)",
+            "ALTER TABLE api_projects ADD COLUMN created_by VARCHAR(100)",
+            "ALTER TABLE test_plans ADD COLUMN created_by VARCHAR(100)",
         ]:
             try:
                 await conn.execute(__import__('sqlalchemy').text(ddl))

@@ -3,6 +3,7 @@ JWT 鉴权工具模块
 - 密码哈希 / 验证
 - Token 生成 / 解析
 - FastAPI 依赖注入 get_current_user
+- owner_filter: 数据隔离过滤条件工具
 """
 
 from datetime import datetime, timedelta, timezone
@@ -63,3 +64,25 @@ async def get_current_user(
     if not user:
         raise exc
     return user
+
+
+# ── 数据隔离工具 ──────────────────────────────────────────────────────────────
+def owner_filter(model, user: User):
+    """返回数据隔离的 SQLAlchemy 条件：
+    - admin：看全部数据
+    - 普通用户：只看自己创建的 + created_by 为 NULL 的历史数据
+    """
+    from sqlalchemy import or_
+    if user.role == "admin":
+        return None  # 无过滤，查全部
+    return or_(model.created_by == user.username, model.created_by.is_(None))
+
+
+def check_owner(record, user: User, resource_name: str = "记录") -> None:
+    """校验当前用户是否有权访问指定记录，无权时抛出 403。
+    admin 跳过检查；普通用户只能访问自己的或 created_by=NULL 的历史数据。
+    """
+    if user.role == "admin":
+        return
+    if record.created_by is not None and record.created_by != user.username:
+        raise HTTPException(status_code=403, detail=f"无权访问此{resource_name}")
