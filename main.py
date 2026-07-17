@@ -277,6 +277,8 @@ _AUTH_WHITELIST = (
 # 下载类接口：浏览器直接跳转无法带 token，单独用路径关键词放行
 _DOWNLOAD_PATTERNS = (
     "/download",    # /api/v1/ai-cases/{id}/download
+    "/export",      # /api/v1/reports/{id}/export
+    "/pdf",         # /api/v1/reports/{id}/pdf  /api/v1/api-test/reports/{id}/pdf  /api/v1/test-plans/reports/{id}/pdf
 )
 
 # CI/CD Webhook 触发接口：用自身 token 鉴权，不需要 JWT

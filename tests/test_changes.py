@@ -334,12 +334,11 @@ class TestPdfExport:
         assert "finally:" in src
 
     def test_pdf_endpoint_in_main_download_whitelist(self):
-        """PDF 接口路径不需要加入白名单（需要鉴权，正常走 JWT）"""
+        """PDF / export 接口是浏览器直跳下载，必须在 _DOWNLOAD_PATTERNS 白名单里"""
         main_src = open("main.py", encoding="utf-8").read()
-        # /pdf 不应该在下载白名单里（PDF 需要登录）
-        # 确认 download 白名单里只有 /download
         assert '"/download"' in main_src
-        assert '"/pdf"' not in main_src
+        assert '"/export"' in main_src   # 导出 HTML 报告
+        assert '"/pdf"' in main_src      # 导出 PDF 报告
 
 
 # ─────────────────────────────────────────────────────────────────────────────
