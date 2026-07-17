@@ -279,6 +279,11 @@ _DOWNLOAD_PATTERNS = (
     "/download",    # /api/v1/ai-cases/{id}/download
 )
 
+# CI/CD Webhook 触发接口：用自身 token 鉴权，不需要 JWT
+_WEBHOOK_PATTERNS = (
+    "/trigger",     # /api/v1/test-plans/{id}/trigger?token=xxx
+)
+
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
@@ -287,6 +292,9 @@ async def auth_middleware(request: Request, call_next):
         return await call_next(request)
     # 下载接口直接放行（浏览器跳转无法携带 Authorization header）
     if any(p in path for p in _DOWNLOAD_PATTERNS):
+        return await call_next(request)
+    # CI/CD Webhook 触发接口：用自身 token 鉴权，JWT 层跳过
+    if any(p in path for p in _WEBHOOK_PATTERNS):
         return await call_next(request)
     # 非 API 路径（前端页面）放行
     if not path.startswith("/api/"):

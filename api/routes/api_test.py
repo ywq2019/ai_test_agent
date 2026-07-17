@@ -68,6 +68,7 @@ def _plan_dict(p: TestPlan, steps: list = None) -> dict:
         "id": p.id, "name": p.name, "description": p.description or "",
         "project_id": p.project_id, "status": p.status or "pending",
         "proxy_url": p.proxy_url or "", "hosts_map": p.hosts_map or "",
+        "webhook_token": p.webhook_token or "",   # 供前端展示触发 URL
         "steps": steps or [],
         "created_at": p.created_at.isoformat() if p.created_at else "",
         "updated_at": p.updated_at.isoformat() if p.updated_at else "",
@@ -955,8 +956,98 @@ async def run_test_plan(
     return {"message": "测试计划已开始执行", "plan_id": plan_id}
 
 
-async def _execute_plan_bg(plan_id: int):
-    """后台执行测试计划：顺序执行 + 共享 var_store + 步骤级报告。"""
+# ── CI/CD Webhook 触发 ────────────────────────────────────────────────────────
+
+@router.post("/test-plans/{plan_id}/trigger")
+async def trigger_test_plan(
+    plan_id: int,
+    background_tasks: BackgroundTasks,
+    token: str,                          # ?token=xxx 查询参数，无需 JWT
+    force: bool = False,
+    callback_url: Optional[str] = None,  # 执行完成后回调的 URL（可选）
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    CI/CD Webhook 触发接口，无需 JWT，用 token 鉴权。
+
+    用法（Jenkins / GitHub Actions）：
+        curl -X POST "http://your-host:4000/api/v1/test-plans/{plan_id}/trigger?token=xxx"
+        curl -X POST "...?token=xxx&callback_url=https://ci.example.com/hook"
+
+    token 通过 PUT /test-plans/{plan_id}/webhook-token 获取。
+    """
+    plan = (await db.execute(select(TestPlan).where(TestPlan.id == plan_id))).scalar_one_or_none()
+    if not plan:
+        raise HTTPException(status_code=404, detail="测试计划不存在")
+    # token 鉴权：未配置 token 或 token 不匹配均拒绝
+    if not plan.webhook_token or plan.webhook_token != token:
+        raise HTTPException(status_code=401, detail="无效的 webhook token")
+    if plan.status == "running" and not force:
+        raise HTTPException(status_code=409, detail="计划正在执行中，如需强制重跑请传 force=true")
+
+    from datetime import datetime as _dt
+    plan.status = "running"
+    plan.updated_at = _dt.utcnow()
+    await db.commit()
+    background_tasks.add_task(_execute_plan_bg, plan_id, callback_url=callback_url)
+    logger.info(f"[webhook] 计划 {plan_id}「{plan.name}」由 CI/CD 触发")
+    return {
+        "message": "测试计划已由 webhook 触发",
+        "plan_id": plan_id,
+        "plan_name": plan.name,
+    }
+
+
+@router.put("/test-plans/{plan_id}/webhook-token")
+async def set_webhook_token(
+    plan_id: int,
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    生成或更新 webhook token。
+    body: {} 表示自动生成新 token；{"token": "your-token"} 表示手动指定。
+    """
+    import secrets
+    plan = (await db.execute(select(TestPlan).where(TestPlan.id == plan_id))).scalar_one_or_none()
+    if not plan:
+        raise HTTPException(status_code=404, detail="测试计划不存在")
+    check_owner(plan, current_user, "测试计划")
+
+    new_token = data.get("token") or secrets.token_urlsafe(32)
+    if len(new_token) < 16:
+        raise HTTPException(status_code=400, detail="token 长度不能少于 16 个字符")
+
+    plan.webhook_token = new_token
+    await db.commit()
+    return {
+        "plan_id": plan_id,
+        "webhook_token": new_token,
+        "trigger_url": f"/api/v1/test-plans/{plan_id}/trigger?token={new_token}",
+    }
+
+
+@router.delete("/test-plans/{plan_id}/webhook-token")
+async def revoke_webhook_token(
+    plan_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """撤销 webhook token，撤销后 CI/CD 触发将返回 401。"""
+    plan = (await db.execute(select(TestPlan).where(TestPlan.id == plan_id))).scalar_one_or_none()
+    if not plan:
+        raise HTTPException(status_code=404, detail="测试计划不存在")
+    check_owner(plan, current_user, "测试计划")
+    plan.webhook_token = None
+    await db.commit()
+    return {"message": "webhook token 已撤销", "plan_id": plan_id}
+
+
+async def _execute_plan_bg(plan_id: int, callback_url: Optional[str] = None):
+    """后台执行测试计划：顺序执行 + 共享 var_store + 步骤级报告。
+    callback_url：可选，执行完成后向该 URL 发送 POST 回调（用于 CI/CD 流水线状态通知）。
+    """
     import httpx
     from sqlalchemy import select as _sel, or_
     from skills.api_executor import ApiExecutor
@@ -1123,6 +1214,22 @@ async def _execute_plan_bg(plan_id: int):
     await ws_manager.broadcast_all({"type": "plan_done", "plan_id": plan_id, "report_id": report_id,
                                     "total": total, "passed": passed, "failed": failed_count,
                                     "pass_rate": pass_rate, "status": final_status})
+
+    # CI/CD 回调：执行完成后向 callback_url 发送 POST 通知
+    if callback_url:
+        import httpx as _httpx
+        payload = {
+            "plan_id": plan_id, "plan_name": plan_name,
+            "status": final_status, "report_id": report_id,
+            "total": total, "passed": passed, "failed": failed_count,
+            "pass_rate": pass_rate,
+        }
+        try:
+            async with _httpx.AsyncClient(timeout=10, verify=False) as _c:
+                resp = await _c.post(callback_url, json=payload)
+            logger.info(f"[webhook] 回调成功: {callback_url} → {resp.status_code}")
+        except Exception as cb_err:
+            logger.warning(f"[webhook] 回调失败: {callback_url} → {cb_err}")
 
 
 @router.get("/test-plans/{plan_id}/reports")

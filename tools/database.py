@@ -244,6 +244,9 @@ class TestPlan(Base):
     proxy_url = Column(String(512), nullable=True, default="")
     hosts_map = Column(Text, nullable=True, default="")
     created_by = Column(String(100), nullable=True, index=True)  # 创建人用户名，NULL=历史数据全部可见
+    # CI/CD webhook token：用于无需 JWT 的外部触发，留空表示未启用
+    # 生成命令：python -c "import secrets; print(secrets.token_urlsafe(32))"
+    webhook_token = Column(String(128), nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -340,6 +343,8 @@ async def init_database():
             "ALTER TABLE ai_case_files ADD COLUMN created_by VARCHAR(100)",
             "ALTER TABLE api_projects ADD COLUMN created_by VARCHAR(100)",
             "ALTER TABLE test_plans ADD COLUMN created_by VARCHAR(100)",
+            # CI/CD webhook token
+            "ALTER TABLE test_plans ADD COLUMN webhook_token VARCHAR(128)",
         ]:
             try:
                 await conn.execute(__import__('sqlalchemy').text(ddl))
