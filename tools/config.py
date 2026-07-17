@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     AI_CASES_DIR: str = ""          # 留空时由 ai_case_generator 按规则推导，Docker 下设为 /data/ai_cases
     LOG_RETENTION_DAYS: int = 7     # 日志保留天数
     LLM_CONCURRENCY: int = 6        # 全局 LLM 并发上限
+    LLM_SEM_TIMEOUT: int = 60       # LLM Semaphore 等待超时（秒），超时返回"系统繁忙"
+    MAX_ACTIVE_GENERATE: int = 3    # 同时进行的 AI 生成任务上限，超出返回 429
 
     # ── 告警推送 ───────────────────────────────────────────────────────────────
     # 支持钉钉/企业微信/飞书 Webhook；留空则关闭告警

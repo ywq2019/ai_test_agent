@@ -26,13 +26,17 @@ from agent.langgraph_agent import init_langgraph_agent
 
 
 async def _log_cleanup_loop():
-    """每天凌晨 00:05 执行一次日志清理，服务启动时也立即执行一次。"""
+    """每天凌晨 00:05 执行日志清理 + 孤儿文件扫描，服务启动时也立即执行一次。"""
     from tools.logger import clean_logs
     # 启动时先清理一次
     try:
         clean_logs()
     except Exception as e:
         logger.warning(f"启动时日志清理失败: {e}")
+    try:
+        await _clean_orphan_case_files()
+    except Exception as e:
+        logger.warning(f"启动时孤儿文件清理失败: {e}")
 
     while True:
         # 等到下一个 00:05
@@ -41,12 +45,48 @@ async def _log_cleanup_loop():
         now = datetime.now()
         next_run = (now + timedelta(days=1)).replace(hour=0, minute=5, second=0, microsecond=0)
         sleep_secs = (next_run - now).total_seconds()
-        logger.info(f"下次日志清理将在 {next_run.strftime('%Y-%m-%d %H:%M:%S')} 执行")
+        logger.info(f"下次日志/孤儿文件清理将在 {next_run.strftime('%Y-%m-%d %H:%M:%S')} 执行")
         await asyncio.sleep(sleep_secs)
         try:
             clean_logs()
         except Exception as e:
             logger.warning(f"定时日志清理失败: {e}")
+        try:
+            await _clean_orphan_case_files()
+        except Exception as e:
+            logger.warning(f"定时孤儿文件清理失败: {e}")
+
+
+async def _clean_orphan_case_files():
+    """扫描 AI 用例输出目录，删除数据库中已无记录的孤儿文件。"""
+    from tools.database import async_session_maker, AICaseFile
+    from tools.config import settings
+    from pathlib import Path
+    from sqlalchemy import select
+
+    ai_cases_dir = Path(settings.AI_CASES_DIR) if settings.AI_CASES_DIR else None
+    if not ai_cases_dir or not ai_cases_dir.exists():
+        return
+
+    async with async_session_maker() as db:
+        result = await db.execute(select(AICaseFile.md_path, AICaseFile.xmind_path))
+        rows = result.fetchall()
+
+    # 数据库中所有已知文件名（取 stem 部分匹配，避免绝对路径差异）
+    known = set()
+    for md, xmind in rows:
+        for p in [md, xmind]:
+            if p:
+                known.add(Path(p).name)
+
+    removed = []
+    for f in ai_cases_dir.glob("cases_*"):
+        if f.name not in known:
+            f.unlink(missing_ok=True)
+            removed.append(f.name)
+
+    if removed:
+        logger.info(f"孤儿文件清理: 删除 {len(removed)} 个无记录文件: {removed}")
 
 
 @asynccontextmanager
@@ -123,6 +163,29 @@ async def lifespan(app: FastAPI):
     from skills.param_resolver import load_global_vars
     await load_global_vars()
     logger.info("全局变量池已加载")
+
+    # ── 重启恢复：将上次服务中断时卡在 generating 的记录重置为 failed ──────
+    from sqlalchemy import update as sql_update
+    from tools.database import async_session_maker, AICaseFile
+    async with async_session_maker() as db:
+        result = await db.execute(
+            sql_update(AICaseFile)
+            .where(AICaseFile.gen_status == "generating")
+            .values(gen_status="failed")
+            .returning(AICaseFile.id)
+        )
+        stuck_ids = [row[0] for row in result.fetchall()]
+        await db.commit()
+    if stuck_ids:
+        logger.warning(f"重启恢复：{len(stuck_ids)} 条卡住的生成任务已重置为 failed，ids={stuck_ids}")
+        # 通知前端这些任务已失败（如果有 WS 连接）
+        for rid in stuck_ids:
+            await ws_manager.broadcast(
+                {"type": "ai_gen_progress", "percent": 0,
+                 "stage": "服务重启，生成任务已中断，请重新生成", "error": True,
+                 "record_id": rid},
+                client_id="ai_gen",
+            )
 
     # 初始化默认管理员账号
     from api.auth import hash_password

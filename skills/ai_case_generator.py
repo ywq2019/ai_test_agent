@@ -18,6 +18,37 @@ from loguru import logger
 import os as _os
 _LLM_CONCURRENCY = int(_os.environ.get("LLM_CONCURRENCY", "6"))
 _GLOBAL_LLM_SEM  = asyncio.Semaphore(_LLM_CONCURRENCY)
+# Semaphore 等待超时（秒）：超过此时长说明系统过载，直接返回友好错误而非无限挂起
+_LLM_SEM_TIMEOUT = int(_os.environ.get("LLM_SEM_TIMEOUT", "60"))
+
+# ── 后台生成任务并发计数 ──────────────────────────────────────────────────────
+# 限制同时进行的 AI 生成任务数（每个任务内部会占用多个 LLM 调用槽位）
+# 超出上限时接口直接返回 429，避免任务无限堆积
+_MAX_ACTIVE_GENERATE = int(_os.environ.get("MAX_ACTIVE_GENERATE", "3"))
+_active_generate_count = 0
+_active_generate_lock  = asyncio.Lock()
+
+
+async def acquire_generate_slot() -> bool:
+    """尝试获取一个生成任务槽位。返回 True 表示成功，False 表示已满。"""
+    global _active_generate_count
+    async with _active_generate_lock:
+        if _active_generate_count >= _MAX_ACTIVE_GENERATE:
+            return False
+        _active_generate_count += 1
+        return True
+
+
+async def release_generate_slot() -> None:
+    """释放一个生成任务槽位。"""
+    global _active_generate_count
+    async with _active_generate_lock:
+        _active_generate_count = max(0, _active_generate_count - 1)
+
+
+def get_active_generate_count() -> int:
+    """返回当前正在进行的生成任务数（用于健康检查接口）。"""
+    return _active_generate_count
 
 
 def _uid() -> str:
@@ -609,8 +640,15 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
 
         logger.info(f"Calling LLM API: {url}, model={model}, is_anthropic={is_anthropic}")
 
-        # 全局并发保护：等待 Semaphore 令牌，超过上限时排队等待
-        async with _GLOBAL_LLM_SEM:
+        # 全局并发保护：等待 Semaphore 令牌，超时则报告系统繁忙
+        try:
+            await asyncio.wait_for(_GLOBAL_LLM_SEM.acquire(), timeout=_LLM_SEM_TIMEOUT)
+        except asyncio.TimeoutError:
+            raise RuntimeError(
+                f"当前 AI 服务繁忙（并发已满 {_LLM_CONCURRENCY}），"
+                f"等待超过 {_LLM_SEM_TIMEOUT}s，请稍后重试"
+            )
+        try:
             # 临时错误（502/503/504/超时）自动重试，最多3次，间隔递增
             _RETRYABLE = {502, 503, 504}
             _MAX_RETRY  = 3
@@ -641,6 +679,8 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
                     raise  # 不可重试或已用完重试次数，直接抛出
             else:
                 raise last_exc  # 全部重试失败
+        finally:
+            _GLOBAL_LLM_SEM.release()
 
         if is_anthropic:
             # 兼容多种代理响应格式

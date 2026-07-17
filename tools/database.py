@@ -121,6 +121,8 @@ class AICaseFile(Base):
     record_status = Column(String(20), default="active", nullable=False)
     # 生成状态：generating（后台生成中） / done（已完成） / failed（失败）
     gen_status = Column(String(20), default="done", nullable=False)
+    # 生成进度（0-100），后台任务每次推 WebSocket 时同步写库，前端重连后可恢复进度
+    gen_progress = Column(Integer, default=0, nullable=False)
 
     # ── 需求追踪字段 ────────────────────────────────────────────────────
     # 结构化需求列表：[{id, module, title, description, priority}]
@@ -329,6 +331,7 @@ async def init_database():
             "ALTER TABLE ai_case_files ADD COLUMN gen_status VARCHAR(20) DEFAULT 'done'",
             "ALTER TABLE ai_case_files ADD COLUMN requirements_data JSON",
             "ALTER TABLE ai_case_files ADD COLUMN traceability_data JSON",
+            "ALTER TABLE ai_case_files ADD COLUMN gen_progress INTEGER DEFAULT 0",
             # test_tasks 文档快照字段（兼容旧库）
             "ALTER TABLE test_tasks ADD COLUMN doc_snapshot TEXT",
             "ALTER TABLE test_tasks ADD COLUMN doc_hash VARCHAR(64)",

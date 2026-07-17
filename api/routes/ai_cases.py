@@ -39,6 +39,7 @@ class AICaseFileResponse(BaseModel):
     diff_summary: Optional[str] = None
     record_status: str = "active"
     gen_status: str = "done"
+    gen_progress: int = 0
 
 
 class DiffCheckRequest(BaseModel):
@@ -87,6 +88,7 @@ def _ai_case_response(record) -> AICaseFileResponse:
         diff_summary=record.diff_summary,
         record_status=getattr(record, "record_status", "active") or "active",
         gen_status=getattr(record, "gen_status", "done") or "done",
+        gen_progress=getattr(record, "gen_progress", 0) or 0,
     )
 
 
@@ -101,16 +103,23 @@ async def _do_generate_bg(
 ) -> None:
     """AI 用例后台生成任务：生成完成后写库并通过 WebSocket 推送结果。"""
     from tools.database import async_session_maker
-    from skills.ai_case_generator import ai_case_generator
+    from skills.ai_case_generator import ai_case_generator, release_generate_slot
 
     async with async_session_maker() as bg_db:
         res = await bg_db.execute(select(AICaseFile).where(AICaseFile.id == record_id))
         record = res.scalar_one_or_none()
         if not record:
             logger.error(f"_do_generate_bg: record_id={record_id} 不存在，任务中止")
+            await release_generate_slot()
             return
 
         async def _progress(pct: int, stage: str):
+            # 同步写库，前端重连后可从 GET /ai-cases/{id} 拿到当前进度
+            try:
+                record.gen_progress = pct
+                await bg_db.commit()
+            except Exception:
+                pass  # 进度写库失败不阻断主流程
             await ws_manager.broadcast(
                 {"type": "ai_gen_progress", "percent": pct, "stage": stage},
                 client_id="ai_gen",
@@ -149,6 +158,8 @@ async def _do_generate_bg(
                  "stage": f"生成失败: {type(e).__name__}: {e}", "error": True},
                 client_id="ai_gen",
             )
+        finally:
+            await release_generate_slot()
 
 
 # ── 生成 / 列表 / 详情 / 下载 ─────────────────────────────────────────────────
@@ -161,8 +172,15 @@ async def generate_ai_cases(
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
+    from skills.ai_case_generator import acquire_generate_slot, get_active_generate_count, _MAX_ACTIVE_GENERATE
     if not body.document_path and not body.content:
         raise HTTPException(status_code=400, detail="请提供文档路径或需求文本内容")
+    # 并发任务上限检查
+    if not await acquire_generate_slot():
+        raise HTTPException(
+            status_code=429,
+            detail=f"当前已有 {get_active_generate_count()} 个生成任务进行中（上限 {_MAX_ACTIVE_GENERATE}），请稍后再试"
+        )
     placeholder = AICaseFile(
         task_name=body.task_name, case_count=0, cases_data=None, gen_status="generating",
     )
@@ -486,16 +504,35 @@ async def delete_ai_case(record_id: int, db: AsyncSession = Depends(get_db)):
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="记录不存在")
-    for path_str in [record.md_path, record.xmind_path]:
-        if path_str:
-            p = Path(path_str)
-            if not p.is_absolute():
-                p = Path(__file__).parent.parent.parent / path_str
-            if p.exists():
-                p.unlink(missing_ok=True)
-    await db.execute(sql_delete(AICaseFile).where(AICaseFile.id == record_id))
+
+    # 收集整条版本链（当前记录 + 所有 deprecated 父版本）的文件路径一并清理
+    ids_to_delete = [record_id]
+    parent_id = record.parent_id
+    while parent_id:
+        pr = await db.execute(select(AICaseFile).where(AICaseFile.id == parent_id))
+        parent = pr.scalar_one_or_none()
+        if not parent:
+            break
+        ids_to_delete.append(parent.id)
+        _delete_case_files(parent)
+        parent_id = parent.parent_id
+
+    _delete_case_files(record)
+    await db.execute(sql_delete(AICaseFile).where(AICaseFile.id.in_(ids_to_delete)))
     await db.commit()
+    logger.info(f"删除 AI 用例记录链: ids={ids_to_delete}")
     return {"message": "删除成功"}
+
+
+def _delete_case_files(record) -> None:
+    """删除一条 AICaseFile 记录对应的 md/xmind 文件（文件不存在时静默忽略）。"""
+    for path_str in [record.md_path, record.xmind_path]:
+        if not path_str:
+            continue
+        p = Path(path_str)
+        if not p.is_absolute():
+            p = Path(__file__).parent.parent.parent / path_str
+        p.unlink(missing_ok=True)
 
 
 # ── Diff 检测 ─────────────────────────────────────────────────────────────────
