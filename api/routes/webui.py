@@ -703,13 +703,13 @@ async def execute_cases(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     check_owner(task, current_user, "任务")
-    check_owner(task, current_user, "任务")
     task_url  = task.url  if task else ""
     task_name = task.name if task else f"Task {request.task_id}"
     report = TestReport(
         task_id=request.task_id, name=f"{task_name} - 测试报告",
         summary={}, details=[], pass_rate=0, total_cases=len(case_dicts),
         passed=0, failed=0, skipped=0,
+        created_by=current_user.username,
     )
     db.add(report)
     await db.commit()
@@ -724,8 +724,12 @@ async def execute_cases(
 
 
 @router.get("/reports", response_model=List[ReportResponse])
-async def list_reports(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(TestReport).order_by(TestReport.created_at.desc()))
+async def list_reports(db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    stmt = select(TestReport).order_by(TestReport.created_at.desc())
+    f = owner_filter(TestReport, current_user)
+    if f is not None:
+        stmt = stmt.where(f)
+    result = await db.execute(stmt)
     reports = result.scalars().all()
     return [
         ReportResponse(
@@ -742,11 +746,12 @@ async def list_reports(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/reports/{report_id}", response_model=ReportResponse)
-async def get_report_by_id(report_id: int, db: AsyncSession = Depends(get_db)):
+async def get_report_by_id(report_id: int, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     result = await db.execute(select(TestReport).where(TestReport.id == report_id))
     report = result.scalar_one_or_none()
     if not report:
         raise HTTPException(status_code=404, detail="Report not found")
+    check_owner(report, current_user, "报告")
     return ReportResponse(
         task_id=report.task_id, task_name=report.name,
         summary=json.loads(report.summary) if isinstance(report.summary, str) else (report.summary or {}),
@@ -765,8 +770,7 @@ async def export_report(report_id: int, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(TestReport).where(TestReport.id == report_id))
     report = result.scalar_one_or_none()
     if not report:
-        raise HTTPException(status_code=404, detail="Report not found")
-    summary  = json.loads(report.summary)  if isinstance(report.summary, str)  else (report.summary  or {})
+        raise HTTPException(status_code=404, detail="Report not found")  if isinstance(report.summary, str)  else (report.summary  or {})
     details  = json.loads(report.details)  if isinstance(report.details, str)  else (report.details  or [])
     task_name  = report.name or f"报告 {report_id}"
     created_at = report.created_at.strftime("%Y-%m-%d %H:%M:%S") if report.created_at else ""
@@ -884,32 +888,44 @@ th{{background:#fafafa}}.badge{{padding:2px 8px;border-radius:4px;font-size:12px
 
 
 @router.delete("/reports/{report_id}")
-async def delete_report(report_id: int, db: AsyncSession = Depends(get_db)):
+async def delete_report(report_id: int, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     from sqlalchemy import delete
     result = await db.execute(select(TestReport).where(TestReport.id == report_id))
-    if not result.scalar_one_or_none():
+    report = result.scalar_one_or_none()
+    if not report:
         raise HTTPException(status_code=404, detail="Report not found")
+    check_owner(report, current_user, "报告")
     await db.execute(delete(TestReport).where(TestReport.id == report_id))
     await db.commit()
     return {"message": "Report deleted"}
 
 
 @router.delete("/reports")
-async def delete_reports_batch(report_ids: List[int], db: AsyncSession = Depends(get_db)):
+async def delete_reports_batch(report_ids: List[int], db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     from sqlalchemy import delete
     if not report_ids:
         raise HTTPException(status_code=400, detail="No report IDs provided")
-    await db.execute(delete(TestReport).where(TestReport.id.in_(report_ids)))
+    # 批量删除只删属于自己的（admin 可删全部，普通用户只删自己的）
+    stmt = select(TestReport).where(TestReport.id.in_(report_ids))
+    f = owner_filter(TestReport, current_user)
+    if f is not None:
+        stmt = stmt.where(f)
+    result = await db.execute(stmt)
+    allowed_ids = [r.id for r in result.scalars().all()]
+    if not allowed_ids:
+        raise HTTPException(status_code=403, detail="无权删除所选报告")
+    await db.execute(delete(TestReport).where(TestReport.id.in_(allowed_ids)))
     await db.commit()
-    return {"message": f"Deleted {len(report_ids)} reports"}
+    return {"message": f"Deleted {len(allowed_ids)} reports"}
 
 
 @router.get("/tasks/{task_id}/report", response_model=ReportResponse)
-async def get_report(task_id: int, db: AsyncSession = Depends(get_db)):
+async def get_report(task_id: int, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     result = await db.execute(select(TestReport).where(TestReport.task_id == task_id))
     report = result.scalar_one_or_none()
     if not report:
         raise HTTPException(status_code=404, detail="Report not found")
+    check_owner(report, current_user, "报告")
     return ReportResponse(
         task_id=report.task_id, task_name=report.name,
         summary=json.loads(report.summary) if isinstance(report.summary, str) else (report.summary or {}),

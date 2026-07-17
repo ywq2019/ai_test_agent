@@ -16,110 +16,55 @@
 
 ## 快速部署
 
-### 方式一：Docker 一键部署（推荐，适合服务器）
-
-服务器已安装 Docker 和 Docker Compose 即可：
+### Docker 一键部署（推荐）
 
 ```bash
 git clone https://github.com/ywq2019/ai_test_agent.git
 cd ai_test_agent
+```
 
-# 生产部署前修改 .env.docker 中的两处默认值：
-# 1. SECRET_KEY=<随机字符串>  生成命令：python -c "import secrets; print(secrets.token_hex(32))"
-# 2. POSTGRES_PASSWORD=<强密码>  同时改同文件 DATABASE_URL 里的密码
-vim .env.docker
+编辑 `.env.docker`，修改以下三项（其余保持默认即可）：
 
+| 配置项 | 说明 | 生成命令 |
+| --- | --- | --- |
+| `SECRET_KEY` | JWT 签名密钥，默认值有安全风险 | `python -c "import secrets; print(secrets.token_hex(32))"` |
+| `POSTGRES_PASSWORD` | 数据库密码，同时改 `DATABASE_URL` 里对应的密码 | — |
+| `AI_API_KEY` | 大模型 API Key（也可部署后在平台页面填写） | — |
+
+```bash
 docker compose up -d
 ```
 
-启动后访问 `http://服务器IP:4000`，进入**大模型配置**页填写 API Key（无需重启）。
-
-| 服务    | 说明                                           |
-| ----- | -------------------------------------------- |
-| `app` | FastAPI 后端 + 前端静态文件，监听 4000 端口               |
-| `db`  | PostgreSQL 15（含 pgvector），自动建表，数据持久化到 Volume  |
-
-| Volume     | 挂载路径    | 内容                                                                                              |
-| ---------- | ------- | ----------------------------------------------------------------------------------------------- |
-| `pg_data`  | —       | PostgreSQL 数据文件                                                                                |
-| `app_data` | `/data` | 截图（`/data/screenshots`）、AI 用例文件（`/data/ai_cases`）、日志（`/data/logs`）、上传文档（`/data/uploads`）|
+访问 `http://服务器IP:4000`，默认账号 `admin / admin123`，**登录后立即修改密码**。
 
 ```bash
 git pull && docker compose up -d --build  # 更新
-docker compose logs -f                     # 查看日志
+docker compose logs -f app                 # 查看日志
 docker compose down                        # 停止
 ```
 
-### 方式二：本地启动
+> **升级说明**：新版本在服务启动时自动执行数据库迁移，直接 `--build` 重启即可，无需手动操作。
 
-**环境要求**：Python 3.11+、Node.js 18+
-
-**生产模式**（单端口，前端打包后由后端托管）：
+### 本地启动
 
 ```bash
-# 1. 安装依赖
+# 安装依赖
 pip install -r requirements.txt
 playwright install chromium
 
-# 2. 构建前端（编译产物由后端静态托管）
+# 构建前端
 cd ui && npm install && npm run build && cd ..
 
-# 3. 启动
+# 启动（访问 http://localhost:4000）
 python main.py
 ```
 
-访问 `http://localhost:4000`，前端由后端统一托管，只需启动一个进程。
-
-**开发模式**（双端口，支持热更新，适合开发调试）：
+开发模式（前端热更新）：
 
 ```bash
-# 终端1：后端（API 服务，端口 4000）
-python main.py
-
-# 终端2：前端 Vite 开发服务器（端口 8090，自动代理 /api 请求到后端 4000）
-cd ui && npm run dev
+python main.py          # 终端1：后端 4000
+cd ui && npm run dev    # 终端2：前端 8090（代理到后端）
 ```
-
-访问 `http://localhost:8090`，前端代码修改实时生效。
-
-> **两个端口说明**：生产模式下 FastAPI 直接托管 `ui/dist/` 静态文件，访问 4000 即可；开发模式下 Vite 在 8090 启动独立服务并将 `/api`、`/ws` 等请求代理转发到后端 4000。
-
-### 局域网共享（Windows 团队使用）
-
-本机启动后，团队成员可通过内网 IP 直接访问，无需额外配置：
-
-```bash
-# 查看本机内网 IP（找以太网或 WLAN 的 IPv4 地址）
-ipconfig
-```
-
-开放防火墙入站端口：
-
-```powershell
-New-NetFirewallRule -DisplayName "AI测试平台" -Direction Inbound -Protocol TCP -LocalPort 4000 -Action Allow
-```
-
-团队成员访问 `http://<本机IP>:4000` 即可使用，例如 `http://192.168.1.100:4000`。
-
-### 登录账号
-
-平台内置 JWT 鉴权，首次启动自动创建默认账号：
-
-| 用户名     | 密码         | 权限        |
-| ------- | ---------- | --------- |
-| `admin` | `admin123` | 管理员，可管理用户 |
-
-> 登录后点击顶栏右上角「用户管理」可新建账号，普通用户只能登录和修改自己的密码。
-
-### 生产环境安全配置（重要）
-
-正式部署时必须修改以下三项默认值，启动时若检测到默认值会打印 WARNING：
-
-| 配置项 | 修改位置 | 说明 |
-| --- | --- | --- |
-| `SECRET_KEY` | `.env` 或 `.env.docker` | JWT 签名密钥，默认值存在伪造 Token 风险；生成命令：`python -c "import secrets; print(secrets.token_hex(32))"` |
-| 管理员密码 | 登录后「用户管理」页修改 | 默认 `admin123`，部署后立即改 |
-| 数据库密码 | **只改 `.env.docker`** 一处即可 | `POSTGRES_PASSWORD` 和 `DATABASE_URL` 里的密码保持一致，`docker-compose.yml` 会自动读取 |
 
 ***
 
@@ -127,217 +72,126 @@ New-NetFirewallRule -DisplayName "AI测试平台" -Direction Inbound -Protocol T
 
 ### AI 用例生成（文档驱动）
 
-上传需求文档，AI 按功能模块并行生成覆盖 6 种测试方法的高质量用例，导出 Markdown / XMind。
+上传需求文档，AI 按功能模块并行生成覆盖 6 种测试方法的高质量用例，支持导出 Markdown / XMind。
 
-| 功能                   | 说明                                                                                              |
-| -------------------- | ----------------------------------------------------------------------------------------------- |
-| **异步后台生成**           | 提交后立即返回，后台并发生成，完成后通过 WebSocket 推送 `ai_gen_done` 事件，彻底解决超时问题                                    |
-| **生成进度持久化**          | 每步进度同步写库（`gen_progress` 字段），前端刷新/断线重连后可从接口恢复进度，不再从零开始                                           |
-| 分段并行生成               | 提取模块后并发调用 AI（Semaphore=4），每次输出可控，不超时                                                           |
-| 6 种测试方法              | 等价类、边界值、判定表、场景法、错误推测、状态转换，每条用例标注方法                                                             |
-| 多维度覆盖                | 功能用例 + 性能用例 + 兼容性用例同步生成                                                                       |
-| 覆盖度优化                | 分析已有用例盲区，自动追加补充用例                                                                               |
-| **需求变更增量更新**         | 上传新版文档 → AI Diff 分析 → 仅对变更模块做用例级保守合并，unchanged 模块直接保留，通用测试模块（性能/兼容）永不废弃                         |
-| **需求追踪矩阵**           | AI 从需求文档提取结构化需求条目，自动建立用例-需求双向映射，生成覆盖率矩阵（充分/不足/未覆盖）；针对覆盖不足的需求可一键分析缺口维度并生成补充用例                   |
-| 废弃用例管理               | 废弃用例追加模块末尾（删除线展示），默认隐藏，可开关查看                                                                    |
-| **RAG 知识库**           | 文档入库时自动分段（900字/段，200字重叠），逐模块生成时检索相关段落替代硬截断；支持 pgvector 向量检索，API 不支持时自动降级为关键词 TF 匹配              |
-| 超大文档支持               | BeautifulSoup 深度清洗 HTML 噪音；模块提取并行分批（20000字/批，Semaphore=5），文档切片索引每段 20000 字、重叠 2000 字           |
-| **截断 JSON 自动修复**     | LLM 因 max\_tokens 截断输出时，自动找到最后一个完整 JSON 元素并补齐闭合括号，避免丢失已生成内容                                     |
-| **Claude thinking 兼容** | 过滤 Anthropic 响应中的 thinking block，仅取 type=text 的内容块，修复卡在 15% 的问题                                 |
-| 代理兼容                 | 兼容多种 Anthropic 代理响应格式（`text` 字段缺失、content 为字符串等），自动容错不报错                                        |
+| 功能 | 说明 |
+| --- | --- |
+| **异步后台生成** | 提交后立即返回，完成后 WebSocket 推送，进度实时持久化（断线重连可恢复） |
+| 分段并行生成 | 提取模块后并发调用 AI（Semaphore=4），每次输出可控，不超时 |
+| 6 种测试方法 | 等价类、边界值、判定表、场景法、错误推测、状态转换 |
+| **需求变更增量更新** | AI Diff 分析 → 仅对变更模块做用例级合并，unchanged 模块直接保留 |
+| **需求追踪矩阵** | 提取结构化需求条目，建立用例-需求双向映射，生成覆盖率矩阵；一键分析缺口并生成补充用例 |
+| **RAG 知识库** | 文档分段入库（pgvector 向量检索，不支持时降级关键词匹配），生成时检索相关段落 |
+| 超大文档支持 | BeautifulSoup 深度清洗 HTML；分批并行提取模块（20000字/批） |
+| 截断 JSON 自动修复 | LLM 输出被截断时自动补齐，避免丢失已生成内容 |
 
 ### WebUI 自动化
 
-Playwright 抓取页面元素，AI 生成含具体 selector 的可执行用例，直接运行自动化测试。
+Playwright 抓取页面元素，AI 生成含具体 selector 的可执行用例。
 
-| 功能               | 说明                                                         |
-| ---------------- | ---------------------------------------------------------- |
-| 页面元素解析           | 自动抓取可交互元素，识别移动端 H5，等待 networkidle 确保动态渲染完成                 |
-| **懒加载支持**        | 自动分屏滚动触发懒加载（最多 40 屏），高度不变连续 2 次则停止，确保列表类页面元素全部加载           |
-| **页面正文兜底**       | 无需求文档时自动提取页面 body 正文（最多 5 万字）作为用例生成上下文                     |
-| **文档驱动兜底**       | 页面元素 ≤3 个时自动切换为纯文档驱动生成模式，不依赖页面爬取结果                        |
-| AI 生成用例          | 结合页面元素 + 需求文档分段生成，含 selector 和测试数据，支持随时取消                  |
-| 执行控制             | 支持暂停/继续/停止，自动截图，生成含图表的 HTML 报告                             |
-| **报告 PDF 导出**    | 复用 Playwright Chromium 渲染 HTML 报告为 PDF，无需额外依赖              |
-| **中文 PDF 支持**    | PDF 解析优先使用 pymupdf，正确提取中文内容；PyPDF2 作为降级备选                   |
-| **需求变更增量更新**     | 保守合并策略：默认保留所有旧用例，只废弃功能已彻底删除的用例                             |
+| 功能 | 说明 |
+| --- | --- |
+| 页面元素解析 | 抓取可交互元素，等待 networkidle，支持移动端 H5 |
+| **懒加载支持** | 自动分屏滚动（最多 40 屏），高度不变连续 2 次停止 |
+| **文档驱动兜底** | 页面元素 ≤3 个时自动切换纯文档驱动模式 |
+| 执行控制 | 支持暂停/继续/停止，自动截图，生成 HTML 报告 |
+| **报告 PDF 导出** | 复用 Playwright Chromium 渲染，无需额外依赖 |
+| **需求变更增量更新** | 保守合并策略，默认保留旧用例 |
 
 ### 接口自动化
 
-#### 接口测试
+| 功能 | 说明 |
+| --- | --- |
+| 多项目管理 | Base URL + 鉴权（Bearer/Basic/API Key）+ 代理 + Hosts 映射 |
+| AI 生成用例 | Swagger/自然语言/代码（Python/Java/Go/Node.js/PHP）三种输入 |
+| **代码可行性分析** | 识别 `missing`/`mismatch`/`extra`/`risk` 四类偏差，自动生成差异验证用例 |
+| 参数化 | 全局变量池 `{{gvar:name}}`、内置函数 `{{uuid()}}`、自定义脚本函数 |
+| 前置依赖 | 配置登录前置用例，自动提取 Token，鉴权失败自动重试 |
+| 压力测试 | 配置并发/时长/爬坡，实时推送 TPS / P95 / P99 |
+| **报告 PDF 导出** | 含用例明细表格 + AI 分析段落 |
 
-| 功能            | 说明                                                                     |
-| ------------- | ---------------------------------------------------------------------- |
-| 多项目管理         | Base URL + 鉴权方式（Bearer/Basic/API Key）+ 代理 + Hosts 映射                   |
-| AI 生成用例       | 三种输入：Swagger/OpenAPI、自然语言描述、**直接粘贴接口实现代码**（Python/Java/Go/Node.js/PHP） |
-| **代码可行性分析**   | 对比需求文档与代码实现，识别 `missing`/`mismatch`/`extra`/`risk` 四类偏差，自动生成差异验证用例     |
-| 参数化           | 全局变量池 `{{gvar:name}}`、内置函数 `{{uuid()}}`、自定义 Python 脚本函数                |
-| 前置依赖          | 配置登录前置用例，自动提取 Token，鉴权失败自动重试                                           |
-| 压力测试          | 配置并发/时长/爬坡，实时推送 TPS / P95 / P99                                        |
-| AI 报告分析       | 执行完成后调用 LLM 分析失败原因，给出修复建议                                              |
-| **报告 PDF 导出** | 接口测试报告、测试计划报告均支持导出 PDF，含用例明细 + AI 分析段落                                 |
+### 测试计划
 
-#### 测试计划
+跨项目接口用例编排，共享变量上下文（登录 → 下单 → 查询）。
 
-跨项目接口用例编排，共享变量上下文，实现端到端链路测试（如：登录 → 下单 → 查询）。
-
-| 功能           | 说明                                          |
-| ------------ | ------------------------------------------- |
-| 步骤编排         | 从任意项目拖入用例，自由排序、启用/禁用单步                      |
-| 共享变量         | 所有步骤共享 `var_store`，前步提取的变量后步直接引用            |
-| 计划级网络配置      | 代理/Hosts 优先级高于项目级，可按计划统一切换测试环境              |
-| 执行报告         | WebSocket 实时推送进度，卡片式报告展示通过率/断言详情/AI 分析      |
-| **CI/CD 集成** | Webhook token 触发接口，支持 Jenkins/GitHub Actions 一行 curl 触发，可选执行完成回调 |
+| 功能 | 说明 |
+| --- | --- |
+| 步骤编排 | 从任意项目拖入用例，自由排序、启用/禁用 |
+| 共享变量 | 所有步骤共享 `var_store`，前步提取后步直接引用 |
+| **CI/CD 集成** | Webhook token 触发，支持 Jenkins / GitHub Actions，可选执行完成回调 |
+| **报告 PDF 导出** | 含步骤明细 + AI 分析 |
 
 ***
 
 ## 稳定性与安全
 
-### 多用户并发保护
+### 多用户并发
 
-| 机制                 | 说明                                                                  |
-| ------------------ | ------------------------------------------------------------------- |
-| **全局 LLM Semaphore** | 限制整个系统同时进行的 LLM 调用数（默认 6），多用户并发时超出上限的请求排队等待，不会冲垮代理 QPS            |
-| **Semaphore 等待超时**  | 等待超过 60s 直接返回「AI 服务繁忙」，不无限挂起（可通过 `LLM_SEM_TIMEOUT` 调整）             |
-| **后台任务并发上限**       | 同时进行的 AI 生成任务不超过 3 个（可通过 `MAX_ACTIVE_GENERATE` 调整），超出返回 429        |
-| **反向代理 IP 识别**     | 限流器优先读 `X-Real-IP` → `X-Forwarded-For` → TCP IP，Nginx 反代场景下限流按真实客户端 IP 隔离 |
-| **接口频率限制**         | AI 生成类接口 5次/分钟，优化/提取/映射类接口 3次/分钟（slowapi，按真实 IP）                   |
+| 机制 | 默认值 | 配置项 |
+| --- | --- | --- |
+| 全局 LLM Semaphore | 6 并发 | `LLM_CONCURRENCY` |
+| Semaphore 等待超时 | 60s | `LLM_SEM_TIMEOUT` |
+| 后台生成任务上限 | 3 个 | `MAX_ACTIVE_GENERATE` |
+| 接口频率限制 | 生成 5次/分钟，优化/分析 3次/分钟 | slowapi，按真实 IP |
+| 反向代理 IP 识别 | `X-Real-IP` → `X-Forwarded-For` → TCP | Nginx 反代时自动识别 |
 
 ### 数据隔离
 
-普通用户只能看到自己创建的数据；`created_by = NULL` 的历史数据对所有人可见，升级无感知。
-
-| 数据类型   | 隔离范围                        |
-| ------ | --------------------------- |
-| AI 用例  | 列表过滤 + 单记录读写删除权限检查，admin 看全部 |
-| WebUI 任务 | 同上                          |
-| 接口项目   | 同上                          |
-| 测试计划   | 同上                          |
+普通用户只能看到自己创建的数据（AI用例、WebUI任务、接口项目、测试计划、测试报告）；admin 可查看全部。服务启动时自动将历史 NULL 数据归属到默认管理员账号，升级无感知。
 
 ### 自愈与告警
 
-| 机制              | 说明                                                                      |
-| --------------- | ----------------------------------------------------------------------- |
-| **重启状态恢复**      | 服务重启时自动将卡在 `generating` 的记录重置为 `failed`，并推送 WebSocket 通知前端，避免用户一直等待    |
-| **文件自动清理**      | 删除用例记录时同步清理整条版本链的 md/xmind 文件；每天 00:05 扫描并删除数据库中无对应记录的孤儿文件            |
-| **日志定时清理**      | 每天 00:05 自动清理过期日志（默认保留 7 天），按日滚动并 zip 压缩，可通过 `LOG_RETENTION_DAYS` 调整   |
-| **Webhook 告警推送** | ERROR 级别日志自动推送钉钉/企业微信/飞书，5 分钟内同一错误只推一次（防刷屏），留空则静默               |
+| 机制 | 说明 |
+| --- | --- |
+| 重启状态恢复 | 服务重启时自动将卡住的生成任务重置为 failed，推送 WebSocket 通知 |
+| 文件自动清理 | 删除记录时清理整条版本链文件；每天 00:05 扫描孤儿文件 |
+| 日志定时清理 | 每天 00:05 清理过期日志（默认保留 7 天），`LOG_RETENTION_DAYS` 可调 |
+| Webhook 告警 | ERROR 级日志自动推钉钉/企微/飞书，5 分钟防刷屏；`ALERT_WEBHOOK_URL` 留空则静默 |
 
 ### CI/CD 集成
 
-测试计划支持生成专属 Webhook Token，无需 JWT 即可从 CI 流水线触发：
-
 ```bash
-# 生成 token（需登录）
+# 1. 生成 webhook token（需登录）
 curl -X PUT "http://your-host:4000/api/v1/test-plans/1/webhook-token" \
-  -H "Authorization: Bearer <JWT>" -H "Content-Type: application/json" -d '{}'
-# 响应：{"webhook_token": "xxx", "trigger_url": "/api/v1/test-plans/1/trigger?token=xxx"}
+  -H "Authorization: Bearer <JWT>" -d '{}'
+# → {"webhook_token": "xxx", "trigger_url": "..."}
 
-# Jenkins / GitHub Actions 触发
+# 2. 在 Jenkins / GitHub Actions 里触发
 curl -f -X POST "http://your-host:4000/api/v1/test-plans/1/trigger?token=xxx"
 
-# 可选：带回调，执行完成后平台主动 POST 结果到 CI 系统
-curl -f -X POST "http://your-host:4000/api/v1/test-plans/1/trigger?token=xxx&callback_url=https://ci.example.com/hook"
+# 3. 可选：执行完成后回调
+curl -f -X POST "...?token=xxx&callback_url=https://ci.example.com/hook"
 ```
-
-***
-
-## 技术栈
-
-### 后端
-
-| 技术                           | 说明                                               |
-| ---------------------------- | ------------------------------------------------ |
-| Python 3.11+ / FastAPI 0.138 | 全异步 ASGI 框架，Uvicorn 服务器                          |
-| SQLAlchemy 2.0               | 异步 ORM，SQLite（本机）/ PostgreSQL（Docker）双数据库兼容      |
-| httpx                        | 异步 HTTP 客户端，支持代理 / 自定义 Transport（Hosts 映射）       |
-| Playwright 1.39              | 浏览器自动化 + 报告 PDF 导出（headless Chromium 渲染）         |
-| slowapi                      | 基于 IP 的接口频率限制，支持反向代理真实 IP 识别                     |
-| pymupdf                      | PDF 文本提取，中文 PDF 兼容性优于 PyPDF2                     |
-| python-jose + bcrypt         | JWT 鉴权 + 密码哈希                                    |
-| PyYAML                       | Prompt 配置文件读取                                    |
-| BeautifulSoup4               | HTML 文档深度清洗，去除 CSS/JS 噪音提取纯文本                    |
-
-### 前端
-
-| 技术                 | 说明                           |
-| ------------------ | ---------------------------- |
-| Vue 3.4 + Vite 5   | 前端框架 + 构建工具                  |
-| Element Plus 2.14  | UI 组件库                       |
-| Pinia / Vue Router | 状态管理 / 路由（含登录守卫）             |
-| ECharts 5.5        | 压测实时图表                       |
-| Axios 1.6          | HTTP 客户端，请求拦截器自动附加 JWT Token |
 
 ***
 
 ## AI 集成
 
-所有 AI 功能统一读取「大模型配置」页的设置，**自动判断 Anthropic / OpenAI 格式**，支持一键切换：
+所有 AI 功能统一读取「大模型配置」页，**自动判断 Anthropic / OpenAI 格式**，支持一键切换：
 
-| 提供商               | 模型示例              | API URL                      |
-| ----------------- | ----------------- | ---------------------------- |
-| Claude（Anthropic） | claude-sonnet-4-5 | <https://api.anthropic.com>  |
-| DeepSeek          | deepseek-v4-flash | <https://api.deepseek.com>   |
-| OpenAI            | gpt-4o            | <https://api.openai.com>     |
-| Ollama（本地）        | llama3            | <http://localhost:11434>     |
-| 任意 OpenAI 兼容代理    | —                 | 填入代理地址即可                     |
+| 提供商 | 模型示例 | API URL |
+| --- | --- | --- |
+| Claude | claude-sonnet-4-5 | https://api.anthropic.com |
+| DeepSeek | deepseek-v4-flash | https://api.deepseek.com |
+| OpenAI | gpt-4o | https://api.openai.com |
+| Ollama（本地） | llama3 | http://localhost:11434 |
+| 任意 OpenAI 兼容代理 | — | 填入代理地址即可 |
 
-所有 Prompt 统一管理在 `skills/prompts/*.yaml`，无需改代码即可调整 AI 生成效果。
+Prompt 统一管理在 `skills/prompts/*.yaml`，无需改代码即可调整生成效果。
 
 ***
 
-## 项目结构
+## 技术栈
 
-```
-ai_test_agent/
-├── main.py                 # 应用入口（JWT 鉴权中间件、启动恢复、孤儿文件清理、日志定时清理）
-├── Dockerfile / docker-compose.yml
-├── api/
-│   ├── auth.py             # JWT 工具 + get_current_user + owner_filter + check_owner
-│   ├── limiter.py          # slowapi 限流器（支持 X-Real-IP / X-Forwarded-For 反代识别）
-│   ├── routes/             # REST 路由（按功能域拆分）
-│   │   ├── __init__.py     # 汇总四个子路由，导出合并 router
-│   │   ├── auth.py         # 鉴权与用户管理（/auth/*、/health、/logs）
-│   │   ├── webui.py        # WebUI 自动化（/tasks、/cases、/execute、/reports、/reports/{id}/pdf）
-│   │   ├── ai_cases.py     # AI 文档驱动用例（/ai-cases/*，含 diff-check、incremental-update）
-│   │   └── api_test.py     # 接口自动化（/api-test/*、/global-vars、/test-plans、/trigger）
-│   ├── websocket.py        # WebSocket 端点
-│   └── websocket_manager.py
-├── skills/
-│   ├── ai_case_generator.py    # AI 文档驱动用例生成（分段 + 增量更新 + RAG + JSON修复 + 并发控制）
-│   ├── case_generator.py       # WebUI 用例生成（分段 + 文档驱动兜底 + 增量更新）
-│   ├── api_case_generator.py   # 接口用例生成 + 代码分析
-│   ├── api_executor.py         # 接口用例执行（断言 + 变量提取 + 前置依赖）
-│   ├── api_load_tester.py      # 压力测试引擎
-│   ├── rag.py                  # RAG 知识库（分段/向量化/检索，支持 pgvector + 关键词降级）
-│   ├── param_resolver.py       # 参数解析（变量 / 函数 / 脚本）
-│   ├── prompt_loader.py        # Prompt YAML 加载器
-│   └── prompts/                # LLM Prompt 配置（YAML，无需改代码即可调整）
-│       ├── ai_case_gen.yaml
-│       ├── api_case_gen.yaml
-│       ├── code_analyze.yaml
-│       └── ui_case_gen.yaml
-├── tools/
-│   ├── database.py         # SQLAlchemy 模型（兼容 SQLite / PostgreSQL，含 DocumentChunk）
-│   ├── document_parser.py  # 文档解析（pymupdf 优先解析中文 PDF，BeautifulSoup 清洗 HTML）
-│   ├── pdf_exporter.py     # HTML → PDF 转换工具（Playwright headless Chromium，A4 格式）
-│   ├── alerter.py          # 钉钉/企微/飞书 Webhook 告警推送（ERROR 级别自动触发，防抖 300s）
-│   ├── config.py           # 环境变量（含 JWT / 限流 / 告警配置）
-│   ├── logger.py           # 日志配置（按日滚动 + zip 压缩 + 定时清理 + 告警 sink）
-│   └── browser.py          # Playwright 封装（networkidle + 分屏滚动懒加载 + 页面正文提取）
-├── ui/src/
-│   ├── api/index.js        # Axios 封装（JWT 拦截器 + 401 跳登录）
-│   ├── stores/auth.js      # Pinia Auth Store（token 持久化）
-│   ├── views/Login.vue     # 登录页
-│   └── views/ApiTest/      # 接口测试组件（拆分后）
-│       └── ScriptDialog.vue
-└── tests/                  # 单元测试（137 条）
-    ├── test_param_resolver.py      # 27 条
-    ├── test_api_executor.py        # 27 条
-    ├── test_incremental.py         # 12 条
-    ├── test_ai_case_generator.py   # 30 条（截断修复/字符转义/分段索引/定位/增量合并）
-    └── test_changes.py             # 41 条（Task1-8 稳定性与安全专项验证）
-```
+| 层 | 技术 | 说明 |
+| --- | --- | --- |
+| 后端 | Python 3.11+ / FastAPI 0.138 | 全异步 ASGI，Uvicorn |
+| ORM | SQLAlchemy 2.0 | SQLite（本机）/ PostgreSQL（Docker）双兼容 |
+| 浏览器 | Playwright 1.39 | UI 自动化 + PDF 报告导出 |
+| 限流 | slowapi | 按真实 IP，支持反向代理 |
+| 向量库 | pgvector | RAG 检索，不支持时降级关键词匹配 |
+| 鉴权 | python-jose + bcrypt | JWT + 密码哈希 |
+| 前端 | Vue 3.4 + Vite 5 + Element Plus 2.14 | 含 ECharts 压测图表 |
 
 ***
 
@@ -345,53 +199,56 @@ ai_test_agent/
 
 完整文档：`http://localhost:4000/docs`
 
-**认证**
-
-| 方法     | 路径                                       | 说明              |
-| ------ | ---------------------------------------- | --------------- |
-| POST   | `/api/v1/auth/login`                     | 登录，返回 JWT Token |
-| GET    | `/api/v1/auth/users`                     | 用户列表（admin）     |
-| POST   | `/api/v1/auth/users`                     | 新建用户（admin）     |
-| DELETE | `/api/v1/auth/users/{username}`          | 删除用户（admin）     |
-| PUT    | `/api/v1/auth/users/{username}/password` | 重置密码（admin）     |
-
-**接口测试（部分）**
-
-| 方法   | 路径                                                        | 说明                     |
-| ---- | --------------------------------------------------------- | ---------------------- |
-| POST | `/api/v1/api-test/projects/{id}/cases/generate`           | AI 生成用例（Swagger/描述/代码） |
-| POST | `/api/v1/api-test/projects/{id}/cases/generate-from-code` | 从代码生成用例                |
-| POST | `/api/v1/api-test/projects/{id}/code-analyze`             | 代码可行性分析                |
-| POST | `/api/v1/api-test/projects/{id}/execute`                  | 单测执行                   |
-| POST | `/api/v1/api-test/projects/{id}/load`                     | 压力测试                   |
-| GET  | `/api/v1/api-test/reports/{id}/pdf`                       | 接口测试报告导出 PDF           |
-
-**测试计划**
-
-| 方法     | 路径                                              | 说明                              |
-| ------ | ------------------------------------------------ | ------------------------------- |
-| POST   | `/api/v1/test-plans/{id}/run`                    | 执行测试计划（需 JWT）                   |
-| POST   | `/api/v1/test-plans/{id}/trigger?token=xxx`      | CI/CD Webhook 触发（无需 JWT，用 token 鉴权） |
-| PUT    | `/api/v1/test-plans/{id}/webhook-token`          | 生成/更新 webhook token             |
-| DELETE | `/api/v1/test-plans/{id}/webhook-token`          | 撤销 webhook token                |
-| GET    | `/api/v1/test-plans/reports/{id}/pdf`            | 测试计划报告导出 PDF                    |
-
-**WebUI 报告**
-
-| 方法  | 路径                               | 说明           |
-| --- | -------------------------------- | ------------ |
-| GET | `/api/v1/reports/{id}/export`    | 导出 HTML 报告   |
-| GET | `/api/v1/reports/{id}/pdf`       | 导出 PDF 报告    |
+| 类别 | 方法 | 路径 | 说明 |
+| --- | --- | --- | --- |
+| 认证 | POST | `/api/v1/auth/login` | 登录，返回 JWT |
+| AI 用例 | POST | `/api/v1/ai-cases/generate` | 生成用例 |
+| WebUI | POST | `/api/v1/execute` | 执行测试 |
+| WebUI | GET | `/api/v1/reports/{id}/pdf` | 导出 PDF |
+| 接口测试 | POST | `/api/v1/api-test/projects/{id}/execute` | 执行用例 |
+| 接口测试 | GET | `/api/v1/api-test/reports/{id}/pdf` | 导出 PDF |
+| 测试计划 | POST | `/api/v1/test-plans/{id}/trigger?token=xxx` | CI/CD 触发（无需 JWT） |
+| 测试计划 | GET | `/api/v1/test-plans/reports/{id}/pdf` | 导出 PDF |
 
 **WebSocket 频道**
 
-| client\_id  | 说明                |
-| ----------- | ----------------- |
-| `ai_gen`    | AI 用例生成/优化/增量更新进度 |
-| `cases_gen` | UI 用例生成进度         |
-| `api_exec`  | 接口用例执行进度          |
-| `api_load`  | 压测实时指标            |
-| `plan_<id>` | 测试计划执行进度          |
+| client_id | 说明 |
+| --- | --- |
+| `ai_gen` | AI 用例生成/优化/增量更新进度 |
+| `cases_gen` | UI 用例生成进度 |
+| `api_exec` | 接口用例执行进度 |
+| `api_load` | 压测实时指标 |
+| `plan_<id>` | 测试计划执行进度 |
+
+***
+
+## 项目结构
+
+```
+ai_test_agent/
+├── main.py                     # 入口：JWT 中间件、启动恢复、孤儿文件清理
+├── Dockerfile / docker-compose.yml / .env.docker
+├── api/
+│   ├── auth.py                 # JWT + owner_filter + check_owner
+│   ├── limiter.py              # slowapi 限流（支持反向代理 IP 识别）
+│   └── routes/
+│       ├── auth.py             # 鉴权与用户管理
+│       ├── webui.py            # WebUI 自动化（含报告 PDF 导出）
+│       ├── ai_cases.py         # AI 文档驱动用例
+│       └── api_test.py         # 接口自动化 + 测试计划 + CI/CD webhook
+├── skills/
+│   ├── ai_case_generator.py    # 文档驱动用例生成（RAG + 并发控制 + JSON 修复）
+│   ├── prompts/                # LLM Prompt 配置（YAML，无需改代码即可调整）
+│   └── ...
+├── tools/
+│   ├── database.py             # ORM 模型 + 自动迁移 + 历史数据归属
+│   ├── pdf_exporter.py         # HTML → PDF（Playwright headless A4）
+│   ├── alerter.py              # 钉钉/企微/飞书告警推送
+│   ├── config.py               # 环境变量
+│   └── logger.py               # 日志（按日滚动 + zip + 定时清理 + 告警 sink）
+├── ui/src/                     # Vue 3 前端
+└── tests/                      # 单元测试（137 条）
+```
 
 ***
 
@@ -448,4 +305,4 @@ ai_test_agent/
 
 ## 许可证
 
-本项目采用 MIT 许可证，详见 [LICENSE](LICENSE) 文件。
+MIT License — 详见 [LICENSE](LICENSE)

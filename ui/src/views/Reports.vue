@@ -11,7 +11,11 @@
             </el-button>
             <el-button type="success" @click="exportReport" :disabled="!currentReport">
               <el-icon><Download /></el-icon>
-              导出报告
+              导出 HTML
+            </el-button>
+            <el-button type="warning" @click="exportPdf" :disabled="!currentReport" :loading="pdfLoading">
+              <el-icon><Document /></el-icon>
+              导出 PDF
             </el-button>
           </div>
         </div>
@@ -229,6 +233,7 @@ const showScreenshotDialog = ref(false)
 const screenshotUrl = ref('')
 const screenshotTitle = ref('')
 const selectedIds = ref([])
+const pdfLoading = ref(false)
 let pieChartInstance = null
 let barChartInstance = null
 
@@ -401,6 +406,20 @@ const exportReport = () => {
   const reportId = currentReport.value.report_id
   // 通过后端 /api/v1/reports/{id}/export 提供下载，避免服务器本地路径 404
   window.open(`/api/v1/reports/${reportId}/export`, '_blank')
+}
+
+const exportPdf = async () => {
+  if (!currentReport.value) return
+  const reportId = currentReport.value.report_id
+  pdfLoading.value = true
+  try {
+    // PDF 由 Playwright 渲染，耗时较长，先提示再打开
+    ElMessage.info('正在生成 PDF，请稍候...')
+    window.open(`/api/v1/reports/${reportId}/pdf`, '_blank')
+  } finally {
+    // 延迟关闭 loading，给用户一点视觉反馈
+    setTimeout(() => { pdfLoading.value = false }, 2000)
+  }
 }
 
 const viewScreenshot = (path, title = '') => {

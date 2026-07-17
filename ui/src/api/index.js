@@ -90,7 +90,9 @@ export const reportApi = {
   list: () => api.get(`/reports`),
   getById: (reportId) => api.get(`/reports/${reportId}`),
   delete: (reportId) => api.delete(`/reports/${reportId}`),
-  deleteBatch: (reportIds) => api.delete(`/reports`, { data: reportIds })
+  deleteBatch: (reportIds) => api.delete(`/reports`, { data: reportIds }),
+  exportHtml: (reportId) => window.open(`/api/v1/reports/${reportId}/export`, '_blank'),
+  exportPdf: (reportId) => window.open(`/api/v1/reports/${reportId}/pdf`, '_blank'),
 }
 
 export const agentApi = {

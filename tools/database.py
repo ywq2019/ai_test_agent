@@ -94,6 +94,7 @@ class TestReport(Base):
     skipped = Column(Integer, default=0)
     report_path = Column(String(512), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    created_by = Column(String(100), nullable=True, index=True)  # 创建人，随任务归属
 
 
 class AICaseFile(Base):
@@ -345,11 +346,30 @@ async def init_database():
             "ALTER TABLE test_plans ADD COLUMN created_by VARCHAR(100)",
             # CI/CD webhook token
             "ALTER TABLE test_plans ADD COLUMN webhook_token VARCHAR(128)",
+            # 报告隔离
+            "ALTER TABLE test_reports ADD COLUMN created_by VARCHAR(100)",
         ]:
             try:
                 await conn.execute(__import__('sqlalchemy').text(ddl))
             except Exception:
                 pass  # 列已存在则忽略
+
+        # 数据迁移：将 created_by = NULL 的历史数据归属到 admin
+        # 保证普通用户不会看到不属于自己的旧数据
+        _sql = __import__('sqlalchemy').text
+        _admin = settings.DEFAULT_USERNAME  # 默认 "admin"
+        for table in ["test_tasks", "ai_case_files", "api_projects", "test_plans", "test_reports"]:
+            try:
+                result = await conn.execute(
+                    _sql(f"UPDATE {table} SET created_by = :u WHERE created_by IS NULL"),
+                    {"u": _admin},
+                )
+                if result.rowcount:
+                    __import__('loguru').logger.info(
+                        f"[init_db] {table}: {result.rowcount} 条历史数据 created_by 归属到 {_admin}"
+                    )
+            except Exception:
+                pass  # 列不存在（极端旧库）时忽略
 
 
 async def get_db():
