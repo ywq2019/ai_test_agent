@@ -1,5 +1,7 @@
 <template>
   <div class="execution-page">
+    <WorkspaceRequired v-if="auth.role !== 'admin' && !wsStore.currentId" />
+    <template v-else>
     <el-card shadow="hover">
       <template #header>
         <div class="card-header">
@@ -147,17 +149,23 @@
     <el-dialog v-model="showScreenshotDialog" title="截图查看" width="800px">
       <img v-if="screenshotUrl" :src="screenshotUrl" style="width: 100%;" />
     </el-dialog>
+    </template>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useTaskStore } from '../stores/task'
+import { useWorkspaceStore } from '../stores/workspace'
+import { useAuthStore } from '../stores/auth'
+import WorkspaceRequired from '../components/WorkspaceRequired.vue'
 import { ElMessage } from 'element-plus'
 
 const route = useRoute()
 const taskStore = useTaskStore()
+const wsStore = useWorkspaceStore()
+const auth = useAuthStore()
 
 const selectedTaskId = ref(null)
 const selectedBrowser = ref('chromium')
@@ -399,7 +407,9 @@ const viewScreenshot = (path) => {
 
 onMounted(async () => {
   connectWS()
-  await taskStore.fetchTasks()
+  if (wsStore.initialized) {
+    await taskStore.fetchTasks(wsStore.currentId)
+  }
 
   if (route.query.taskId) {
     selectedTaskId.value = parseInt(route.query.taskId)
@@ -425,6 +435,15 @@ onMounted(async () => {
       }
     }
   }
+})
+
+// 切换工作空间时刷新任务列表
+watch(() => wsStore.currentId, async (id) => {
+  selectedTaskId.value = null
+  await taskStore.fetchTasks(id)
+})
+watch(() => wsStore.initialized, async (ready) => {
+  if (ready) await taskStore.fetchTasks(wsStore.currentId)
 })
 
 onUnmounted(() => {

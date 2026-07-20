@@ -12,7 +12,7 @@ from fastapi import WebSocket
 from loguru import logger
 
 PING_INTERVAL = 30   # 每30秒发一次 ping
-PING_TIMEOUT  = 10   # 等待 pong 最多10秒
+PING_TIMEOUT  = 90   # 等待 pong 最多90秒（LLM 调用可能需要60+秒）
 
 
 class WebSocketManager:

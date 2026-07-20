@@ -1,5 +1,7 @@
 <template>
   <div class="api-test">
+    <WorkspaceRequired v-if="auth.role !== 'admin' && !wsStore.currentId" />
+    <template v-else>
     <!-- 左侧：项目列表 -->
     <div class="project-panel">
       <div class="panel-header">
@@ -559,11 +561,12 @@
               每次执行前先跑这些用例（如登录），自动刷新全局变量中的 token
             </div>
             <el-select v-model="projectForm.setup_cases" multiple placeholder="选择前置用例"
-              style="width:100%" value-key="key" @visible-change="loadAllCasesForSetup">
+              style="width:100%" value-key="key" @visible-change="loadAllCasesForSetup"
+              :max-collapse-tags="3" collapse-tags collapse-tags-tooltip>
               <el-option-group v-for="g in allCasesGrouped" :key="g.project_id" :label="g.project_name">
-                <el-option v-for="c in g.cases" :key="`${g.project_id}_${c.case_id}`"
-                  :label="`${g.project_name} / ${c.label}`"
-                  :value="{ project_id: g.project_id, case_id: c.case_id, label: `${g.project_name} / ${c.label}`, key: `${g.project_id}_${c.case_id}` }" />
+                <el-option v-for="c in g.cases" :key="`${g.project_id}_${c.id}`"
+                  :label="`[${c.method}] ${c.path} - ${c.name}`"
+                  :value="{ project_id: g.project_id, case_id: c.id, label: `[${c.method}] ${c.path} - ${c.name}`, key: `${g.project_id}_${c.id}` }" />
               </el-option-group>
             </el-select>
           </div>
@@ -1383,6 +1386,7 @@ async def create_order(user_id: int, product_id: int, quantity: int):
         </el-form-item>
       </el-form>
     </el-dialog>
+    </template>
   </div>
 </template>
 
@@ -1393,6 +1397,12 @@ import { Plus, Edit, Delete, MagicStick, VideoPlay, Refresh, Loading, View, Docu
 import { apiTestApi, scriptApi, gvarApi } from '../api'
 import { marked } from 'marked'
 import ScriptDialog from './ApiTest/ScriptDialog.vue'
+import { useWorkspaceStore } from '../stores/workspace'
+import { useAuthStore } from '../stores/auth'
+import WorkspaceRequired from '../components/WorkspaceRequired.vue'
+
+const wsStore = useWorkspaceStore()
+const auth = useAuthStore()
 
 // ── 项目 ──
 const projects = ref([])
@@ -1412,8 +1422,9 @@ const projectForm = reactive({
 })
 
 const loadAllCasesForSetup = async (visible) => {
+  // 已在 showProjectDialog 中加载，这里只在列表为空时兜底补加载（如用户手动展开）
   if (!visible || allCasesGrouped.value.length) return
-  allCasesGrouped.value = await apiTestApi.listAllCasesGrouped()
+  allCasesGrouped.value = await apiTestApi.listAllCasesGrouped(wsStore.currentId)
 }
 
 // ── 用例 ──
@@ -1653,7 +1664,15 @@ const connectWs = (clientId) => {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
   ws = new WebSocket(`${proto}://${window.location.host}/ws?client_id=${clientId}`)
   ws.onmessage = (e) => {
-    try { handleWsMsg(JSON.parse(e.data)) } catch {}
+    try {
+      const data = JSON.parse(e.data)
+      // 回复心跳 pong，防止服务端因超时断开连接
+      if (data.type === 'ping') {
+        ws?.send(JSON.stringify({ type: 'pong' }))
+        return
+      }
+      handleWsMsg(data)
+    } catch {}
   }
 }
 const disconnectWs = () => { ws?.close(); ws = null }
@@ -1704,7 +1723,7 @@ const handleWsMsg = (data) => {
 
 // ── 项目操作 ──
 const loadProjects = async () => {
-  projects.value = await apiTestApi.listProjects()
+  projects.value = await apiTestApi.listProjects(wsStore.currentId)
 }
 
 const selectProject = async (p) => {
@@ -1720,14 +1739,30 @@ const selectProject = async (p) => {
   if (activeTab.value === 'reports') loadReports()
 }
 
-const showProjectDialog = (p) => {
+const showProjectDialog = async (p) => {
   editingProject.value = p
-  allCasesGrouped.value = []   // 每次打开时重新加载
+  // 立刻加载选项列表，确保回填的已选项能找到匹配的 option、正确渲染 label
+  allCasesGrouped.value = await apiTestApi.listAllCasesGrouped(wsStore.currentId)
   if (p) {
-    // 回填 setup_cases，补上 key 字段供 el-select value-key 使用
-    const setupCases = (p.setup_cases || []).map(sc => ({
-      ...sc, key: `${sc.project_id}_${sc.case_id}`,
-    }))
+    // 回填 setup_cases：优先用 allCasesGrouped 中的实时数据重建 label，
+    // 避免旧存储中残留 "undefined" label 的问题
+    const caseMap = {}
+    for (const g of allCasesGrouped.value) {
+      for (const c of g.cases) {
+        caseMap[`${g.project_id}_${c.id}`] = { method: c.method, path: c.path, name: c.name }
+      }
+    }
+    const setupCases = (p.setup_cases || [])
+      .filter(sc => sc.case_id != null)   // 剔除没有 case_id 的脏数据
+      .map(sc => {
+        const key = `${sc.project_id}_${sc.case_id}`
+        const live = caseMap[key]
+        // live 优先重建 label；没找到则保留旧 label（若旧 label 含 undefined 则用 ID 兜底）
+        const label = live
+          ? `[${live.method}] ${live.path} - ${live.name}`
+          : (sc.label && !sc.label.includes('undefined') ? sc.label : `用例#${sc.case_id}`)
+        return { project_id: sc.project_id, case_id: sc.case_id, label, key }
+      })
     Object.assign(projectForm, {
       name: p.name, base_url: p.base_url, description: p.description || '',
       auth_type: p.auth_type || 'none',
@@ -1758,12 +1793,15 @@ const saveProject = async () => {
       name: projectForm.name, base_url: projectForm.base_url,
       description: projectForm.description, auth_type: projectForm.auth_type,
       auth_config: { ...projectForm.auth_config },
-      setup_cases: projectForm.setup_cases.map(sc => ({
-        project_id: sc.project_id, case_id: sc.case_id, label: sc.label,
-      })),
+      setup_cases: projectForm.setup_cases
+        .filter(sc => sc.case_id != null)   // 过滤掉没有 case_id 的脏数据
+        .map(sc => ({
+          project_id: sc.project_id, case_id: sc.case_id, label: sc.label,
+        })),
       auth_error_patterns: projectForm.auth_error_patterns.filter(r => r.field && r.value),
       proxy_url: projectForm.proxy_url || '',
       hosts_map: projectForm.hosts_map || '',
+      workspace_id: wsStore.currentId || null,
     }
     if (editingProject.value) {
       const updated = await apiTestApi.updateProject(editingProject.value.id, payload)
@@ -1904,7 +1942,7 @@ const gvarForm = reactive({ visible: false, name: '', value: '', description: ''
 const showGvarDialog = async () => {
   gvarDialogVisible.value = true
   gvarForm.visible = false
-  gvars.value = await gvarApi.list()
+  gvars.value = await gvarApi.list(wsStore.currentId)
 }
 const showAddGvar = () => {
   Object.assign(gvarForm, { visible: true, name: '', value: '', description: '' })
@@ -1912,7 +1950,7 @@ const showAddGvar = () => {
 const createGvar = async () => {
   if (!gvarForm.name.trim()) return ElMessage.warning('变量名不能为空')
   try {
-    const g = await gvarApi.create({ name: gvarForm.name.trim(), value: gvarForm.value, description: gvarForm.description })
+    const g = await gvarApi.create({ name: gvarForm.name.trim(), value: gvarForm.value, description: gvarForm.description }, wsStore.currentId)
     gvars.value.push(g)
     gvarForm.visible = false
     ElMessage.success(`全局变量 ${g.name} 创建成功`)
@@ -2323,6 +2361,9 @@ const methodColor = (m) => {
   return map[m] || ''
 }
 
+watch(() => wsStore.currentId, async () => {
+  projects.value = await apiTestApi.listProjects(wsStore.currentId)
+})
 onMounted(loadProjects)
 onUnmounted(disconnectWs)
 

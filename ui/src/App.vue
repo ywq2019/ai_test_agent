@@ -63,6 +63,10 @@
             </el-menu-item>
           </el-sub-menu>
           <el-divider />
+          <el-menu-item index="/workspaces">
+            <el-icon><Folder /></el-icon>
+            <span>工作空间</span>
+          </el-menu-item>
           <el-menu-item index="/skills">
             <el-icon><Box /></el-icon>
             <span>技能管理</span>
@@ -80,6 +84,22 @@
             <h2>{{ pageTitle }}</h2>
           </div>
           <div class="header-right">
+            <!-- 工作空间切换器：admin 可清空（看全部），普通用户必选 -->
+            <el-select
+              v-model="wsStore.currentId"
+              :placeholder="auth.role === 'admin' ? '全部数据' : '请选择工作空间'"
+              :clearable="auth.role === 'admin'"
+              size="small"
+              style="width:170px;margin-right:12px"
+              @change="wsStore.switchWorkspace($event)"
+            >
+              <el-option
+                v-for="w in wsStore.workspaces"
+                :key="w.id"
+                :label="w.name"
+                :value="w.id"
+              />
+            </el-select>
             <el-tooltip content="刷新页面数据" placement="bottom">
               <el-button circle text :icon="RefreshRight" @click="refreshPage" style="margin-right:8px" />
             </el-tooltip>
@@ -174,6 +194,7 @@ import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useTaskStore } from './stores/task'
 import { useAuthStore } from './stores/auth'
+import { useWorkspaceStore } from './stores/workspace'
 import { RefreshRight, Plus } from '@element-plus/icons-vue'
 import { ElMessageBox, ElMessage } from 'element-plus'
 import { userApi } from './api'
@@ -182,6 +203,7 @@ const route = useRoute()
 const router = useRouter()
 const taskStore = useTaskStore()
 const auth = useAuthStore()
+const wsStore = useWorkspaceStore()
 
 const wsConnected = ref(false)
 const wsDialogVisible = ref(false)
@@ -268,7 +290,8 @@ const pageTitle = computed(() => {
     '/api-test': '接口测试',
     '/test-plan': '测试计划',
     '/skills': '技能管理',
-    '/llm': '大模型配置'
+    '/llm': '大模型配置',
+    '/workspaces': '工作空间管理'
   }
   return titles[route.path] || 'AI测试工具平台'
 })
@@ -323,8 +346,17 @@ const handleWebSocketMessage = (data) => {
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
   connectWebSocket()
+  wsStore.restoreFromSession()
+  await wsStore.fetchWorkspaces()
+  // 普通用户：若未选空间则自动选第一个
+  if (auth.role !== 'admin' && !wsStore.currentId && wsStore.workspaces.length > 0) {
+    wsStore.switchWorkspace(wsStore.workspaces[0].id)
+  }
+  // workspace 就绪后主动触发一次任务刷新，解决子页面比 App.vue 先 mounted 的竞态
+  await taskStore.fetchTasks(wsStore.currentId)
+  wsStore.markReady()
 })
 
 onUnmounted(() => {

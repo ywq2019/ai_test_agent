@@ -107,6 +107,7 @@ async def create_user(
     db.add(new_user)
     await db.commit()
     await db.refresh(new_user)
+    # 普通用户不自动加入任何工作空间，需要由空间 owner 手动邀请
     return {"id": new_user.id, "username": new_user.username, "role": new_user.role,
             "created_at": new_user.created_at.isoformat() if new_user.created_at else None}
 
@@ -123,6 +124,10 @@ async def delete_user(
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
+    # 同步删除该用户在所有工作空间的成员记录
+    from tools.database import ProjectMember
+    from sqlalchemy import delete as sql_delete
+    await db.execute(sql_delete(ProjectMember).where(ProjectMember.username == username))
     await db.delete(user)
     await db.commit()
     return {"message": f"用户 '{username}' 已删除"}

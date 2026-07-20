@@ -14,7 +14,7 @@ from tools.database import (
     get_db, ApiProject, ApiCase, ApiLoadConfig, ApiTestReport,
     CustomScript, GlobalVariable, TestPlan, TestPlanStep, TestPlanReport, User,
 )
-from api.auth import get_current_user, owner_filter, check_owner
+from api.auth import get_current_user, owner_filter, check_owner, workspace_filter, check_workspace_member, check_access
 from api.websocket_manager import ws_manager
 from tools.config import settings
 
@@ -24,12 +24,21 @@ router = APIRouter()
 # ── 辅助字典构建 ──────────────────────────────────────────────────────────────
 
 def _proj_dict(p: ApiProject) -> dict:
+    # 清洗旧数据中 label 含 "undefined" 的前置用例条目，避免前端显示乱码
+    raw_setup = p.setup_cases or []
+    clean_setup = [
+        sc for sc in raw_setup
+        if isinstance(sc, dict)
+        and sc.get("case_id") is not None
+        and "undefined" not in str(sc.get("label", ""))
+    ]
     return {
         "id": p.id, "name": p.name, "base_url": p.base_url,
         "description": p.description, "auth_type": p.auth_type,
         "auth_config": p.auth_config, "global_headers": p.global_headers,
-        "setup_cases": p.setup_cases or [], "auth_error_patterns": p.auth_error_patterns or [],
+        "setup_cases": clean_setup, "auth_error_patterns": p.auth_error_patterns or [],
         "proxy_url": p.proxy_url or "", "hosts_map": p.hosts_map or "",
+        "workspace_id": p.workspace_id,
         "created_at": p.created_at.isoformat() if p.created_at else "",
     }
 
@@ -138,6 +147,7 @@ async def create_api_project(data: dict, db: AsyncSession = Depends(get_db), cur
         description=data.get("description", ""), auth_type=data.get("auth_type", "none"),
         auth_config=data.get("auth_config"), global_headers=data.get("global_headers"),
         proxy_url=data.get("proxy_url", ""), hosts_map=data.get("hosts_map", ""),
+        workspace_id=data.get("workspace_id"),
         created_by=current_user.username,
     )
     db.add(proj)
@@ -147,18 +157,69 @@ async def create_api_project(data: dict, db: AsyncSession = Depends(get_db), cur
 
 
 @router.get("/api-test/projects")
-async def list_api_projects(db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def list_api_projects(workspace_id: int = None, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     stmt = select(ApiProject).order_by(ApiProject.created_at.desc())
-    f = owner_filter(ApiProject, current_user)
-    if f is not None:
-        stmt = stmt.where(f)
+    if current_user.role != "admin":
+        from sqlalchemy import false as sql_false
+        from tools.database import ProjectMember
+        from sqlalchemy import select as _sel
+        if workspace_id is None:
+            stmt = stmt.where(sql_false())
+        else:
+            # 验证用户是该空间成员
+            m = await db.execute(_sel(ProjectMember).where(
+                ProjectMember.project_id == workspace_id,
+                ProjectMember.username == current_user.username,
+            ))
+            if not m.scalar_one_or_none():
+                stmt = stmt.where(sql_false())
+            else:
+                stmt = stmt.where(ApiProject.workspace_id == workspace_id)
     result = await db.execute(stmt)
     return [_proj_dict(p) for p in result.scalars().all()]
 
 
 @router.get("/api-test/all-cases")
-async def list_all_cases_grouped(db: AsyncSession = Depends(get_db)):
-    projects = (await db.execute(select(ApiProject).order_by(ApiProject.created_at.desc()))).scalars().all()
+async def list_all_cases_grouped(
+    workspace_id: int = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """返回用于前置用例选择、测试计划步骤添加的所有项目用例。
+    admin：不传 workspace_id 返回全部，传了只返回该空间。
+    普通用户：返回其所有成员空间的项目（不限定单个空间），前置用例选择需要跨空间。
+    """
+    stmt = select(ApiProject).order_by(ApiProject.created_at.desc())
+    if current_user.role != "admin":
+        from tools.database import ProjectMember
+        from sqlalchemy import select as _sel
+        if workspace_id is not None:
+            # 指定了空间：验证成员身份后过滤
+            m = await db.execute(_sel(ProjectMember).where(
+                ProjectMember.project_id == workspace_id,
+                ProjectMember.username == current_user.username,
+            ))
+            if not m.scalar_one_or_none():
+                from sqlalchemy import false as sql_false
+                stmt = stmt.where(sql_false())
+            else:
+                stmt = stmt.where(ApiProject.workspace_id == workspace_id)
+        else:
+            # 未指定空间：返回该用户所有成员空间的项目
+            my_workspaces = (await db.execute(
+                _sel(ProjectMember.project_id).where(
+                    ProjectMember.username == current_user.username
+                )
+            )).scalars().all()
+            if my_workspaces:
+                stmt = stmt.where(ApiProject.workspace_id.in_(my_workspaces))
+            else:
+                from sqlalchemy import false as sql_false
+                stmt = stmt.where(sql_false())
+    elif workspace_id is not None:
+        # admin 指定了空间：只返回该空间
+        stmt = stmt.where(ApiProject.workspace_id == workspace_id)
+    projects = (await db.execute(stmt)).scalars().all()
     result = []
     for p in projects:
         cases = (await db.execute(
@@ -174,7 +235,7 @@ async def update_api_project(project_id: int, data: dict, db: AsyncSession = Dep
     proj = result.scalar_one_or_none()
     if not proj:
         raise HTTPException(status_code=404, detail="项目不存在")
-    check_owner(proj, current_user, "接口项目")
+    await check_access(db, proj, current_user, "接口项目")
     for field in ("name", "base_url", "description", "auth_type", "auth_config", "global_headers",
                   "setup_cases", "auth_error_patterns", "proxy_url", "hosts_map"):
         if field in data:
@@ -191,7 +252,7 @@ async def delete_api_project(project_id: int, db: AsyncSession = Depends(get_db)
     proj = result.scalar_one_or_none()
     if not proj:
         raise HTTPException(status_code=404, detail="项目不存在")
-    check_owner(proj, current_user, "接口项目")
+    await check_access(db, proj, current_user, "接口项目")
     await db.execute(sql_del(ApiCase).where(ApiCase.project_id == project_id))
     await db.execute(sql_del(ApiLoadConfig).where(ApiLoadConfig.project_id == project_id))
     await db.execute(sql_del(ApiTestReport).where(ApiTestReport.project_id == project_id))
@@ -208,7 +269,7 @@ async def list_api_cases(project_id: int, db: AsyncSession = Depends(get_db), cu
     proj = proj_result.scalar_one_or_none()
     if not proj:
         raise HTTPException(status_code=404, detail="项目不存在")
-    check_owner(proj, current_user, "接口项目")
+    await check_access(db, proj, current_user, "接口项目")
     result = await db.execute(
         select(ApiCase).where(ApiCase.project_id == project_id).order_by(ApiCase.created_at)
     )
@@ -266,7 +327,7 @@ async def generate_api_cases(
     proj = result.scalar_one_or_none()
     if not proj:
         raise HTTPException(status_code=404, detail="项目不存在")
-    check_owner(proj, current_user, "接口项目")
+    await check_access(db, proj, current_user, "接口项目")
 
     swagger_text = data.get("swagger_text", "")
     description  = data.get("description", "")
@@ -317,7 +378,7 @@ async def generate_cases_from_code(
     proj = result.scalar_one_or_none()
     if not proj:
         raise HTTPException(status_code=404, detail="项目不存在")
-    check_owner(proj, current_user, "接口项目")
+    await check_access(db, proj, current_user, "接口项目")
     code = (data.get("code") or "").strip()
     lang = data.get("lang", "python")
     if not code:
@@ -362,7 +423,7 @@ async def analyze_code_vs_requirement(project_id: int, data: dict, db: AsyncSess
     proj = result.scalar_one_or_none()
     if not proj:
         raise HTTPException(status_code=404, detail="项目不存在")
-    check_owner(proj, current_user, "接口项目")
+    await check_access(db, proj, current_user, "接口项目")
     requirement = (data.get("requirement") or "").strip()
     code = (data.get("code") or "").strip()
     lang = data.get("lang", "python")
@@ -538,7 +599,7 @@ async def execute_api_cases(
     proj = proj_r.scalar_one_or_none()
     if not proj:
         raise HTTPException(status_code=404, detail="项目不存在")
-    check_owner(proj, current_user, "接口项目")
+    await check_access(db, proj, current_user, "接口项目")
     case_ids = data.get("case_ids")
     proj_dict = _proj_dict(proj)
 
@@ -561,6 +622,13 @@ async def execute_api_cases(
             await ws_manager.broadcast({"type": "api_exec_progress", **p}, client_id="api_exec")
 
         summary = await api_executor.execute_cases(proj_dict, cases, progress_cb, custom_scripts=custom_scripts)
+
+        # 持久化执行链中提取的全局变量，归属到当前项目的工作空间
+        try:
+            from skills.param_resolver import flush_global_vars
+            await flush_global_vars(source_project=proj.name, workspace_id=proj.workspace_id)
+        except Exception as _fe:
+            logger.warning(f"[exec] flush_global_vars 失败: {_fe}")
 
         async with async_session_maker() as s:
             report = ApiTestReport(
@@ -591,7 +659,7 @@ async def run_load_test(
     proj = proj_r.scalar_one_or_none()
     if not proj:
         raise HTTPException(status_code=404, detail="项目不存在")
-    check_owner(proj, current_user, "接口项目")
+    await check_access(db, proj, current_user, "接口项目")
     config   = {"concurrent_users": data.get("concurrent_users", 10),
                 "duration": data.get("duration", 60), "ramp_up": data.get("ramp_up", 10)}
     case_ids = data.get("case_ids")
@@ -823,23 +891,62 @@ def _gvar_dict(g: GlobalVariable) -> dict:
 
 
 @router.get("/global-vars")
-async def list_global_vars(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(GlobalVariable).order_by(GlobalVariable.name))
+async def list_global_vars(
+    workspace_id: int = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    stmt = select(GlobalVariable).order_by(GlobalVariable.name)
+    if current_user.role == "admin":
+        # admin 选了空间：只看该空间的；未选：看全部（含 NULL 的历史数据）
+        if workspace_id is not None:
+            stmt = stmt.where(GlobalVariable.workspace_id == workspace_id)
+        # workspace_id is None → 不加任何过滤，看全部
+    else:
+        from sqlalchemy import false as sql_false
+        from tools.database import ProjectMember
+        from sqlalchemy import select as _sel
+        if workspace_id is None:
+            stmt = stmt.where(sql_false())
+        else:
+            m = await db.execute(_sel(ProjectMember).where(
+                ProjectMember.project_id == workspace_id,
+                ProjectMember.username == current_user.username,
+            ))
+            if not m.scalar_one_or_none():
+                stmt = stmt.where(sql_false())
+            else:
+                # 普通用户选了空间：只看该空间的（不再包含 NULL，避免跨空间泄漏）
+                stmt = stmt.where(GlobalVariable.workspace_id == workspace_id)
+    result = await db.execute(stmt)
     return [_gvar_dict(g) for g in result.scalars().all()]
 
 
 @router.post("/global-vars")
-async def create_global_var(data: dict, db: AsyncSession = Depends(get_db)):
+async def create_global_var(
+    data: dict,
+    workspace_id: int = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     from skills.param_resolver import set_global_var, _gvar_dirty
     name = (data.get("name") or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="变量名不能为空")
-    exist = (await db.execute(select(GlobalVariable).where(GlobalVariable.name == name))).scalar_one_or_none()
+    # 同一空间内变量名唯一（精确匹配 workspace_id，不再混入 NULL 数据）
+    ws_id = workspace_id or data.get("workspace_id")
+    stmt = select(GlobalVariable).where(GlobalVariable.name == name)
+    if ws_id:
+        stmt = stmt.where(GlobalVariable.workspace_id == ws_id)
+    else:
+        stmt = stmt.where(GlobalVariable.workspace_id.is_(None))
+    exist = (await db.execute(stmt)).scalar_one_or_none()
     if exist:
         raise HTTPException(status_code=400, detail=f"变量 '{name}' 已存在，请使用 PUT 更新")
     g = GlobalVariable(name=name, value=data.get("value", ""),
                        description=data.get("description", ""),
-                       source_project=data.get("source_project", "手动创建"))
+                       source_project=data.get("source_project", "手动创建"),
+                       workspace_id=ws_id)
     db.add(g)
     await db.commit()
     await db.refresh(g)
@@ -884,12 +991,24 @@ async def delete_global_var(var_id: int, db: AsyncSession = Depends(get_db)):
 # ── 测试计划 ──────────────────────────────────────────────────────────────────
 
 @router.get("/test-plans")
-async def list_test_plans(db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def list_test_plans(workspace_id: int = None, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     from sqlalchemy import func
     stmt = select(TestPlan).order_by(TestPlan.created_at.desc())
-    f = owner_filter(TestPlan, current_user)
-    if f is not None:
-        stmt = stmt.where(f)
+    if current_user.role != "admin":
+        from sqlalchemy import false as sql_false
+        from tools.database import ProjectMember
+        from sqlalchemy import select as _sel
+        if workspace_id is None:
+            stmt = stmt.where(sql_false())
+        else:
+            m = await db.execute(_sel(ProjectMember).where(
+                ProjectMember.project_id == workspace_id,
+                ProjectMember.username == current_user.username,
+            ))
+            if not m.scalar_one_or_none():
+                stmt = stmt.where(sql_false())
+            else:
+                stmt = stmt.where(TestPlan.workspace_id == workspace_id)
     plans = (await db.execute(stmt)).scalars().all()
     result = []
     for p in plans:
@@ -911,6 +1030,7 @@ async def create_test_plan(data: dict, db: AsyncSession = Depends(get_db), curre
         name=name, description=data.get("description", ""),
         project_id=data.get("project_id"), proxy_url=data.get("proxy_url", ""),
         hosts_map=data.get("hosts_map", ""), status="pending",
+        workspace_id=data.get("workspace_id"),
         created_by=current_user.username,
     )
     db.add(plan)
@@ -930,7 +1050,7 @@ async def get_test_plan(plan_id: int, db: AsyncSession = Depends(get_db), curren
     plan = (await db.execute(select(TestPlan).where(TestPlan.id == plan_id))).scalar_one_or_none()
     if not plan:
         raise HTTPException(status_code=404, detail="测试计划不存在")
-    check_owner(plan, current_user, "测试计划")
+    await check_access(db, plan, current_user, "测试计划")
     steps_rows = (await db.execute(
         select(TestPlanStep).where(TestPlanStep.plan_id == plan_id).order_by(TestPlanStep.sort_order)
     )).scalars().all()
@@ -959,7 +1079,7 @@ async def update_test_plan(plan_id: int, data: dict, db: AsyncSession = Depends(
     plan = (await db.execute(select(TestPlan).where(TestPlan.id == plan_id))).scalar_one_or_none()
     if not plan:
         raise HTTPException(status_code=404, detail="测试计划不存在")
-    check_owner(plan, current_user, "测试计划")
+    await check_access(db, plan, current_user, "测试计划")
     for field in ("name", "description", "project_id", "proxy_url", "hosts_map"):
         if field in data:
             setattr(plan, field, data[field])
@@ -975,7 +1095,7 @@ async def delete_test_plan(plan_id: int, db: AsyncSession = Depends(get_db), cur
     plan = (await db.execute(select(TestPlan).where(TestPlan.id == plan_id))).scalar_one_or_none()
     if not plan:
         raise HTTPException(status_code=404, detail="测试计划不存在")
-    check_owner(plan, current_user, "测试计划")
+    await check_access(db, plan, current_user, "测试计划")
     await db.execute(sql_delete(TestPlanStep).where(TestPlanStep.plan_id == plan_id))
     await db.execute(sql_delete(TestPlanReport).where(TestPlanReport.plan_id == plan_id))
     await db.delete(plan)
@@ -1089,7 +1209,7 @@ async def set_webhook_token(
     plan = (await db.execute(select(TestPlan).where(TestPlan.id == plan_id))).scalar_one_or_none()
     if not plan:
         raise HTTPException(status_code=404, detail="测试计划不存在")
-    check_owner(plan, current_user, "测试计划")
+    await check_access(db, plan, current_user, "测试计划")
 
     new_token = data.get("token") or secrets.token_urlsafe(32)
     if len(new_token) < 16:
@@ -1114,7 +1234,7 @@ async def revoke_webhook_token(
     plan = (await db.execute(select(TestPlan).where(TestPlan.id == plan_id))).scalar_one_or_none()
     if not plan:
         raise HTTPException(status_code=404, detail="测试计划不存在")
-    check_owner(plan, current_user, "测试计划")
+    await check_access(db, plan, current_user, "测试计划")
     plan.webhook_token = None
     await db.commit()
     return {"message": "webhook token 已撤销", "plan_id": plan_id}
@@ -1136,6 +1256,7 @@ async def _execute_plan_bg(plan_id: int, callback_url: Optional[str] = None):
     var_store: dict = {}
     final_status = "failed"
     plan_name = ""
+    plan_workspace_id = None
     report_id = None
 
     try:
@@ -1147,8 +1268,9 @@ async def _execute_plan_bg(plan_id: int, callback_url: Optional[str] = None):
             if not plan:
                 logger.warning(f"[plan_exec] 计划 {plan_id} 不存在")
                 return
-            plan_name          = plan.name
-            plan_proxy_url     = plan.proxy_url or ""
+            plan_name           = plan.name
+            plan_workspace_id   = plan.workspace_id
+            plan_proxy_url      = plan.proxy_url or ""
             plan_hosts_map_text = plan.hosts_map or ""
 
             steps_rows = (await db.execute(
@@ -1256,7 +1378,7 @@ async def _execute_plan_bg(plan_id: int, callback_url: Optional[str] = None):
 
         async with _session_maker() as db:
             try:
-                await flush_global_vars(source_project=f"plan:{plan_id}")
+                await flush_global_vars(source_project=f"plan:{plan_id}", workspace_id=plan_workspace_id)
             except Exception as fv_err:
                 logger.warning(f"[plan_exec] flush_global_vars 失败: {fv_err}")
             report = TestPlanReport(plan_id=plan_id, plan_name=plan_name, total=total,

@@ -56,6 +56,11 @@ const routes = [
     path: '/llm',
     name: 'LLM',
     component: () => import('../views/LLM.vue')
+  },
+  {
+    path: '/workspaces',
+    name: 'Workspaces',
+    component: () => import('../views/Workspaces.vue')
   }
 ]
 

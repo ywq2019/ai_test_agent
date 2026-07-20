@@ -215,15 +215,17 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
+import { ref, onMounted, onUnmounted, computed, nextTick, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useTaskStore } from '../stores/task'
 import { reportApi } from '../api'
 import * as echarts from 'echarts'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useWorkspaceStore } from '../stores/workspace'
 
 const route = useRoute()
 const taskStore = useTaskStore()
+const wsStore = useWorkspaceStore()
 
 const reportsList = ref([])
 const currentReport = ref(null)
@@ -318,7 +320,7 @@ const deleteBatch = async () => {
 
 const fetchReports = async () => {
   try {
-    const data = await reportApi.list()
+    const data = await reportApi.list(wsStore.currentId)
     reportsList.value = data || []
     if (reportsList.value.length > 0 && !currentReport.value) {
       await selectReport(reportsList.value[0])
@@ -428,6 +430,7 @@ const viewScreenshot = (path, title = '') => {
   showScreenshotDialog.value = true
 }
 
+watch(() => wsStore.currentId, () => { fetchReports() })
 onMounted(async () => {
   window.addEventListener('resize', handleResize)
   await fetchReports()

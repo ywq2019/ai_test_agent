@@ -87,7 +87,7 @@ export const commandApi = {
 
 export const reportApi = {
   get: (taskId) => api.get(`/tasks/${taskId}/report`),
-  list: () => api.get(`/reports`),
+  list: (workspaceId = null) => api.get(`/reports`, { params: workspaceId ? { workspace_id: workspaceId } : {} }),
   getById: (reportId) => api.get(`/reports/${reportId}`),
   delete: (reportId) => api.delete(`/reports/${reportId}`),
   deleteBatch: (reportIds) => api.delete(`/reports`, { data: reportIds }),
@@ -103,7 +103,7 @@ export const aiCaseApi = {
   generate: (data, signal) => api.post('/ai-cases/generate', data, { timeout: 420000, signal }),
   optimize: (id, signal) => api.post(`/ai-cases/${id}/optimize`, {}, { timeout: 420000, signal }),
   coverage: (id) => api.get(`/ai-cases/${id}/coverage`),
-  list: () => api.get('/ai-cases'),
+  list: (workspaceId = null) => api.get('/ai-cases', { params: workspaceId ? { workspace_id: workspaceId } : {} }),
   getById: (id) => api.get(`/ai-cases/${id}`),
   downloadUrl: (id, format) => `/api/v1/ai-cases/${id}/download?format=${format}`,
   delete: (id) => api.delete(`/ai-cases/${id}`),
@@ -123,11 +123,13 @@ export const aiCaseApi = {
 }
 
 export const apiTestApi = {
-  listProjects: () => api.get('/api-test/projects'),
+  listProjects: (workspaceId = null) => api.get('/api-test/projects', { params: workspaceId ? { workspace_id: workspaceId } : {} }),
   createProject: (data) => api.post('/api-test/projects', data),
   updateProject: (id, data) => api.put(`/api-test/projects/${id}`, data),
   deleteProject: (id) => api.delete(`/api-test/projects/${id}`),
-  listAllCasesGrouped: () => api.get('/api-test/all-cases'),
+  listAllCasesGrouped: (workspaceId = null) => api.get('/api-test/all-cases', {
+    params: workspaceId ? { workspace_id: workspaceId } : {}
+  }),
   listCases: (projectId) => api.get(`/api-test/projects/${projectId}/cases`),
   createCase: (data) => api.post('/api-test/cases', data),
   updateCase: (id, data) => api.put(`/api-test/cases/${id}`, data),
@@ -157,8 +159,12 @@ export const scriptApi = {
 }
 
 export const gvarApi = {
-  list: () => api.get('/global-vars'),
-  create: (data) => api.post('/global-vars', data),
+  list: (workspaceId = null) => api.get('/global-vars', {
+    params: workspaceId ? { workspace_id: workspaceId } : {}
+  }),
+  create: (data, workspaceId = null) => api.post(
+    '/global-vars' + (workspaceId ? `?workspace_id=${workspaceId}` : ''), data
+  ),
   update: (id, data) => api.put(`/global-vars/${id}`, data),
   delete: (id) => api.delete(`/global-vars/${id}`),
 }
@@ -168,4 +174,15 @@ export const userApi = {
   create: (data) => api.post('/auth/users', data),
   delete: (username) => api.delete(`/auth/users/${username}`),
   resetPassword: (username, newPassword) => api.put(`/auth/users/${username}/password`, { new_password: newPassword }),
+}
+
+export const workspaceApi = {
+  list: () => api.get('/workspaces'),
+  create: (data) => api.post('/workspaces', data),
+  get: (id) => api.get(`/workspaces/${id}`),
+  update: (id, data) => api.put(`/workspaces/${id}`, data),
+  delete: (id) => api.delete(`/workspaces/${id}`),
+  listMembers: (id) => api.get(`/workspaces/${id}/members`),
+  inviteMember: (id, data) => api.post(`/workspaces/${id}/members`, data),
+  removeMember: (id, username) => api.delete(`/workspaces/${id}/members/${username}`),
 }

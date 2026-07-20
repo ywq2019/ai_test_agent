@@ -1,5 +1,7 @@
 <template>
   <div class="test-plan-page">
+    <WorkspaceRequired v-if="auth.role !== 'admin' && !wsStore.currentId" />
+    <template v-else>
     <!-- 左侧：计划列表 -->
     <el-card class="plan-list-card">
       <template #header>
@@ -496,17 +498,24 @@
       </div>
       <el-skeleton v-else :rows="10" animated />
     </el-drawer>
+    </template>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import {
   Plus, Edit, Delete, VideoPlay, Refresh, List, Document, InfoFilled,
   CircleCheck, CircleClose, RefreshRight, Clock, WarningFilled, Loading, Cpu, CopyDocument,
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '../api'
+import { useWorkspaceStore } from '../stores/workspace'
+import { useAuthStore } from '../stores/auth'
+import WorkspaceRequired from '../components/WorkspaceRequired.vue'
+
+const wsStore = useWorkspaceStore()
+const auth = useAuthStore()
 
 
 // ── 状态 ────────────────────────────────────────────────────────────────────
@@ -645,7 +654,7 @@ async function copyAnalysis() {
 
 // ── 数据加载 ──────────────────────────────────────────────────────────────────
 async function loadPlans() {
-  const res = await api.get(`/test-plans`)
+  const res = await api.get(`/test-plans`, { params: wsStore.currentId ? { workspace_id: wsStore.currentId } : {} })
   plans.value = res
 }
 
@@ -681,7 +690,8 @@ async function loadAllProjects() {
 
 async function loadCandidateCases() {
   // 使用 all-cases 接口，返回 [{project_id, project_name, cases:[...]}]
-  const res = await api.get(`/api-test/all-cases`)
+  const params = wsStore.currentId ? { workspace_id: wsStore.currentId } : {}
+  const res = await api.get(`/api-test/all-cases`, { params })
   const result = []
   for (const proj of res) {
     for (const c of proj.cases || []) {
@@ -718,6 +728,7 @@ async function submitPlanForm() {
         description: planForm.value.description || '',
         proxy_url: planForm.value.proxy_url || '',
         hosts_map: planForm.value.hosts_map || '',
+        workspace_id: wsStore.currentId || null,
       })
       planDialogVisible.value = false
       ElMessage.success('计划已创建')
@@ -938,6 +949,7 @@ function initWs() {
   ws.onmessage = (evt) => {
     try {
       const msg = JSON.parse(evt.data)
+      if (msg.type === 'ping') { ws?.readyState === 1 && ws.send(JSON.stringify({ type: 'pong' })); return }
       handleWsMessage(msg)
     } catch {}
   }
@@ -993,6 +1005,7 @@ function handleWsMessage(msg) {
 }
 
 // ── 生命周期 ──────────────────────────────────────────────────────────────────
+watch(() => wsStore.currentId, () => { loadPlans() })
 onMounted(async () => {
   wsDestroyed = false  // 重置，支持路由切回时重新连接
   await loadPlans()

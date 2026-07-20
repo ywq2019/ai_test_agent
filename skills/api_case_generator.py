@@ -85,6 +85,8 @@ class ApiCaseGenerator:
         project: Optional[Dict] = None,
     ) -> List[Dict[str, Any]]:
         content = swagger_text or description
+        # 从用户描述中解析生成意图（数量 + 场景范围）
+        user_intent = self._parse_user_intent(description) if description and not swagger_text else {}
         if progress_cb:
             await progress_cb(10, "分析接口文档...")
 
@@ -124,7 +126,7 @@ class ApiCaseGenerator:
 
         async def gen_one(g):
             async with sem:
-                cases = await self._generate_for_group(base_url, g)
+                cases = await self._generate_for_group(base_url, g, user_intent=user_intent)
                 done[0] += 1
                 if progress_cb:
                     pct = 40 + int(done[0] / total * 44)   # 40 → 84
@@ -317,7 +319,7 @@ class ApiCaseGenerator:
 
     # ─── 用例生成 ─────────────────────────────────────────────────────────────
 
-    async def _generate_for_group(self, base_url: str, group: Dict) -> List[Dict]:
+    async def _generate_for_group(self, base_url: str, group: Dict, user_intent: dict = None) -> List[Dict]:
         name = group.get("name", "API")
         endpoints = group.get("endpoints", group.get("description", ""))
         if isinstance(endpoints, list):
@@ -325,8 +327,22 @@ class ApiCaseGenerator:
 
         probe_section = self._build_probe_section(group.get("_probe"))
 
+        # 根据用户意图动态调整生成指令
+        intent = user_intent or {}
+        count_hint  = intent.get("count")    # 数字或 None
+        scenes      = intent.get("scenes")   # ['正向'] / ['正向','边界值'] / None
+
+        if count_hint and scenes:
+            scope_line = f"只生成 {count_hint} 条用例，场景限定为：{'、'.join(scenes)}。"
+        elif count_hint:
+            scope_line = f"只生成 {count_hint} 条用例，覆盖正常流、鉴权、边界值、错误码场景。"
+        elif scenes:
+            scope_line = f"只生成以下场景的用例（不要生成其他场景）：{'、'.join(scenes)}。"
+        else:
+            scope_line = "生成完整测试用例，覆盖正常流、鉴权、边界值、错误码场景。"
+
         prompt = (
-            f"为以下接口生成完整测试用例，覆盖正常流、鉴权、边界值、错误码场景。\n"
+            f"为以下接口{scope_line}\n"
             f"Base URL: {base_url}\n"
             f"模块名称: {name}\n\n"
             f"接口信息:\n{str(endpoints)[:3000]}\n"
@@ -394,6 +410,60 @@ class ApiCaseGenerator:
             "- json_path 的 expected 值必须与上方真实响应中的对应值完全一致\n"
             "- 对关键业务字段（如 code、status、success 等）必须断言\n"
         )
+
+    def _parse_user_intent(self, description: str) -> dict:
+        """从用户自然语言描述里解析生成意图。
+        返回 {"count": int|None, "scenes": list|None}
+        例：
+          "生成一条正向用例" → {"count": 1, "scenes": ["正向"]}
+          "生成3条用例"      → {"count": 3, "scenes": None}
+          "只要正向和边界值" → {"count": None, "scenes": ["正向", "边界值"]}
+          "生成完整用例"     → {}
+        """
+        import re
+        result = {}
+
+        # ── 解析数量 ──────────────────────────────────────────────────────────
+        CN_NUM = {"一": 1, "两": 2, "三": 3, "四": 4, "五": 5,
+                  "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+        # 匹配 "生成X条" / "只要X条" / "X条用例"
+        m = re.search(r'(\d+|[一两三四五六七八九十])\s*条', description)
+        if m:
+            raw = m.group(1)
+            result["count"] = int(raw) if raw.isdigit() else CN_NUM.get(raw, 1)
+
+        # ── 解析场景 ──────────────────────────────────────────────────────────
+        scene_map = {
+            # 正向/正常流
+            "正向": "正向流用例",
+            "正常": "正向流用例",
+            "正常流": "正向流用例",
+            "主流程": "正向流用例",
+            "happy path": "正向流用例",
+            # 异常/负向
+            "异常": "异常场景用例",
+            "负向": "异常场景用例",
+            "错误": "异常场景用例",
+            "失败": "异常场景用例",
+            # 边界值
+            "边界": "边界值用例",
+            "边界值": "边界值用例",
+            # 鉴权
+            "鉴权": "鉴权场景用例",
+            "权限": "鉴权场景用例",
+            "认证": "鉴权场景用例",
+        }
+        matched_scenes = []
+        seen = set()
+        for kw, label in scene_map.items():
+            if kw.lower() in description.lower() and label not in seen:
+                matched_scenes.append(label)
+                seen.add(label)
+
+        if matched_scenes:
+            result["scenes"] = matched_scenes
+
+        return result
 
     # ─── 断言校验与修正 ───────────────────────────────────────────────────────
 

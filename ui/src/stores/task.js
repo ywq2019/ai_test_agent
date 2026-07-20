@@ -27,9 +27,17 @@ export const useTaskStore = defineStore('task', () => {
     executionResults.value.filter(r => r.status === 'failed').length
   )
 
-  async function fetchTasks() {
-    const data = await api.taskApi.list()
-    tasks.value = data
+  // 请求序号：保证后发的请求返回晚时不覆盖新结果
+  let _fetchTasksSeq = 0
+
+  async function fetchTasks(workspaceId = null) {
+    const seq = ++_fetchTasksSeq
+    const params = workspaceId ? { workspace_id: workspaceId } : {}
+    const data = await api.taskApi.list(params)
+    // 只有最新一次请求的结果才写入 store
+    if (seq === _fetchTasksSeq) {
+      tasks.value = data
+    }
     return data
   }
 
@@ -69,8 +77,9 @@ export const useTaskStore = defineStore('task', () => {
     return data
   }
 
-  async function fetchTotalCaseCount() {
-    const data = await api.default.get('/cases/count')
+  async function fetchTotalCaseCount(workspaceId = null) {
+    const params = workspaceId ? { workspace_id: workspaceId } : {}
+    const data = await api.default.get('/cases/count', { params })
     totalCaseCount.value = data.count || 0
     return data.count
   }

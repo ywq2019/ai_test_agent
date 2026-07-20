@@ -1,5 +1,7 @@
 <template>
   <div class="tasks-page">
+    <WorkspaceRequired v-if="auth.role !== 'admin' && !wsStore.currentId" />
+    <template v-else>
     <el-card shadow="hover">
       <template #header>
         <div class="card-header">
@@ -151,13 +153,17 @@
         <el-button type="primary" @click="parsePage" :loading="parsing">开始解析</el-button>
       </template>
     </el-dialog>
+    </template>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useTaskStore } from '../stores/task'
+import { useWorkspaceStore } from '../stores/workspace'
+import { useAuthStore } from '../stores/auth'
+import WorkspaceRequired from '../components/WorkspaceRequired.vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { View, VideoPlay, Delete, Plus, Upload } from '@element-plus/icons-vue'
 
@@ -167,6 +173,8 @@ const MAX_SIZE_MB = 20
 
 const router = useRouter()
 const taskStore = useTaskStore()
+const wsStore = useWorkspaceStore()
+const auth = useAuthStore()
 
 const showCreateDialog = ref(false)
 const showParseDialog = ref(false)
@@ -273,35 +281,63 @@ const createTask = async () => {
   }
 
   creating.value = true
-  try {
-    if (uploadedFile.value) {
-      const uploadRes = await taskStore.uploadDocument(uploadedFile.value)
-      taskForm.document_path = uploadRes.path
-    }
 
-    const task = await taskStore.createTask(taskForm)
+  // Step 1: 上传文档（可选）
+  let docPath = ''
+  if (uploadedFile.value) {
+    try {
+      const uploadRes = await taskStore.uploadDocument(uploadedFile.value)
+      docPath = uploadRes.path || ''
+    } catch (err) {
+      ElMessage.warning('需求文档上传失败，将跳过文档解析：' + (err.message || err))
+    }
+  }
+
+  // Step 2: 创建任务（核心步骤，失败则终止）
+  let task
+  try {
+    task = await taskStore.createTask({ ...taskForm, document_path: docPath, workspace_id: wsStore.currentId || null })
     ElMessage.success('任务创建成功')
     showCreateDialog.value = false
     resetForm()
+  } catch (error) {
+    ElMessage.error('任务创建失败: ' + (error.response?.data?.detail || error.message))
+    creating.value = false
+    return
+  }
 
+  // Step 3: 解析页面（失败给提示但不中断流程）
+  try {
     ElMessage.info('正在解析页面元素...')
     await taskStore.parsePage(task.url, task.browser, task.id)
     ElMessage.success('页面解析完成')
+  } catch (err) {
+    ElMessage.warning('页面解析失败（可稍后在用例管理中手动解析）：' + (err.message || err))
+    creating.value = false
+    return
+  }
 
-    if (taskForm.document_path) {
+  // Step 4: 解析文档（可选，失败继续）
+  if (docPath) {
+    try {
       ElMessage.info('正在解析需求文档...')
-      await taskStore.parseDocument(taskForm.document_path)
+      await taskStore.parseDocument(docPath)
       ElMessage.success('需求文档解析完成')
+    } catch (err) {
+      ElMessage.warning('需求文档解析失败，AI 将仅依据页面元素生成用例')
     }
+  }
 
+  // Step 5: AI 生成用例
+  try {
     ElMessage.info('正在生成测试用例...')
     await taskStore.generateCases(task.id)
     ElMessage.success('测试用例生成完成')
-  } catch (error) {
-    ElMessage.error('创建失败: ' + error.message)
-  } finally {
-    creating.value = false
+  } catch (err) {
+    ElMessage.warning('用例生成失败（可稍后在用例管理中重新生成）：' + (err.message || err))
   }
+
+  creating.value = false
 }
 
 const resetForm = () => {
@@ -355,7 +391,18 @@ const parsePage = async () => {
 }
 
 onMounted(async () => {
-  await taskStore.fetchTasks()
+  // 如果 workspace 已初始化直接 fetch；否则等 watch 触发
+  if (wsStore.initialized) {
+    await taskStore.fetchTasks(wsStore.currentId)
+  }
+})
+
+// workspace 初始化完成 或 切换工作空间 时刷新列表
+watch(() => wsStore.currentId, (id) => {
+  taskStore.fetchTasks(id)
+})
+watch(() => wsStore.initialized, (ready) => {
+  if (ready) taskStore.fetchTasks(wsStore.currentId)
 })
 </script>
 

@@ -46,3 +46,5 @@ USER appuser
 EXPOSE 4000
 
 CMD ["python", "main.py"]
+# ⚠️ 不要改成 uvicorn main:app --workers N（N>1）
+# 全局 LLM Semaphore 和后台任务计数器均为进程内对象，多 worker 会导致并发保护失效

@@ -12,6 +12,7 @@ class TaskCreateRequest(BaseModel):
     document_path: Optional[str] = Field(None, description="需求文档路径")
     browser: str = Field("chromium", description="浏览器类型: chromium/firefox/webkit")
     environment: str = Field("test", description="测试环境: test/staging/production")
+    workspace_id: Optional[int] = None
 
 
 class TaskResponse(BaseModel):

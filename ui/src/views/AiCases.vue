@@ -1,5 +1,7 @@
 <template>
   <div class="ai-cases-page">
+    <WorkspaceRequired v-if="auth.role !== 'admin' && !wsStore.currentId" />
+    <template v-else>
 
     <!-- 统计栏 -->
     <div class="stats-bar">
@@ -1013,17 +1015,23 @@
       </template>
     </el-dialog>
 
+    </template>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { aiCaseApi, documentApi } from '../api'
+import { useWorkspaceStore } from '../stores/workspace'
+import { useAuthStore } from '../stores/auth'
+import WorkspaceRequired from '../components/WorkspaceRequired.vue'
 
 // ============================================================
 // Diff / 增量更新状态
 // ============================================================
+const wsStore = useWorkspaceStore()
+const auth = useAuthStore()
 const diffDialogVisible  = ref(false)
 const diffStep           = ref(1)           // 1=上传 2=预览
 const diffChecking       = ref(false)       // Diff 分析中
@@ -1667,7 +1675,7 @@ function _startGenPolling() {
       return
     }
     try {
-      const fresh = await aiCaseApi.list()
+      const fresh = await aiCaseApi.list(wsStore.currentId)
       if (!fresh) return
       // 只更新状态发生变化的记录，避免整表刷新
       fresh.forEach(r => {
@@ -1693,7 +1701,7 @@ function _startGenPolling() {
 
 const fetchRecords = async () => {
   try {
-    const data = await aiCaseApi.list()
+    const data = await aiCaseApi.list(wsStore.currentId)
     records.value = data || []
     if (records.value.length && !current.value) {
       current.value = records.value[0]
@@ -1784,6 +1792,7 @@ const doGenerate = async () => {
     const payload = {
       task_name: genForm.value.task_name,
       formats: genForm.value.formats,
+      workspace_id: wsStore.currentId || null,
       ...(genForm.value.sourceType === 'file'
         ? { document_path: docPath }
         : { content: genForm.value.content }),
@@ -2035,6 +2044,7 @@ const formatDate = (str) => {
   } catch { return str }
 }
 
+watch(() => wsStore.currentId, () => { fetchRecords() })
 onMounted(fetchRecords)
 onUnmounted(() => {
   disconnectGenWS()

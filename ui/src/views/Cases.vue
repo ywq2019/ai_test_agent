@@ -1,5 +1,7 @@
 <template>
   <div class="cases-page">
+    <WorkspaceRequired v-if="auth.role !== 'admin' && !wsStore.currentId" />
+    <template v-else>
     <el-card shadow="hover">
       <template #header>
         <div class="card-header">
@@ -374,19 +376,25 @@
         </template>
       </template>
     </el-dialog>
+    </template>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useTaskStore } from '../stores/task'
+import { useWorkspaceStore } from '../stores/workspace'
+import { useAuthStore } from '../stores/auth'
+import WorkspaceRequired from '../components/WorkspaceRequired.vue'
 import { caseApi, documentApi } from '../api/index'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 const route = useRoute()
 const router = useRouter()
 const taskStore = useTaskStore()
+const wsStore = useWorkspaceStore()
+const auth = useAuthStore()
 
 const filterTaskId = ref(null)
 const showCreateDialog = ref(false)
@@ -438,12 +446,24 @@ const disconnectWs = () => { try { ws?.close() } catch {} ws = null }
 
 onMounted(async () => {
   connectWs('cases_gen')
-  await taskStore.fetchTasks()
+  if (wsStore.initialized) {
+    await taskStore.fetchTasks(wsStore.currentId)
+  }
   if (route.query.taskId) {
     filterTaskId.value = parseInt(route.query.taskId)
     caseForm.task_id = filterTaskId.value
   }
   if (filterTaskId.value) await taskStore.fetchCases(filterTaskId.value)
+})
+
+// 切换工作空间时刷新任务列表，并清空当前选中的任务
+watch(() => wsStore.currentId, async (id) => {
+  filterTaskId.value = null
+  taskStore.setCases([])
+  await taskStore.fetchTasks(id)
+})
+watch(() => wsStore.initialized, async (ready) => {
+  if (ready) await taskStore.fetchTasks(wsStore.currentId)
 })
 
 onUnmounted(() => disconnectWs())

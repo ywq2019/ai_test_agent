@@ -363,4 +363,12 @@ async def catch_all(full_path: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host=settings.HOST, port=settings.PORT, reload=False)
+    uvicorn.run(
+        "main:app",
+        host=settings.HOST,
+        port=settings.PORT,
+        reload=False,
+        workers=1,   # 必须单进程：全局 LLM Semaphore / 后台任务计数器均为进程内对象，
+                     # 多 worker 会导致各进程独立计数，失去跨用户并发保护效果。
+                     # 如需横向扩展，应在负载均衡层部署多个容器实例，并改用 Redis 共享 Semaphore。
+    )

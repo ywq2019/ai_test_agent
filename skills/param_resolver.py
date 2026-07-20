@@ -58,7 +58,7 @@ async def load_global_vars() -> None:
         logger.warning(f"[gvar] 加载全局变量失败: {e}")
 
 
-async def flush_global_vars(source_project: str = "") -> None:
+async def flush_global_vars(source_project: str = "", workspace_id: int = None) -> None:
     """将内存中脏标记的全局变量持久化到数据库。"""
     if not _gvar_dirty:
         return
@@ -76,10 +76,14 @@ async def flush_global_vars(source_project: str = "") -> None:
                     row.value = value
                     row.source_project = source_project
                     row.updated_at = datetime.utcnow()
+                    # 若原来 workspace_id 为 None 且本次有 workspace_id，补全归属
+                    if workspace_id and row.workspace_id is None:
+                        row.workspace_id = workspace_id
                 else:
                     db.add(GlobalVariable(
                         name=name, value=value,
                         source_project=source_project,
+                        workspace_id=workspace_id,
                         updated_at=datetime.utcnow()
                     ))
             await db.commit()

@@ -3,7 +3,7 @@
 """
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, Float, JSON
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, Float, JSON, ForeignKey
 from datetime import datetime
 from tools.config import settings
 
@@ -38,7 +38,8 @@ class TestTask(Base):
     page_elements = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    created_by = Column(String(100), nullable=True, index=True)  # 创建人用户名，NULL=历史数据全部可见
+    created_by = Column(String(100), nullable=True, index=True)
+    project_id = Column(Integer, nullable=True, index=True)   # 所属工作空间，NULL=默认空间
 
     # ── 需求文档快照（用于文档变更后的 Diff 分析） ─────────────────────────
     doc_snapshot = Column(Text, nullable=True)
@@ -94,7 +95,8 @@ class TestReport(Base):
     skipped = Column(Integer, default=0)
     report_path = Column(String(512), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-    created_by = Column(String(100), nullable=True, index=True)  # 创建人，随任务归属
+    created_by = Column(String(100), nullable=True, index=True)
+    project_id = Column(Integer, nullable=True, index=True)
 
 
 class AICaseFile(Base):
@@ -107,7 +109,8 @@ class AICaseFile(Base):
     xmind_path = Column(String(512), nullable=True)
     cases_data = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-    created_by = Column(String(100), nullable=True, index=True)  # 创建人用户名，NULL=历史数据全部可见
+    created_by = Column(String(100), nullable=True, index=True)
+    project_id = Column(Integer, nullable=True, index=True)   # 所属工作空间
 
     # ── 文档变更追踪字段 ────────────────────────────────────────────────
     # 需求文档内容的 MD5 哈希，用于检测文档是否发生变更
@@ -142,6 +145,32 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class Project(Base):
+    """工作空间（项目）：数据隔离的顶层单元。
+    每个用户可创建多个工作空间，通过 ProjectMember 控制成员访问。
+    admin 角色可跨工作空间查看所有数据。
+    """
+    __tablename__ = "projects"
+
+    id          = Column(Integer, primary_key=True, index=True)
+    name        = Column(String(100), nullable=False)
+    description = Column(String(500), default="")
+    owner       = Column(String(100), nullable=False, index=True)   # 创建人用户名
+    created_at  = Column(DateTime, default=datetime.utcnow)
+    updated_at  = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ProjectMember(Base):
+    """工作空间成员关系。role: owner（可管理成员）/ member（只读写数据）。"""
+    __tablename__ = "project_members"
+
+    id         = Column(Integer, primary_key=True, index=True)
+    project_id = Column(Integer, nullable=False, index=True)
+    username   = Column(String(100), nullable=False, index=True)
+    role       = Column(String(20), default="member")   # owner / member
+    joined_at  = Column(DateTime, default=datetime.utcnow)
+
+
 class ApiProject(Base):
     __tablename__ = "api_projects"
 
@@ -156,7 +185,8 @@ class ApiProject(Base):
     auth_error_patterns = Column(JSON, nullable=True)
     proxy_url = Column(String(512), nullable=True, default="")
     hosts_map = Column(Text, nullable=True, default="")
-    created_by = Column(String(100), nullable=True, index=True)  # 创建人用户名，NULL=历史数据全部可见
+    created_by = Column(String(100), nullable=True, index=True)
+    workspace_id = Column(Integer, nullable=True, index=True)  # 所属工作空间（避免与自身 project 概念冲突）
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -222,14 +252,17 @@ class ApiTestReport(Base):
 
 
 class GlobalVariable(Base):
-    """跨项目全局变量池，通过 {{gvar:name}} 在任意项目中引用。"""
+    """全局变量池，通过 {{gvar:name}} 在任意项目中引用。
+    按工作空间隔离：workspace_id 对应 projects.id，NULL=全局（兼容旧数据）。
+    """
     __tablename__ = "global_variables"
 
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String(100), nullable=False, unique=True, index=True)
+    name = Column(String(100), nullable=False, index=True)
     value = Column(Text, nullable=True, default="")
     description = Column(String(500), default="")
-    source_project = Column(String(255), default="")   # 最后写入来源项目名
+    source_project = Column(String(255), default="")
+    workspace_id = Column(Integer, nullable=True, index=True)  # 所属工作空间
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
@@ -244,10 +277,9 @@ class TestPlan(Base):
     status = Column(String(50), default="pending")
     proxy_url = Column(String(512), nullable=True, default="")
     hosts_map = Column(Text, nullable=True, default="")
-    created_by = Column(String(100), nullable=True, index=True)  # 创建人用户名，NULL=历史数据全部可见
-    # CI/CD webhook token：用于无需 JWT 的外部触发，留空表示未启用
-    # 生成命令：python -c "import secrets; print(secrets.token_urlsafe(32))"
+    created_by = Column(String(100), nullable=True, index=True)
     webhook_token = Column(String(128), nullable=True, index=True)
+    workspace_id = Column(Integer, nullable=True, index=True)  # 所属工作空间
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -348,6 +380,13 @@ async def init_database():
             "ALTER TABLE test_plans ADD COLUMN webhook_token VARCHAR(128)",
             # 报告隔离
             "ALTER TABLE test_reports ADD COLUMN created_by VARCHAR(100)",
+            # 工作空间 project_id（各业务表）
+            "ALTER TABLE test_tasks    ADD COLUMN project_id INTEGER",
+            "ALTER TABLE test_reports  ADD COLUMN project_id INTEGER",
+            "ALTER TABLE ai_case_files ADD COLUMN project_id INTEGER",
+            "ALTER TABLE api_projects  ADD COLUMN workspace_id INTEGER",
+            "ALTER TABLE test_plans    ADD COLUMN workspace_id INTEGER",
+            "ALTER TABLE global_variables ADD COLUMN workspace_id INTEGER",
         ]:
             try:
                 await conn.execute(__import__('sqlalchemy').text(ddl))
@@ -355,9 +394,8 @@ async def init_database():
                 pass  # 列已存在则忽略
 
         # 数据迁移：将 created_by = NULL 的历史数据归属到 admin
-        # 保证普通用户不会看到不属于自己的旧数据
         _sql = __import__('sqlalchemy').text
-        _admin = settings.DEFAULT_USERNAME  # 默认 "admin"
+        _admin = settings.DEFAULT_USERNAME
         for table in ["test_tasks", "ai_case_files", "api_projects", "test_plans", "test_reports"]:
             try:
                 result = await conn.execute(
@@ -369,7 +407,63 @@ async def init_database():
                         f"[init_db] {table}: {result.rowcount} 条历史数据 created_by 归属到 {_admin}"
                     )
             except Exception:
-                pass  # 列不存在（极端旧库）时忽略
+                pass
+
+        # ── 默认工作空间：确保存在，并把旧数据和所有用户纳入 ──────────────────
+        _log = __import__('loguru').logger
+        try:
+            # 1. 建或找默认工作空间（名称固定为"默认空间"）
+            row = await conn.execute(
+                _sql("SELECT id FROM projects WHERE name = '默认空间' LIMIT 1")
+            )
+            default_ws = row.fetchone()
+            if not default_ws:
+                await conn.execute(
+                    _sql("INSERT INTO projects (name, description, owner, created_at, updated_at) "
+                         "VALUES ('默认空间', '系统默认工作空间，旧数据自动归入', :owner, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"),
+                    {"owner": _admin},
+                )
+                row = await conn.execute(
+                    _sql("SELECT id FROM projects WHERE name = '默认空间' LIMIT 1")
+                )
+                default_ws = row.fetchone()
+                _log.info(f"[init_db] 默认工作空间已创建 id={default_ws[0]}")
+
+            ws_id = default_ws[0]
+
+            # 2. 旧数据（project_id / workspace_id = NULL）归入默认空间
+            for table, col in [
+                ("test_tasks",    "project_id"),
+                ("ai_case_files", "project_id"),
+                ("test_reports",  "project_id"),
+                ("api_projects",  "workspace_id"),
+                ("test_plans",    "workspace_id"),
+            ]:
+                try:
+                    r = await conn.execute(
+                        _sql(f"UPDATE {table} SET {col} = :ws WHERE {col} IS NULL"),
+                        {"ws": ws_id},
+                    )
+                    if r.rowcount:
+                        _log.info(f"[init_db] {table}: {r.rowcount} 条旧数据归入默认空间 id={ws_id}")
+                except Exception:
+                    pass
+
+            # 3. 只把 admin 加入默认空间（普通用户需要被手动邀请到对应工作空间）
+            existing = await conn.execute(
+                _sql("SELECT id FROM project_members WHERE project_id = :ws AND username = :u"),
+                {"ws": ws_id, "u": _admin},
+            )
+            if not existing.fetchone():
+                await conn.execute(
+                    _sql("INSERT INTO project_members (project_id, username, role, joined_at) "
+                         "VALUES (:ws, :u, 'owner', CURRENT_TIMESTAMP)"),
+                    {"ws": ws_id, "u": _admin},
+                )
+                _log.info(f"[init_db] admin 加入默认空间（owner）")
+
+        except Exception as e:
+            _log.warning(f"[init_db] 默认工作空间初始化异常（可忽略）: {e}")
 
 
 async def get_db():

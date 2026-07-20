@@ -25,7 +25,7 @@ from tools.database import (
 from agent.core import uitest_agent
 from api.websocket_manager import ws_manager
 from tools.config import settings
-from api.auth import get_current_user, owner_filter, check_owner
+from api.auth import get_current_user, owner_filter, check_owner, workspace_filter, workspace_filter_members, check_workspace_member, check_access
 
 router = APIRouter()
 
@@ -42,6 +42,7 @@ async def create_task(request: TaskCreateRequest, db: AsyncSession = Depends(get
         environment=request.environment,
         status="created",
         created_by=current_user.username,
+        project_id=request.workspace_id,
     )
     db.add(task)
     await db.commit()
@@ -57,9 +58,9 @@ async def create_task(request: TaskCreateRequest, db: AsyncSession = Depends(get
 
 
 @router.get("/tasks", response_model=List[TaskResponse])
-async def list_tasks(skip: int = 0, limit: int = 100, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def list_tasks(skip: int = 0, limit: int = 100, workspace_id: int = None, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     stmt = select(TestTask).offset(skip).limit(limit).order_by(TestTask.created_at.desc())
-    f = owner_filter(TestTask, current_user)
+    f = await workspace_filter_members(db, TestTask, workspace_id, current_user)
     if f is not None:
         stmt = stmt.where(f)
     result = await db.execute(stmt)
@@ -80,7 +81,7 @@ async def get_task(task_id: int, db: AsyncSession = Depends(get_db), current_use
     task = result.scalar_one_or_none()
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    check_owner(task, current_user, "任务")
+    await check_access(db, task, current_user, "任务")
     return TaskResponse(
         id=task.id, name=task.name, url=task.url, status=task.status,
         browser=task.browser, environment=task.environment,
@@ -96,7 +97,7 @@ async def delete_task(task_id: int, db: AsyncSession = Depends(get_db), current_
     task = result.scalar_one_or_none()
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    check_owner(task, current_user, "任务")
+    await check_access(db, task, current_user, "任务")
     await db.execute(delete(TestTask).where(TestTask.id == task_id))
     await db.execute(delete(TestCase).where(TestCase.task_id == task_id))
     await db.execute(delete(TestResult).where(TestResult.task_id == task_id))
@@ -171,7 +172,7 @@ async def set_page_elements(task_id: int, elements: List[dict], db: AsyncSession
         task = result.scalar_one_or_none()
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
-        check_owner(task, current_user, "任务")
+        await check_access(db, task, current_user, "任务")
         task.page_elements = elements
         task.status = "parsed"
         await db.commit()
@@ -190,20 +191,58 @@ async def set_page_elements(task_id: int, elements: List[dict], db: AsyncSession
 # ── 用例管理 ──────────────────────────────────────────────────────────────────
 
 @router.get("/cases/count")
-async def get_total_case_count(db: AsyncSession = Depends(get_db)):
-    from sqlalchemy import func
-    result = await db.execute(select(func.count(TestCase.id)))
+async def get_total_case_count(
+    workspace_id: int = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    from sqlalchemy import func, false as sql_false
+    if current_user.role == "admin":
+        result = await db.execute(select(func.count(TestCase.id)))
+    elif workspace_id is None:
+        # 未选空间：返回 0
+        return {"count": 0}
+    else:
+        # 只统计该空间内任务的用例数
+        task_ids_q = select(TestTask.id).where(TestTask.project_id == workspace_id)
+        result = await db.execute(
+            select(func.count(TestCase.id)).where(TestCase.task_id.in_(task_ids_q))
+        )
     return {"count": result.scalar() or 0}
 
 
 @router.get("/stats")
-async def get_stats(db: AsyncSession = Depends(get_db)):
+async def get_stats(
+    workspace_id: int = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     from sqlalchemy import func
     from tools.database import TestReport as TR
-    task_count = (await db.execute(select(func.count(TestTask.id)))).scalar() or 0
-    case_count = (await db.execute(select(func.count(TestCase.id)))).scalar() or 0
-    passed = (await db.execute(select(func.sum(TR.passed)))).scalar() or 0
-    failed = (await db.execute(select(func.sum(TR.failed)))).scalar() or 0
+
+    if current_user.role != "admin" and workspace_id is None:
+        return {"task_count": 0, "case_count": 0, "passed": 0, "failed": 0}
+
+    if current_user.role == "admin" or workspace_id is None:
+        task_count = (await db.execute(select(func.count(TestTask.id)))).scalar() or 0
+        case_count = (await db.execute(select(func.count(TestCase.id)))).scalar() or 0
+        passed = (await db.execute(select(func.sum(TR.passed)))).scalar() or 0
+        failed = (await db.execute(select(func.sum(TR.failed)))).scalar() or 0
+    else:
+        task_ids_q = select(TestTask.id).where(TestTask.project_id == workspace_id)
+        task_count = (await db.execute(
+            select(func.count(TestTask.id)).where(TestTask.project_id == workspace_id)
+        )).scalar() or 0
+        case_count = (await db.execute(
+            select(func.count(TestCase.id)).where(TestCase.task_id.in_(task_ids_q))
+        )).scalar() or 0
+        passed = (await db.execute(
+            select(func.sum(TR.passed)).where(TR.project_id == workspace_id)
+        )).scalar() or 0
+        failed = (await db.execute(
+            select(func.sum(TR.failed)).where(TR.project_id == workspace_id)
+        )).scalar() or 0
+
     return {"task_count": task_count, "case_count": case_count, "passed": int(passed), "failed": int(failed)}
 
 
@@ -213,7 +252,7 @@ async def list_cases(task_id: int, db: AsyncSession = Depends(get_db), current_u
     task = result.scalar_one_or_none()
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    check_owner(task, current_user, "任务")
+    await check_access(db, task, current_user, "任务")
     result = await db.execute(select(TestCase).where(TestCase.task_id == task_id))
     cases = result.scalars().all()
     return [
@@ -273,7 +312,7 @@ async def generate_cases(task_id: int, request: dict = None, db: AsyncSession = 
         task = result.scalar_one_or_none()
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
-        check_owner(task, current_user, "任务")
+        await check_access(db, task, current_user, "任务")
 
         if reparse_page and task.url:
             try:
@@ -369,7 +408,7 @@ async def optimize_cases(task_id: int, db: AsyncSession = Depends(get_db), curre
         task = result.scalar_one_or_none()
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
-        check_owner(task, current_user, "任务")
+        await check_access(db, task, current_user, "任务")
         result = await db.execute(select(TestCase).where(TestCase.task_id == task_id))
         existing_db_cases = result.scalars().all()
         if not existing_db_cases:
@@ -702,7 +741,7 @@ async def execute_cases(
     task = task_result.scalar_one_or_none()
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    check_owner(task, current_user, "任务")
+    await check_access(db, task, current_user, "任务")
     task_url  = task.url  if task else ""
     task_name = task.name if task else f"Task {request.task_id}"
     report = TestReport(
@@ -710,6 +749,7 @@ async def execute_cases(
         summary={}, details=[], pass_rate=0, total_cases=len(case_dicts),
         passed=0, failed=0, skipped=0,
         created_by=current_user.username,
+        project_id=task.project_id,
     )
     db.add(report)
     await db.commit()
@@ -724,9 +764,9 @@ async def execute_cases(
 
 
 @router.get("/reports", response_model=List[ReportResponse])
-async def list_reports(db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def list_reports(workspace_id: int = None, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     stmt = select(TestReport).order_by(TestReport.created_at.desc())
-    f = owner_filter(TestReport, current_user)
+    f = await workspace_filter_members(db, TestReport, workspace_id, current_user)
     if f is not None:
         stmt = stmt.where(f)
     result = await db.execute(stmt)
@@ -751,7 +791,7 @@ async def get_report_by_id(report_id: int, db: AsyncSession = Depends(get_db), c
     report = result.scalar_one_or_none()
     if not report:
         raise HTTPException(status_code=404, detail="Report not found")
-    check_owner(report, current_user, "报告")
+    await check_access(db, report, current_user, "报告")
     return ReportResponse(
         task_id=report.task_id, task_name=report.name,
         summary=json.loads(report.summary) if isinstance(report.summary, str) else (report.summary or {}),
@@ -770,7 +810,8 @@ async def export_report(report_id: int, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(TestReport).where(TestReport.id == report_id))
     report = result.scalar_one_or_none()
     if not report:
-        raise HTTPException(status_code=404, detail="Report not found")  if isinstance(report.summary, str)  else (report.summary  or {})
+        raise HTTPException(status_code=404, detail="Report not found")
+    summary  = json.loads(report.summary) if isinstance(report.summary, str) else (report.summary  or {})
     details  = json.loads(report.details)  if isinstance(report.details, str)  else (report.details  or [])
     task_name  = report.name or f"报告 {report_id}"
     created_at = report.created_at.strftime("%Y-%m-%d %H:%M:%S") if report.created_at else ""
@@ -894,7 +935,7 @@ async def delete_report(report_id: int, db: AsyncSession = Depends(get_db), curr
     report = result.scalar_one_or_none()
     if not report:
         raise HTTPException(status_code=404, detail="Report not found")
-    check_owner(report, current_user, "报告")
+    await check_access(db, report, current_user, "报告")
     await db.execute(delete(TestReport).where(TestReport.id == report_id))
     await db.commit()
     return {"message": "Report deleted"}
@@ -925,7 +966,7 @@ async def get_report(task_id: int, db: AsyncSession = Depends(get_db), current_u
     report = result.scalar_one_or_none()
     if not report:
         raise HTTPException(status_code=404, detail="Report not found")
-    check_owner(report, current_user, "报告")
+    await check_access(db, report, current_user, "报告")
     return ReportResponse(
         task_id=report.task_id, task_name=report.name,
         summary=json.loads(report.summary) if isinstance(report.summary, str) else (report.summary or {}),

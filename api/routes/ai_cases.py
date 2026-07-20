@@ -9,7 +9,7 @@ from sqlalchemy import select
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 from api.limiter import limiter
-from api.auth import get_current_user, owner_filter, check_owner
+from api.auth import get_current_user, owner_filter, check_owner, workspace_filter, workspace_filter_members, check_workspace_member, check_access
 from loguru import logger
 
 from tools.database import get_db, AICaseFile, User
@@ -25,6 +25,7 @@ class AICaseGenerateRequest(BaseModel):
     document_path: Optional[str] = None
     content: Optional[str] = None
     formats: List[str] = ["md", "xmind"]
+    workspace_id: Optional[int] = None
 
 
 class AICaseFileResponse(BaseModel):
@@ -186,6 +187,7 @@ async def generate_ai_cases(
     placeholder = AICaseFile(
         task_name=body.task_name, case_count=0, cases_data=None, gen_status="generating",
         created_by=current_user.username,
+        project_id=body.workspace_id,
     )
     db.add(placeholder)
     await db.commit()
@@ -199,9 +201,10 @@ async def generate_ai_cases(
 
 
 @router.get("/ai-cases", response_model=List[AICaseFileResponse])
-async def list_ai_cases(db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def list_ai_cases(workspace_id: int = None, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     stmt = select(AICaseFile).order_by(AICaseFile.created_at.desc())
-    f = owner_filter(AICaseFile, current_user)
+    stmt = stmt.where(AICaseFile.record_status == "active")
+    f = await workspace_filter_members(db, AICaseFile, workspace_id, current_user)
     if f is not None:
         stmt = stmt.where(f)
     result = await db.execute(stmt)
@@ -214,7 +217,7 @@ async def get_ai_case(record_id: int, db: AsyncSession = Depends(get_db), curren
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="记录不存在")
-    check_owner(record, current_user, "AI用例")
+    await check_access(db, record, current_user, "AI用例")
     return _ai_case_response(record)
 
 
@@ -276,7 +279,7 @@ async def get_ai_case_coverage(record_id: int, db: AsyncSession = Depends(get_db
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="记录不存在")
-    check_owner(record, current_user, "AI用例")
+    await check_access(db, record, current_user, "AI用例")
     modules_data = (record.cases_data or {}).get("modules", [])
     all_cases = []
     for mod in modules_data:
@@ -356,7 +359,7 @@ async def optimize_ai_cases(request: Request, record_id: int, db: AsyncSession =
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="记录不存在")
-    check_owner(record, current_user, "AI用例")
+    await check_access(db, record, current_user, "AI用例")
     cases_data = record.cases_data or {}
     if not cases_data.get("modules"):
         raise HTTPException(status_code=400, detail="该记录没有可优化的用例数据")
@@ -401,7 +404,7 @@ async def add_ai_case_item(record_id: int, data: dict, db: AsyncSession = Depend
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="记录不存在")
-    check_owner(record, current_user, "AI用例")
+    await check_access(db, record, current_user, "AI用例")
     cases_data = dict(record.cases_data or {})
     modules = list(cases_data.get("modules", []))
     module_name = (data.get("module") or "通用").strip()
@@ -441,7 +444,7 @@ async def update_ai_case_item(record_id: int, case_id: str, data: dict, db: Asyn
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="记录不存在")
-    check_owner(record, current_user, "AI用例")
+    await check_access(db, record, current_user, "AI用例")
     cases_data = dict(record.cases_data or {})
     modules = list(cases_data.get("modules", []))
     found_mod_idx = found_case_idx = None
@@ -485,7 +488,7 @@ async def delete_ai_case_item(record_id: int, case_id: str, db: AsyncSession = D
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="记录不存在")
-    check_owner(record, current_user, "AI用例")
+    await check_access(db, record, current_user, "AI用例")
     cases_data = dict(record.cases_data or {})
     modules = list(cases_data.get("modules", []))
     found = False
@@ -517,7 +520,7 @@ async def delete_ai_case(record_id: int, db: AsyncSession = Depends(get_db), cur
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="记录不存在")
-    check_owner(record, current_user, "AI用例")
+    await check_access(db, record, current_user, "AI用例")
 
     # 收集整条版本链（当前记录 + 所有 deprecated 父版本）的文件路径一并清理
     ids_to_delete = [record_id]
@@ -558,7 +561,7 @@ async def diff_check_ai_case(record_id: int, request: DiffCheckRequest, db: Asyn
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="记录不存在")
-    check_owner(record, current_user, "AI用例")
+    await check_access(db, record, current_user, "AI用例")
     if not request.new_content and not request.new_document_path:
         raise HTTPException(status_code=400, detail="请提供新版文档路径或文本内容")
     if request.new_document_path:
@@ -620,7 +623,7 @@ async def incremental_update_ai_case(
     old_record = result.scalar_one_or_none()
     if not old_record:
         raise HTTPException(status_code=404, detail="记录不存在")
-    check_owner(old_record, current_user, "AI用例")
+    await check_access(db, old_record, current_user, "AI用例")
     if not request.new_content and not request.new_document_path:
         raise HTTPException(status_code=400, detail="请提供新版文档路径或文本内容")
     if request.new_document_path:
@@ -707,6 +710,7 @@ async def incremental_update_ai_case(
         doc_content=upd_result.get("doc_content"), parent_id=old_record.id,
         diff_summary=upd_result.get("diff_summary"), record_status="active",
         created_by=current_user.username,
+        project_id=old_record.project_id,
     )
     db.add(new_record)
     await db.commit()
@@ -805,7 +809,7 @@ async def extract_requirements(
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="记录不存在")
-    check_owner(record, current_user, "AI用例")
+    await check_access(db, record, current_user, "AI用例")
     if not (record.doc_content or "").strip():
         raise HTTPException(
             status_code=400,
@@ -914,7 +918,7 @@ async def map_cases_to_requirements(
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="记录不存在")
-    check_owner(record, current_user, "AI用例")
+    await check_access(db, record, current_user, "AI用例")
     if not (record.requirements_data or {}).get("requirements"):
         raise HTTPException(status_code=400, detail="请先调用「提取需求」接口，生成需求列表后再进行映射")
     background_tasks.add_task(_do_map_cases_bg, record_id)
@@ -930,7 +934,7 @@ async def get_traceability(record_id: int, db: AsyncSession = Depends(get_db), c
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="记录不存在")
-    check_owner(record, current_user, "AI用例")
+    await check_access(db, record, current_user, "AI用例")
 
     requirements_data = record.requirements_data or {}
     traceability_data = record.traceability_data or {}
@@ -1036,7 +1040,7 @@ async def analyze_coverage_gap(record_id: int, data: dict, db: AsyncSession = De
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="记录不存在")
-    check_owner(record, current_user, "AI用例")
+    await check_access(db, record, current_user, "AI用例")
 
     req_id = data.get("req_id", "")
     if not req_id:
@@ -1266,7 +1270,7 @@ async def supplement_cases(
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="记录不存在")
-    check_owner(record, current_user, "AI用例")
+    await check_access(db, record, current_user, "AI用例")
 
     req_id = data.get("req_id", "")
     missing_dimensions = data.get("missing_dimensions", [])
