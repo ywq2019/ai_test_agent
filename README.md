@@ -86,6 +86,17 @@ python main.py          # 终端1：后端 4000
 cd ui && npm run dev    # 终端2：前端 8090（代理到后端）
 ```
 
+> **本地 vs Docker 数据库说明**
+>
+> | | 本地启动 | Docker 部署 |
+> | --- | --- | --- |
+> | 数据库 | SQLite（项目根目录 `uitest_agent.db`） | PostgreSQL（Docker 卷 `pg_data`） |
+> | RAG 向量检索 | 降级为关键词匹配（不支持 pgvector） | pgvector 完整支持 |
+> | 数据位置 | 项目根目录下 `.db` 文件，直接可见 | Docker 命名卷，`docker volume inspect pg_data` 查路径 |
+> | 数据互通 | ❌ 两边数据**不互通**，本地产生的数据切换到 Docker 后不会自动迁移 | |
+>
+> 如需从本地迁移到 Docker，需手动导出数据（或重新录入）。建议生产环境直接使用 Docker 部署，避免后续迁移麻烦。
+
 ***
 
 ## 核心功能
