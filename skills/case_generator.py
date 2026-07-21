@@ -224,7 +224,22 @@ class CaseGenerator:
             if not raw.strip().startswith("{") and not raw.strip().startswith("["):
                 logger.warning(f"模块「{module_name}」LLM 返回非 JSON 内容: {raw[:200]}")
                 return []
-            data = json.loads(raw)
+            # 尝试修复常见 JSON 问题（截断、特殊字符）
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                # 尝试截取到最后一个完整的 } 再解析
+                last_brace = raw.rfind("}")
+                if last_brace > 0:
+                    raw_fixed = raw[:last_brace + 1]
+                    try:
+                        data = json.loads(raw_fixed)
+                        logger.info(f"模块「{module_name}」JSON 截断修复成功")
+                    except json.JSONDecodeError as e2:
+                        logger.warning(f"模块「{module_name}」LLM 调用失败: {e2}")
+                        return []
+                else:
+                    raise
         except Exception as e:
             logger.warning(f"模块「{module_name}」LLM 调用失败: {e}")
             return []
