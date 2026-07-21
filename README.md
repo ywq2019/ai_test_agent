@@ -18,18 +18,22 @@
 
 ### Docker 一键部署（推荐）
 
+**环境要求：** Docker 20.10+（含 Docker Compose v2）
+
 ```bash
 git clone https://github.com/ywq2019/ai_test_agent.git
 cd ai_test_agent
 ```
 
-编辑 `.env.docker`，修改以下三项（其余保持默认即可）：
+编辑 `.env.docker`，修改以下配置（其余保持默认即可）：
 
 | 配置项 | 说明 | 生成命令 |
 | --- | --- | --- |
 | `SECRET_KEY` | JWT 签名密钥，默认值有安全风险 | `python -c "import secrets; print(secrets.token_hex(32))"` |
 | `POSTGRES_PASSWORD` | 数据库密码，同时改 `DATABASE_URL` 里对应的密码 | — |
 | `AI_API_KEY` | 大模型 API Key（也可部署后在平台页面填写） | — |
+| `AI_API_URL` | 大模型接口地址，默认 DeepSeek，按需替换 | — |
+| `AI_MODEL` | 模型名称，与 `AI_API_URL` 对应 | — |
 
 ```bash
 docker compose up -d
@@ -45,17 +49,33 @@ docker compose down                        # 停止
 
 > **升级说明**：新版本在服务启动时自动执行数据库迁移，直接 `--build` 重启即可，无需手动操作。
 
+> **数据备份**：数据库和文件存储在 Docker 命名卷 `pg_data` / `app_data` 中，使用 `docker volume inspect` 查看实际路径，迁移时一并复制即可。
+
 ### 本地启动
 
-```bash
-# 安装依赖
-pip install -r requirements.txt
-playwright install chromium
+**环境要求：** Python 3.11+，Node 18+
 
-# 构建前端
+```bash
+# 1. 克隆项目
+git clone https://github.com/ywq2019/ai_test_agent.git
+cd ai_test_agent
+
+# 2. 创建 .env 配置文件（必须，git clone 不包含此文件）
+cp .env.docker .env
+# 然后编辑 .env，至少填写 AI_API_KEY 和 AI_API_URL
+
+# 3. 安装 Python 依赖
+pip install -r requirements.txt
+
+# 4. 安装 Playwright 浏览器
+playwright install chromium
+# Linux 用户还需要（Mac/Windows 跳过）：
+# sudo playwright install-deps chromium
+
+# 5. 构建前端
 cd ui && npm install && npm run build && cd ..
 
-# 启动（访问 http://localhost:4000）
+# 6. 启动（访问 http://localhost:4000）
 python main.py
 ```
 
