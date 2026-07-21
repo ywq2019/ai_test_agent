@@ -255,6 +255,7 @@
                 <el-button type="primary" size="small" @click="viewReport(row.id)">
                   <el-icon><Document /></el-icon> 详情
                 </el-button>
+                <el-button type="warning" plain size="small" @click="exportReportPdf(row.id)">PDF</el-button>
                 <el-button type="danger" plain size="small" @click="deleteReport(row.id)">删除</el-button>
               </div>
             </div>
@@ -343,16 +344,26 @@
       <template #header="{ titleId, titleClass }">
         <div style="display:flex;align-items:center;justify-content:space-between;width:100%;padding-right:8px">
           <span :id="titleId" :class="titleClass">执行报告详情</span>
-          <el-button
-            v-if="reportDetail"
-            type="primary"
-            size="small"
-            :loading="aiAnalyzing"
-            @click="analyzeReport"
-          >
-            <template #icon><Cpu /></template>
-            {{ aiAnalyzing ? '分析中…' : aiAnalysis ? '重新分析' : 'AI 分析' }}
-          </el-button>
+          <div style="display:flex;gap:8px;align-items:center">
+            <el-button
+              v-if="reportDetail"
+              type="warning"
+              size="small"
+              @click="exportReportPdf(reportDetail.id)"
+            >
+              <el-icon><Document /></el-icon> 导出 PDF
+            </el-button>
+            <el-button
+              v-if="reportDetail"
+              type="primary"
+              size="small"
+              :loading="aiAnalyzing"
+              @click="analyzeReport"
+            >
+              <template #icon><Cpu /></template>
+              {{ aiAnalyzing ? '分析中…' : aiAnalysis ? '重新分析' : 'AI 分析' }}
+            </el-button>
+          </div>
         </div>
       </template>
 
@@ -900,6 +911,11 @@ async function viewReport(id) {
   reportDrawerVisible.value = true
   reportDetail.value = await fetchReportDetail(id)
   if (reportDetail.value.analysis) aiAnalysis.value = reportDetail.value.analysis
+}
+
+function exportReportPdf(reportId) {
+  ElMessage.info('正在生成 PDF，请稍候...')
+  window.open(`/api/v1/test-plans/reports/${reportId}/pdf`, '_blank')
 }
 
 async function deleteReport(id) {

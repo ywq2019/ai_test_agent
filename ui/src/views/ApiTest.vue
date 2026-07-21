@@ -479,11 +479,14 @@
             <el-table-column prop="created_at" label="时间" width="160" show-overflow-tooltip>
               <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
             </el-table-column>
-            <el-table-column label="操作" width="140" fixed="right" align="center">
+            <el-table-column label="操作" width="200" fixed="right" align="center">
               <template #default="{ row }">
                 <div class="table-action-btns">
                   <el-button size="small" type="primary" plain @click="showReportDetail(row)">
                     <el-icon><View /></el-icon> 详情
+                  </el-button>
+                  <el-button size="small" type="warning" plain @click="exportReportPdf(row.id)">
+                    <el-icon><Document /></el-icon> PDF
                   </el-button>
                   <el-button size="small" type="danger" plain @click="deleteReports([row.id])">
                     <el-icon><Delete /></el-icon> 删除
@@ -1094,6 +1097,9 @@ async def create_order(user_id: int, product_id: int, quantity: int):
       </template>
       <template #footer>
         <el-button @click="reportDetailVisible = false">关闭</el-button>
+        <el-button type="warning" @click="exportReportPdf(selectedReport.id)">
+          <el-icon><Document /></el-icon> 导出 PDF
+        </el-button>
       </template>
     </el-dialog>
 
@@ -2245,6 +2251,11 @@ const showReportDetail = (r) => {
   selectedReport.value = r
   analysisResult.value = r.analysis || ''
   reportDetailVisible.value = true
+}
+
+const exportReportPdf = (reportId) => {
+  ElMessage.info('正在生成 PDF，请稍候...')
+  window.open(`/api/v1/api-test/reports/${reportId}/pdf`, '_blank')
 }
 
 const runAnalysis = async () => {
