@@ -867,13 +867,20 @@ async def _do_map_cases_bg(record_id: int) -> None:
         total_batches = (len(all_cases) + BATCH - 1) // BATCH
         all_mappings: list = []
 
+        # 建立 name → case_id 的反查索引，用于修正 AI 返回的错误 case_id
+        name_to_id = {c["name"]: c["case_id"] for c in all_cases}
+        # 也建立 case_id → case_id 的索引（正确情况直接命中）
+        valid_ids = {c["case_id"] for c in all_cases}
+
         for i in range(0, len(all_cases), BATCH):
             batch_num = i // BATCH + 1
             pct = 20 + int(batch_num / total_batches * 70)
             await _push(pct, f"正在映射用例 {batch_num}/{total_batches} 批...")
 
             batch = all_cases[i:i + BATCH]
-            cases_text = "\n".join(f"  {c['case_id']} | {c['name']}" for c in batch)
+            # 用序号作为传给 AI 的临时 ID，避免 AI 自创或误解原始 ID
+            idx_to_id = {str(idx): c["case_id"] for idx, c in enumerate(batch)}
+            cases_text = "\n".join(f"  {idx} | {c['name']}" for idx, c in enumerate(batch))
             system_prompt = get_system("ai_case_gen.yaml", "map_cases_to_requirements")
             user_prompt = render_user("ai_case_gen.yaml", "map_cases_to_requirements",
                                       requirements_text=requirements_text,
@@ -882,10 +889,24 @@ async def _do_map_cases_bg(record_id: int) -> None:
                 raw = await ai_case_generator._run_claude_subprocess(system_prompt, user_prompt, timeout_secs=180)
                 data = _json.loads(raw)
                 batch_mappings = data.get("mappings", [])
-                # 调试：打印本批映射结果样例
-                non_empty = [m for m in batch_mappings if m.get("req_refs")]
-                logger.info(f"映射批次 {batch_num}: 共 {len(batch_mappings)} 条，有关联需求 {len(non_empty)} 条，样例: {non_empty[:2]}")
-                all_mappings.extend(batch_mappings)
+
+                # 把 AI 返回的序号 case_id 转换回真实的 case_id
+                fixed_mappings = []
+                for m in batch_mappings:
+                    ai_id = str(m.get("case_id", ""))
+                    real_id = idx_to_id.get(ai_id)          # 序号命中
+                    if not real_id:
+                        real_id = ai_id if ai_id in valid_ids else None  # 直接命中真实 ID
+                    if not real_id:
+                        real_id = name_to_id.get(ai_id)     # 以名字作为 ID 命中
+                    if real_id:
+                        fixed_mappings.append({"case_id": real_id, "req_refs": m.get("req_refs", [])})
+                    else:
+                        logger.debug(f"映射批次 {batch_num}: 无法匹配 case_id={ai_id!r}，跳过")
+
+                non_empty = [m for m in fixed_mappings if m.get("req_refs")]
+                logger.info(f"映射批次 {batch_num}: AI返回 {len(batch_mappings)} 条，修正后有效 {len(fixed_mappings)} 条，有关联 {len(non_empty)} 条")
+                all_mappings.extend(fixed_mappings)
             except Exception as e:
                 logger.warning(f"映射批次 {batch_num} 失败（忽略）: {e}")
 
