@@ -593,128 +593,18 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
     async def _run_claude_subprocess(
         self, system_prompt: str, prompt: str, timeout_secs: int = 90
     ) -> str:
-        """调用 LLM API，自动根据模型类型选择 Anthropic 或 OpenAI 兼容格式。
+        """调用 LLM API，自动根据模型和 URL 选择正确格式。
         受全局 Semaphore 保护，防止多用户并发超出代理 QPS。
         """
-        import httpx
-        from tools.config import settings
+        from tools.llm_client import call_llm
 
-        api_key  = settings.AI_API_KEY
-        base_url = (settings.AI_API_URL or "").rstrip("/")
-        model    = settings.AI_MODEL or "deepseek-v4-flash"
-
-        if not api_key or not base_url:
-            raise RuntimeError("未配置 AI_API_KEY 或 AI_API_URL，请在大模型配置页填写后重试")
-
-        # 只有 URL 真正指向 Anthropic 官方时才走 Anthropic 格式；
-        # 第三方代理（aims.hqwx.com 等）统一走 OpenAI 兼容格式
-        is_anthropic = "anthropic.com" in base_url
-
-        if is_anthropic:
-            url     = f"{base_url}/v1/messages"
-            headers = {
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            }
-            payload = {
-                "model": model,
-                "max_tokens": 16000,
-                "system": system_prompt,
-                "messages": [{"role": "user", "content": prompt}],
-            }
-        else:
-            url     = f"{base_url}/v1/chat/completions"
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "content-type": "application/json",
-            }
-            payload = {
-                "model": model,
-                "max_tokens": 16000,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user",   "content": prompt},
-                ],
-            }
-
-        logger.info(f"Calling LLM API: {url}, model={model}, is_anthropic={is_anthropic}")
-
-        # 全局并发保护：等待 Semaphore 令牌，超时则报告系统繁忙
-        try:
-            await asyncio.wait_for(_GLOBAL_LLM_SEM.acquire(), timeout=_LLM_SEM_TIMEOUT)
-        except asyncio.TimeoutError:
-            raise RuntimeError(
-                f"当前 AI 服务繁忙（并发已满 {_LLM_CONCURRENCY}），"
-                f"等待超过 {_LLM_SEM_TIMEOUT}s，请稍后重试"
-            )
-        try:
-            # 临时错误（502/503/504/超时）自动重试，最多3次，间隔递增
-            _RETRYABLE = {502, 503, 504}
-            _MAX_RETRY  = 3
-            last_exc: Exception = RuntimeError("未知错误")
-            for _attempt in range(1, _MAX_RETRY + 1):
-                try:
-                    async with httpx.AsyncClient(verify=False, timeout=timeout_secs) as client:
-                        resp = await client.post(url, json=payload, headers=headers)
-                        if resp.status_code in _RETRYABLE:
-                            raise httpx.HTTPStatusError(
-                                f"Server error '{resp.status_code}' (retryable)",
-                                request=resp.request, response=resp,
-                            )
-                        resp.raise_for_status()
-                        data = resp.json()
-                    break  # 成功则跳出重试循环
-                except (httpx.TimeoutException, httpx.HTTPStatusError) as e:
-                    last_exc = e
-                    is_retryable = isinstance(e, httpx.TimeoutException) or (
-                        isinstance(e, httpx.HTTPStatusError)
-                        and e.response.status_code in _RETRYABLE
-                    )
-                    if is_retryable and _attempt < _MAX_RETRY:
-                        wait = _attempt * 5  # 5s, 10s, 15s
-                        logger.warning(f"LLM 请求失败（第{_attempt}次）: {e}，{wait}s 后重试...")
-                        await asyncio.sleep(wait)
-                        continue
-                    raise  # 不可重试或已用完重试次数，直接抛出
-            else:
-                raise last_exc  # 全部重试失败
-        finally:
-            _GLOBAL_LLM_SEM.release()
-
-        if is_anthropic:
-            # 兼容多种代理响应格式
-            content_field = data.get("content")
-            if not content_field:
-                logger.error(f"Anthropic API 返回无 content 字段，完整响应: {json.dumps(data, ensure_ascii=False)[:500]}")
-                raise ValueError(f"Anthropic API 返回无内容，响应: {json.dumps(data, ensure_ascii=False)[:200]}")
-
-            if isinstance(content_field, str):
-                # 部分代理直接把 content 作为字符串返回
-                raw = content_field
-            elif isinstance(content_field, list):
-                # 标准格式：[{"type": "text", "text": "..."}]，可能包含 thinking block
-                text_blocks = [b for b in content_field if isinstance(b, dict) and b.get("type") == "text"]
-                if not text_blocks:
-                    logger.error(f"Anthropic API 未返回 text block，content={content_field}")
-                    raise ValueError(f"Anthropic API 未返回 text block，content={content_field}")
-                block = text_blocks[0]
-                raw = block.get("text", "")
-                if not raw:
-                    # 代理可能把文本存在其他字段，尝试常见备选字段
-                    raw = (block.get("content", "") or block.get("value", "")
-                           or block.get("message", ""))
-                    if not raw:
-                        logger.error(
-                            f"Anthropic text block 缺少 'text' 字段，block={block}，"
-                            f"完整 content={content_field}"
-                        )
-                        raise ValueError(f"Anthropic text block 无文本内容（'text' 字段缺失）: {block}")
-            else:
-                logger.error(f"Anthropic content 格式异常: type={type(content_field)}, value={content_field!r}")
-                raise ValueError(f"Anthropic content 格式异常: {type(content_field)}")
-        else:
-            raw = data["choices"][0]["message"]["content"]
+        raw = await call_llm(
+            system_prompt, prompt,
+            max_tokens=16000,
+            timeout_secs=timeout_secs,
+            semaphore=_GLOBAL_LLM_SEM,
+            sem_timeout=_LLM_SEM_TIMEOUT,
+        )
 
         raw = raw.strip()
         if "```json" in raw:
@@ -1266,45 +1156,7 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
 4. 第一个字符必须是 {{，最后一个字符必须是 }}"""
 
         logger.info("调用 LLM API 生成用例...")
-        import httpx
-        from tools.config import settings
-
-        api_key  = settings.AI_API_KEY
-        base_url = (settings.AI_API_URL or "").rstrip("/")
-        model    = settings.AI_MODEL or "deepseek-v4-flash"
-
-        if not api_key or not base_url:
-            raise RuntimeError("未配置 AI_API_KEY 或 AI_API_URL，请在大模型配置页填写后重试")
-
-        is_anthropic = "anthropic.com" in base_url
-
-        if is_anthropic:
-            url     = f"{base_url}/v1/messages"
-            headers = {
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            }
-            payload = {
-                "model": model,
-                "max_tokens": 16000,
-                "system": system_prompt,
-                "messages": [{"role": "user", "content": prompt}],
-            }
-        else:
-            url     = f"{base_url}/v1/chat/completions"
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "content-type": "application/json",
-            }
-            payload = {
-                "model": model,
-                "max_tokens": 16000,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user",   "content": prompt},
-                ],
-            }
+        from tools.llm_client import call_llm
 
         # 后台模拟进度推送 30→88%（AI 生成期间）
         _done_flag = [False]
@@ -1318,37 +1170,10 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
 
         sim_task = asyncio.ensure_future(_simulate_progress())
         try:
-            async with httpx.AsyncClient(verify=False, timeout=360) as client:
-                resp = await client.post(url, json=payload, headers=headers)
-                resp.raise_for_status()
-                data = resp.json()
+            raw = await call_llm(system_prompt, prompt, max_tokens=16000, timeout_secs=360)
         finally:
             _done_flag[0] = True
             sim_task.cancel()
-
-        if is_anthropic:
-            # 兼容多种代理响应格式（与 _run_claude_subprocess 保持一致）
-            content_field = data.get("content")
-            if not content_field:
-                raise ValueError(f"Anthropic API 返回无内容，响应: {json.dumps(data, ensure_ascii=False)[:200]}")
-
-            if isinstance(content_field, str):
-                raw = content_field
-            elif isinstance(content_field, list):
-                text_blocks = [b for b in content_field if isinstance(b, dict) and b.get("type") == "text"]
-                if not text_blocks:
-                    raise ValueError(f"Anthropic API 未返回 text block，content={content_field}")
-                block = text_blocks[0]
-                raw = block.get("text", "")
-                if not raw:
-                    raw = (block.get("content", "") or block.get("value", "")
-                           or block.get("message", ""))
-                    if not raw:
-                        raise ValueError(f"Anthropic text block 无文本内容（'text' 字段缺失）: {block}")
-            else:
-                raise ValueError(f"Anthropic content 格式异常: {type(content_field)}")
-        else:
-            raw = data["choices"][0]["message"]["content"]
 
         raw = raw.strip()
         if "```json" in raw:

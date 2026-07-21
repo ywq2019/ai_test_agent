@@ -881,7 +881,11 @@ async def _do_map_cases_bg(record_id: int) -> None:
             try:
                 raw = await ai_case_generator._run_claude_subprocess(system_prompt, user_prompt, timeout_secs=180)
                 data = _json.loads(raw)
-                all_mappings.extend(data.get("mappings", []))
+                batch_mappings = data.get("mappings", [])
+                # 调试：打印本批映射结果样例
+                non_empty = [m for m in batch_mappings if m.get("req_refs")]
+                logger.info(f"映射批次 {batch_num}: 共 {len(batch_mappings)} 条，有关联需求 {len(non_empty)} 条，样例: {non_empty[:2]}")
+                all_mappings.extend(batch_mappings)
             except Exception as e:
                 logger.warning(f"映射批次 {batch_num} 失败（忽略）: {e}")
 

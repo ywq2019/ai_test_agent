@@ -641,103 +641,14 @@ class CaseGenerator:
     async def _run_claude_subprocess(
         self, system_prompt: str, prompt: str, timeout_secs: int = 90
     ) -> str:
-        """调用 LLM API，自动根据模型类型选择 Anthropic 或 OpenAI 兼容格式。"""
-        import httpx
-        from tools.config import settings
+        """调用 LLM API，自动根据模型和 URL 选择正确格式。"""
+        from tools.llm_client import call_llm
 
-        api_key  = settings.AI_API_KEY
-        base_url = (settings.AI_API_URL or "").rstrip("/")
-        model    = settings.AI_MODEL or "deepseek-v4-flash"
-
-        if not api_key or not base_url:
-            raise RuntimeError("未配置 AI_API_KEY 或 AI_API_URL，请在大模型配置页填写后重试")
-
-        is_anthropic = "anthropic.com" in base_url
-
-        if is_anthropic:
-            url     = f"{base_url}/v1/messages"
-            headers = {
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            }
-            payload = {
-                "model": model,
-                "max_tokens": 8192,
-                "system": system_prompt,
-                "messages": [{"role": "user", "content": prompt}],
-            }
-        else:
-            url     = f"{base_url}/v1/chat/completions"
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "content-type": "application/json",
-            }
-            payload = {
-                "model": model,
-                "max_tokens": 8192,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user",   "content": prompt},
-                ],
-            }
-
-        logger.info(f"Calling LLM API: {url}, model={model}")
-        _RETRYABLE = {502, 503, 504}
-        _MAX_RETRY  = 3
-        last_exc: Exception = RuntimeError("未知错误")
-        for _attempt in range(1, _MAX_RETRY + 1):
-            try:
-                async with httpx.AsyncClient(verify=False, timeout=timeout_secs) as client:
-                    resp = await client.post(url, json=payload, headers=headers)
-                    if resp.status_code in _RETRYABLE:
-                        raise httpx.HTTPStatusError(
-                            f"Server error '{resp.status_code}' (retryable)",
-                            request=resp.request, response=resp,
-                        )
-                    resp.raise_for_status()
-                    data = resp.json()
-                break
-            except (httpx.TimeoutException, httpx.HTTPStatusError) as e:
-                last_exc = e
-                is_retryable = isinstance(e, httpx.TimeoutException) or (
-                    isinstance(e, httpx.HTTPStatusError)
-                    and e.response.status_code in _RETRYABLE
-                )
-                if is_retryable and _attempt < _MAX_RETRY:
-                    wait = _attempt * 5
-                    logger.warning(f"LLM 请求失败（第{_attempt}次）: {e}，{wait}s 后重试...")
-                    await asyncio.sleep(wait)
-                    continue
-                raise
-        else:
-            raise last_exc
-
-        if is_anthropic:
-            # 兼容多种代理响应格式（部分代理 text block 缺少 "text" 字段）
-            content_field = data.get("content")
-            if not content_field:
-                raise ValueError(f"Anthropic API 返回无内容，响应: {json.dumps(data, ensure_ascii=False)[:200]}")
-
-            if isinstance(content_field, str):
-                # 部分代理直接把 content 作为字符串返回
-                raw = content_field
-            elif isinstance(content_field, list):
-                text_blocks = [b for b in content_field if isinstance(b, dict) and b.get("type") == "text"]
-                if not text_blocks:
-                    raise ValueError(f"Anthropic API 未返回 text block，content={content_field}")
-                block = text_blocks[0]
-                raw = block.get("text", "")
-                if not raw:
-                    raw = (block.get("content", "") or block.get("value", "")
-                           or block.get("message", ""))
-                    if not raw:
-                        raise ValueError(f"Anthropic text block 无文本内容（'text' 字段缺失）: {block}")
-            else:
-                raise ValueError(f"Anthropic content 格式异常: {type(content_field)}")
-        else:
-            raw = data["choices"][0]["message"]["content"]
-
+        raw = await call_llm(
+            system_prompt, prompt,
+            max_tokens=8192,
+            timeout_secs=timeout_secs,
+        )
         raw = raw.strip()
         if "```json" in raw:
             raw = raw.split("```json", 1)[1].split("```", 1)[0].strip()

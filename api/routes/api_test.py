@@ -511,16 +511,13 @@ async def test_script(data: dict):
 
 @router.post("/api-test/scripts/ai-generate")
 async def ai_generate_script(data: dict):
-    import httpx, re as _re
+    import re as _re
+    from tools.llm_client import call_llm
     prompt    = (data.get("prompt") or "").strip()
     func_name = (data.get("func_name") or "").strip()
     if not prompt:
         raise HTTPException(status_code=400, detail="prompt 不能为空")
-    api_key     = settings.AI_API_KEY
-    base_url    = (settings.AI_API_URL or "").rstrip("/")
-    model       = settings.AI_MODEL or "deepseek-v4-flash"
-    temperature = float(getattr(settings, "AI_TEMPERATURE", 0.3))
-    if not api_key:
+    if not settings.AI_API_KEY:
         raise HTTPException(status_code=400, detail="未配置 AI API Key，请先在 LLM 配置页面填写")
     available_modules = "hashlib, json, time, random, string, uuid, base64, os, re, requests"
     system_prompt = (
@@ -529,28 +526,13 @@ async def ai_generate_script(data: dict):
         "- 函数必须有返回值（return）\n- 禁止文件 IO、系统调用等危险操作\n\n"
         "## 代码规范\n1. 所有 import 写在函数内部\n2. 只输出纯 Python 代码\n3. 不要输出解释说明"
     )
-    is_anthropic = "anthropic.com" in base_url
+    temperature = float(getattr(settings, "AI_TEMPERATURE", 0.3))
     try:
-        async with httpx.AsyncClient(verify=False, timeout=60.0) as client:
-            if is_anthropic:
-                resp = await client.post(
-                    f"{base_url}/v1/messages",
-                    headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-                    json={"model": model, "max_tokens": 1024, "temperature": temperature,
-                          "system": system_prompt, "messages": [{"role": "user", "content": prompt}]},
-                )
-            else:
-                resp = await client.post(
-                    f"{base_url}/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
-                    json={"model": model, "max_tokens": 1024, "temperature": temperature,
-                          "messages": [{"role": "system", "content": system_prompt},
-                                       {"role": "user", "content": prompt}]},
-                )
-        if resp.status_code != 200:
-            raise HTTPException(status_code=500, detail=f"AI 接口返回错误 {resp.status_code}：{resp.text[:300]}")
-        body = resp.json()
-        code = (body["content"][0]["text"] if is_anthropic else body["choices"][0]["message"]["content"]).strip()
+        code = await call_llm(
+            system_prompt, prompt,
+            max_tokens=1024, temperature=temperature, timeout_secs=60,
+        )
+        code = code.strip()
         if code.startswith("```"):
             lines = code.splitlines()
             code = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:]).strip()
@@ -759,28 +741,9 @@ async def _ai_analyze_report(report: dict) -> str:
             f"P95 {summary.get('p95_ms')}ms, P99 {summary.get('p99_ms')}ms\n\n"
             "请输出：\n1. 性能评估\n2. 潜在瓶颈分析\n3. 优化建议"
         )
-    api_key  = settings.AI_API_KEY
-    base_url = (settings.AI_API_URL or "").rstrip("/")
-    model    = settings.AI_MODEL or "deepseek-v4-flash"
-    is_anthropic = "anthropic.com" in base_url
     sys_msg = "你是一名资深测试工程师，擅长分析接口测试报告，给出精准、可操作的建议。用中文回答，使用 Markdown 格式输出。"
-    async with httpx.AsyncClient(verify=False, timeout=60) as client:
-        if is_anthropic:
-            resp = await client.post(
-                f"{base_url}/v1/messages",
-                headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-                json={"model": model, "max_tokens": 2048, "system": sys_msg, "messages": [{"role": "user", "content": prompt}]},
-            )
-        else:
-            resp = await client.post(
-                f"{base_url}/v1/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
-                json={"model": model, "max_tokens": 2048,
-                      "messages": [{"role": "system", "content": sys_msg}, {"role": "user", "content": prompt}]},
-            )
-        resp.raise_for_status()
-        data = resp.json()
-    return data["content"][0]["text"] if is_anthropic else data["choices"][0]["message"]["content"]
+    from tools.llm_client import call_llm
+    return await call_llm(sys_msg, prompt, max_tokens=2048, timeout_secs=60)
 
 
 @router.get("/api-test/reports/{report_id}/pdf")
@@ -1572,28 +1535,9 @@ async def _ai_analyze_plan_report(report: dict) -> str:
         + (f"失败步骤明细：\n{failed_summary}\n\n" if failed_steps else "所有步骤均通过。\n\n")
         + "请输出：\n1. 失败原因分析\n2. 修复建议\n3. 测试质量总结"
     )
-    api_key  = settings.AI_API_KEY
-    base_url = (settings.AI_API_URL or "").rstrip("/")
-    model    = settings.AI_MODEL or "deepseek-v4-flash"
-    is_anthropic = "anthropic.com" in base_url
     sys_msg = "你是一名资深测试工程师，擅长分析接口测试报告，给出精准、可操作的建议。用中文回答，使用 Markdown 格式输出。"
-    async with httpx.AsyncClient(verify=False, timeout=90) as client:
-        if is_anthropic:
-            resp = await client.post(
-                f"{base_url}/v1/messages",
-                headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-                json={"model": model, "max_tokens": 2048, "system": sys_msg, "messages": [{"role": "user", "content": prompt}]},
-            )
-        else:
-            resp = await client.post(
-                f"{base_url}/v1/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
-                json={"model": model, "max_tokens": 2048,
-                      "messages": [{"role": "system", "content": sys_msg}, {"role": "user", "content": prompt}]},
-            )
-        resp.raise_for_status()
-        data = resp.json()
-    return data["content"][0]["text"] if is_anthropic else data["choices"][0]["message"]["content"]
+    from tools.llm_client import call_llm
+    return await call_llm(sys_msg, prompt, max_tokens=2048, timeout_secs=90)
 
 
 @router.delete("/test-plans/reports/{report_id}")
