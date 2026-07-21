@@ -430,6 +430,8 @@ const connectWs = (clientId = 'cases_gen') => {
   ws.onmessage = (e) => {
     try {
       const msg = JSON.parse(e.data)
+      // 心跳 ping → 回 pong，防止服务端因超时断开连接
+      if (msg.type === 'ping') { ws?.readyState === 1 && ws.send(JSON.stringify({ type: 'pong' })); return }
       if (msg.type === 'cases_gen_progress' || msg.type === 'cases_opt_progress') {
         progressPct.value = msg.percent ?? progressPct.value
         progressStage.value = msg.stage ?? progressStage.value
