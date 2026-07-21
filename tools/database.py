@@ -332,86 +332,96 @@ class DocumentChunk(Base):
 
 
 async def init_database():
-    async with engine.begin() as conn:
-        # PostgreSQL 环境下启用 pgvector 扩展
-        if "postgresql" in settings.DATABASE_URL:
-            try:
+    # PostgreSQL 环境下启用 pgvector 扩展。
+    # 必须在独立事务中执行：asyncpg 遇到任何错误都会把当前事务标记为 aborted，
+    # 若与 create_all 共用同一 engine.begin() 事务块，扩展创建失败后整个建表事务
+    # 全部回滚（PostgreSQL 静默拒绝，SQLAlchemy 不抛异常），导致所有表都没建出来。
+    if "postgresql" in settings.DATABASE_URL:
+        try:
+            async with engine.begin() as conn:
                 await conn.execute(__import__('sqlalchemy').text("CREATE EXTENSION IF NOT EXISTS vector"))
-            except Exception:
-                pass
-        await conn.run_sync(Base.metadata.create_all)
-        # 兼容旧库：自动补齐新增列
-        for ddl in [
-            "ALTER TABLE api_test_reports ADD COLUMN analysis TEXT",
-            "ALTER TABLE api_cases ADD COLUMN description TEXT",
-            "ALTER TABLE api_cases ADD COLUMN body_type VARCHAR(20) DEFAULT 'json'",
-            "ALTER TABLE api_cases ADD COLUMN body_raw TEXT",
-            "ALTER TABLE api_cases ADD COLUMN var_extracts JSON",
-            "ALTER TABLE global_variables ADD COLUMN source_project VARCHAR(255) DEFAULT ''",
-            "ALTER TABLE api_projects ADD COLUMN setup_cases JSON",
-            "ALTER TABLE api_projects ADD COLUMN auth_error_patterns JSON",
-            "ALTER TABLE api_projects ADD COLUMN proxy_url VARCHAR(512) DEFAULT ''",
-            "ALTER TABLE api_projects ADD COLUMN hosts_map TEXT DEFAULT ''",
-            # test_plans / test_plan_steps / test_plan_reports 由 create_all 自动建表，无需 ALTER
-            "ALTER TABLE test_plans ADD COLUMN proxy_url VARCHAR(512) DEFAULT ''",
-            "ALTER TABLE test_plans ADD COLUMN hosts_map TEXT DEFAULT ''",
-            "ALTER TABLE test_plan_reports ADD COLUMN analysis TEXT",
-            # ai_case_files 文档变更追踪字段（兼容旧库）
-            "ALTER TABLE ai_case_files ADD COLUMN doc_hash VARCHAR(64)",
-            "ALTER TABLE ai_case_files ADD COLUMN doc_content TEXT",
-            "ALTER TABLE ai_case_files ADD COLUMN parent_id INTEGER",
-            "ALTER TABLE ai_case_files ADD COLUMN diff_summary TEXT",
-            "ALTER TABLE ai_case_files ADD COLUMN record_status VARCHAR(20) DEFAULT 'active'",
-            "ALTER TABLE ai_case_files ADD COLUMN gen_status VARCHAR(20) DEFAULT 'done'",
-            "ALTER TABLE ai_case_files ADD COLUMN requirements_data JSON",
-            "ALTER TABLE ai_case_files ADD COLUMN traceability_data JSON",
-            "ALTER TABLE ai_case_files ADD COLUMN gen_progress INTEGER DEFAULT 0",
-            # test_tasks 文档快照字段（兼容旧库）
-            "ALTER TABLE test_tasks ADD COLUMN doc_snapshot TEXT",
-            "ALTER TABLE test_tasks ADD COLUMN doc_hash VARCHAR(64)",
-            # test_cases 废弃字段（兼容旧库）
-            "ALTER TABLE test_cases ADD COLUMN deprecated BOOLEAN DEFAULT 0",
-            # 权限隔离：created_by 字段（NULL = 历史数据，对所有用户可见）
-            "ALTER TABLE test_tasks ADD COLUMN created_by VARCHAR(100)",
-            "ALTER TABLE ai_case_files ADD COLUMN created_by VARCHAR(100)",
-            "ALTER TABLE api_projects ADD COLUMN created_by VARCHAR(100)",
-            "ALTER TABLE test_plans ADD COLUMN created_by VARCHAR(100)",
-            # CI/CD webhook token
-            "ALTER TABLE test_plans ADD COLUMN webhook_token VARCHAR(128)",
-            # 报告隔离
-            "ALTER TABLE test_reports ADD COLUMN created_by VARCHAR(100)",
-            # 工作空间 project_id（各业务表）
-            "ALTER TABLE test_tasks    ADD COLUMN project_id INTEGER",
-            "ALTER TABLE test_reports  ADD COLUMN project_id INTEGER",
-            "ALTER TABLE ai_case_files ADD COLUMN project_id INTEGER",
-            "ALTER TABLE api_projects  ADD COLUMN workspace_id INTEGER",
-            "ALTER TABLE test_plans    ADD COLUMN workspace_id INTEGER",
-            "ALTER TABLE global_variables ADD COLUMN workspace_id INTEGER",
-        ]:
-            try:
-                await conn.execute(__import__('sqlalchemy').text(ddl))
-            except Exception:
-                pass  # 列已存在则忽略
+        except Exception as e:
+            __import__('loguru').logger.warning(f"[init_db] pgvector 扩展创建跳过（可能已存在）: {e}")
 
-        # 数据迁移：将 created_by = NULL 的历史数据归属到 admin
-        _sql = __import__('sqlalchemy').text
-        _admin = settings.DEFAULT_USERNAME
-        for table in ["test_tasks", "ai_case_files", "api_projects", "test_plans", "test_reports"]:
-            try:
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    # 兼容旧库：自动补齐新增列。
+    # 每条 ALTER TABLE 必须独立事务：asyncpg 遇到"列已存在"错误会把当前事务标记为
+    # aborted，若共用同一事务，后续所有 DDL 全部被静默跳过，导致新列未能添加。
+    _sql = __import__('sqlalchemy').text
+    _log = __import__('loguru').logger
+    _admin = settings.DEFAULT_USERNAME
+
+    for ddl in [
+        "ALTER TABLE api_test_reports ADD COLUMN analysis TEXT",
+        "ALTER TABLE api_cases ADD COLUMN description TEXT",
+        "ALTER TABLE api_cases ADD COLUMN body_type VARCHAR(20) DEFAULT 'json'",
+        "ALTER TABLE api_cases ADD COLUMN body_raw TEXT",
+        "ALTER TABLE api_cases ADD COLUMN var_extracts JSON",
+        "ALTER TABLE global_variables ADD COLUMN source_project VARCHAR(255) DEFAULT ''",
+        "ALTER TABLE api_projects ADD COLUMN setup_cases JSON",
+        "ALTER TABLE api_projects ADD COLUMN auth_error_patterns JSON",
+        "ALTER TABLE api_projects ADD COLUMN proxy_url VARCHAR(512) DEFAULT ''",
+        "ALTER TABLE api_projects ADD COLUMN hosts_map TEXT DEFAULT ''",
+        # test_plans / test_plan_steps / test_plan_reports 由 create_all 自动建表，无需 ALTER
+        "ALTER TABLE test_plans ADD COLUMN proxy_url VARCHAR(512) DEFAULT ''",
+        "ALTER TABLE test_plans ADD COLUMN hosts_map TEXT DEFAULT ''",
+        "ALTER TABLE test_plan_reports ADD COLUMN analysis TEXT",
+        # ai_case_files 文档变更追踪字段（兼容旧库）
+        "ALTER TABLE ai_case_files ADD COLUMN doc_hash VARCHAR(64)",
+        "ALTER TABLE ai_case_files ADD COLUMN doc_content TEXT",
+        "ALTER TABLE ai_case_files ADD COLUMN parent_id INTEGER",
+        "ALTER TABLE ai_case_files ADD COLUMN diff_summary TEXT",
+        "ALTER TABLE ai_case_files ADD COLUMN record_status VARCHAR(20) DEFAULT 'active'",
+        "ALTER TABLE ai_case_files ADD COLUMN gen_status VARCHAR(20) DEFAULT 'done'",
+        "ALTER TABLE ai_case_files ADD COLUMN requirements_data JSON",
+        "ALTER TABLE ai_case_files ADD COLUMN traceability_data JSON",
+        "ALTER TABLE ai_case_files ADD COLUMN gen_progress INTEGER DEFAULT 0",
+        # test_tasks 文档快照字段（兼容旧库）
+        "ALTER TABLE test_tasks ADD COLUMN doc_snapshot TEXT",
+        "ALTER TABLE test_tasks ADD COLUMN doc_hash VARCHAR(64)",
+        # test_cases 废弃字段（兼容旧库）
+        "ALTER TABLE test_cases ADD COLUMN deprecated BOOLEAN DEFAULT 0",
+        # 权限隔离：created_by 字段（NULL = 历史数据，对所有用户可见）
+        "ALTER TABLE test_tasks ADD COLUMN created_by VARCHAR(100)",
+        "ALTER TABLE ai_case_files ADD COLUMN created_by VARCHAR(100)",
+        "ALTER TABLE api_projects ADD COLUMN created_by VARCHAR(100)",
+        "ALTER TABLE test_plans ADD COLUMN created_by VARCHAR(100)",
+        # CI/CD webhook token
+        "ALTER TABLE test_plans ADD COLUMN webhook_token VARCHAR(128)",
+        # 报告隔离
+        "ALTER TABLE test_reports ADD COLUMN created_by VARCHAR(100)",
+        # 工作空间 project_id（各业务表）
+        "ALTER TABLE test_tasks    ADD COLUMN project_id INTEGER",
+        "ALTER TABLE test_reports  ADD COLUMN project_id INTEGER",
+        "ALTER TABLE ai_case_files ADD COLUMN project_id INTEGER",
+        "ALTER TABLE api_projects  ADD COLUMN workspace_id INTEGER",
+        "ALTER TABLE test_plans    ADD COLUMN workspace_id INTEGER",
+        "ALTER TABLE global_variables ADD COLUMN workspace_id INTEGER",
+    ]:
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(_sql(ddl))
+        except Exception:
+            pass  # 列已存在则忽略
+
+    # 数据迁移：将 created_by = NULL 的历史数据归属到 admin
+    for table in ["test_tasks", "ai_case_files", "api_projects", "test_plans", "test_reports"]:
+        try:
+            async with engine.begin() as conn:
                 result = await conn.execute(
                     _sql(f"UPDATE {table} SET created_by = :u WHERE created_by IS NULL"),
                     {"u": _admin},
                 )
                 if result.rowcount:
-                    __import__('loguru').logger.info(
-                        f"[init_db] {table}: {result.rowcount} 条历史数据 created_by 归属到 {_admin}"
-                    )
-            except Exception:
-                pass
+                    _log.info(f"[init_db] {table}: {result.rowcount} 条历史数据 created_by 归属到 {_admin}")
+        except Exception:
+            pass
 
-        # ── 默认工作空间：确保存在，并把旧数据和所有用户纳入 ──────────────────
-        _log = __import__('loguru').logger
-        try:
+    # ── 默认工作空间：确保存在，并把旧数据和所有用户纳入 ──────────────────
+    try:
+        async with engine.begin() as conn:
             # 1. 建或找默认工作空间（名称固定为"默认空间"）
             row = await conn.execute(
                 _sql("SELECT id FROM projects WHERE name = '默认空间' LIMIT 1")
@@ -431,25 +441,27 @@ async def init_database():
 
             ws_id = default_ws[0]
 
-            # 2. 旧数据（project_id / workspace_id = NULL）归入默认空间
-            for table, col in [
-                ("test_tasks",    "project_id"),
-                ("ai_case_files", "project_id"),
-                ("test_reports",  "project_id"),
-                ("api_projects",  "workspace_id"),
-                ("test_plans",    "workspace_id"),
-            ]:
-                try:
+        # 2. 旧数据（project_id / workspace_id = NULL）归入默认空间
+        for table, col in [
+            ("test_tasks",    "project_id"),
+            ("ai_case_files", "project_id"),
+            ("test_reports",  "project_id"),
+            ("api_projects",  "workspace_id"),
+            ("test_plans",    "workspace_id"),
+        ]:
+            try:
+                async with engine.begin() as conn:
                     r = await conn.execute(
                         _sql(f"UPDATE {table} SET {col} = :ws WHERE {col} IS NULL"),
                         {"ws": ws_id},
                     )
                     if r.rowcount:
                         _log.info(f"[init_db] {table}: {r.rowcount} 条旧数据归入默认空间 id={ws_id}")
-                except Exception:
-                    pass
+            except Exception:
+                pass
 
-            # 3. 只把 admin 加入默认空间（普通用户需要被手动邀请到对应工作空间）
+        # 3. 只把 admin 加入默认空间（普通用户需要被手动邀请到对应工作空间）
+        async with engine.begin() as conn:
             existing = await conn.execute(
                 _sql("SELECT id FROM project_members WHERE project_id = :ws AND username = :u"),
                 {"ws": ws_id, "u": _admin},
@@ -462,8 +474,8 @@ async def init_database():
                 )
                 _log.info(f"[init_db] admin 加入默认空间（owner）")
 
-        except Exception as e:
-            _log.warning(f"[init_db] 默认工作空间初始化异常（可忽略）: {e}")
+    except Exception as e:
+        _log.warning(f"[init_db] 默认工作空间初始化异常（可忽略）: {e}")
 
 
 async def get_db():
