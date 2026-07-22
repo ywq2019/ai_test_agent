@@ -73,7 +73,11 @@ const router = createRouter({
 router.beforeEach((to) => {
   if (to.meta.public) return true
   const token = localStorage.getItem('token')
-  if (!token) return { path: '/login', query: { redirect: to.fullPath } }
+  if (!token) {
+    // 不把登录页自身记入 redirect，避免登录成功后跳回登录页死循环
+    const redirect = to.path !== '/login' ? to.fullPath : '/'
+    return { path: '/login', query: { redirect } }
+  }
   return true
 })
 

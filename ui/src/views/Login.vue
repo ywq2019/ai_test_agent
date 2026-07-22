@@ -51,7 +51,8 @@ const handleLogin = async () => {
   try {
     await auth.login(form.username, form.password)
     ElMessage.success('登录成功')
-    router.push(router.currentRoute.value.query.redirect || '/')
+    const redirect = router.currentRoute.value.query.redirect
+    router.push(redirect && redirect !== '/login' ? redirect : '/')
   } catch (e) {
     ElMessage.error(e.message || '登录失败')
   } finally {
