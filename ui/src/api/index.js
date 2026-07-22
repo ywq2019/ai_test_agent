@@ -23,8 +23,14 @@ api.interceptors.response.use(
       localStorage.removeItem('token')
       localStorage.removeItem('username')
       localStorage.removeItem('role')
-      const redirect = encodeURIComponent(window.location.pathname)
-      window.location.href = `/login?redirect=${redirect}`
+      // 用 import 动态拿 router，避免循环依赖；用 router.replace 而非 window.location.href，
+      // 防止页面重载触发 App.vue onMounted 再次发请求造成死循环
+      const currentPath = window.location.pathname
+      if (currentPath !== '/login') {
+        import('../router').then(({ default: router }) => {
+          router.replace({ path: '/login', query: { redirect: currentPath } })
+        })
+      }
       return Promise.reject(error)
     }
     // 其他错误：取后端 detail 字段展示，没有则用通用提示

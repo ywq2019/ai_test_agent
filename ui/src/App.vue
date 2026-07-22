@@ -347,6 +347,8 @@ const handleWebSocketMessage = (data) => {
 }
 
 onMounted(async () => {
+  // 登录页不执行初始化请求，避免 401 → 跳登录页 → 再次请求的死循环
+  if (route.name === 'Login') return
   connectWebSocket()
   wsStore.restoreFromSession()
   await wsStore.fetchWorkspaces()
