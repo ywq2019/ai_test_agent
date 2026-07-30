@@ -475,6 +475,7 @@ const getCategoryType = (category) => {
     'web-testing': 'success', 'api-testing': 'warning',
     'test-generation': 'primary', 'reporting': 'info',
     'execution': 'danger', 'document-parsing': '',
+    'security-testing': 'danger',
   }
   return map[category] || ''
 }
@@ -484,6 +485,7 @@ const getCategoryIcon = (category) => {
     'web-testing': 'Monitor', 'api-testing': 'Connection',
     'test-generation': 'MagicStick', 'reporting': 'DataLine',
     'execution': 'VideoPlay', 'document-parsing': 'Document',
+    'security-testing': 'Warning',
   }
   return map[category] || 'Grid'
 }
@@ -647,6 +649,7 @@ onMounted(() => { loadSkills() })
 .icon-reporting      { background: linear-gradient(135deg,#722ed1,#b37feb); }
 .icon-execution      { background: linear-gradient(135deg,#f5222d,#ff7875); }
 .icon-document-parsing{ background: linear-gradient(135deg,#13c2c2,#36cfc9); }
+.icon-security-testing{ background: linear-gradient(135deg,#cf1322,#ff4d4f); }
 
 .skill-card-title {
   flex: 1;

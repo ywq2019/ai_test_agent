@@ -1,7 +1,7 @@
 """
 Pydantic请求/响应模式定义
 """
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
@@ -15,6 +15,14 @@ class TaskCreateRequest(BaseModel):
     workspace_id: Optional[int] = None
 
 
+class TaskUpdateRequest(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=255, description="任务名称")
+    url: Optional[str] = Field(None, description="待测试页面URL")
+    document_path: Optional[str] = Field(None, description="需求文档路径")
+    browser: Optional[str] = Field(None, description="浏览器类型: chromium/firefox/webkit")
+    environment: Optional[str] = Field(None, description="测试环境: test/staging/production")
+
+
 class TaskResponse(BaseModel):
     id: int
     name: str
@@ -22,7 +30,9 @@ class TaskResponse(BaseModel):
     status: str
     browser: str
     environment: str
+    document_path: Optional[str] = None
     created_at: str
+    updated_at: Optional[str] = None
     page_elements: Optional[List[Dict[str, Any]]] = None
 
 
@@ -88,6 +98,8 @@ class ReportResponse(BaseModel):
     pass_rate: float = 0
     details: List[Dict[str, Any]] = []
     created_at: str = ""
+    finished_at: str = ""
+    browser: str = "chromium"
 
 
 class CommandRequest(BaseModel):
@@ -139,3 +151,83 @@ class PageParseRequest(BaseModel):
     url: str
     browser: str = "chromium"
     task_id: Optional[int] = None
+
+
+# ── AI 用例生成（ai_cases 模块）────────────────────────────────────────────────
+
+class AICaseGenerateRequest(BaseModel):
+    task_name: str
+    document_path: Optional[str] = None
+    content: Optional[str] = None
+    formats: List[str] = ["md", "xmind"]
+    workspace_id: Optional[int] = None
+
+
+class AICaseFileResponse(BaseModel):
+    id: int
+    task_name: str
+    case_count: int
+    has_md: bool
+    has_xmind: bool
+    modules: List[Dict[str, Any]] = []
+    created_at: str = ""
+    doc_hash: Optional[str] = None
+    parent_id: Optional[int] = None
+    diff_summary: Optional[str] = None
+    record_status: str = "active"
+    gen_status: str = "done"
+    gen_progress: int = 0
+
+
+class DiffCheckRequest(BaseModel):
+    new_content: Optional[str] = None
+    new_document_path: Optional[str] = None
+
+
+class IncrementalUpdateRequest(BaseModel):
+    new_content: Optional[str] = None
+    new_document_path: Optional[str] = None
+    diff: Optional[Dict[str, Any]] = None
+
+
+# ── WebUI 文档变更（webui 模块）────────────────────────────────────────────────
+
+class WebUIDiffCheckRequest(BaseModel):
+    new_content: Optional[str] = None
+    new_document_path: Optional[str] = None
+
+
+class WebUIIncrementalUpdateRequest(BaseModel):
+    new_content: Optional[str] = None
+    new_document_path: Optional[str] = None
+    diff: Optional[dict] = None
+    reparse_page: bool = False
+    ws_client_id: Optional[str] = None  # 前端 WebSocket client_id，用于精准推送进度
+
+
+# ── 渗透测试（pentest 模块）────────────────────────────────────────────────────
+
+_VALID_PENTEST_MODULES = frozenset({
+    "unauth", "idor", "sensitive", "sqli", "jwt",
+    "ratelimit", "mass_assign", "cors", "verb_tamper",
+    "ssrf", "fileupload", "filedownload",
+})
+
+
+class PentestTaskCreate(BaseModel):
+    name: Optional[str] = None
+    workspace_id: Optional[int] = None
+    project_id: int
+    scan_modules: List[str] = Field(default=["unauth", "sensitive"])
+    case_ids: List[int] = Field(default_factory=list)
+    concurrency: int = Field(default=3, ge=1, le=10)
+
+    @field_validator("scan_modules")
+    @classmethod
+    def validate_modules(cls, v):
+        invalid = [m for m in v if m not in _VALID_PENTEST_MODULES]
+        if invalid:
+            raise ValueError(f"无效扫描模块: {invalid}，可选: {sorted(_VALID_PENTEST_MODULES)}")
+        if not v:
+            raise ValueError("至少选择一个扫描模块")
+        return v

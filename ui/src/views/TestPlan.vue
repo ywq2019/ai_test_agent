@@ -255,7 +255,7 @@
                 <el-button type="primary" size="small" @click="viewReport(row.id)">
                   <el-icon><Document /></el-icon> 详情
                 </el-button>
-                <el-button type="warning" plain size="small" @click="exportReportPdf(row.id)">PDF</el-button>
+                <el-button type="warning" plain size="small" @click="exportReportPdf(row.id, row.plan_name)">PDF</el-button>
                 <el-button type="danger" plain size="small" @click="deleteReport(row.id)">删除</el-button>
               </div>
             </div>
@@ -349,7 +349,7 @@
               v-if="reportDetail"
               type="warning"
               size="small"
-              @click="exportReportPdf(reportDetail.id)"
+              @click="exportReportPdf(reportDetail.id, reportDetail.plan_name)"
             >
               <el-icon><Document /></el-icon> 导出 PDF
             </el-button>
@@ -428,16 +428,17 @@
             </div>
             <div class="ai-analysis-body">
               <template v-for="(block, i) in analysisBlocks" :key="i">
-                <div v-if="block.type==='heading'" class="aa-heading">
+                <div v-if="block.type==='atx'" class="aa-atx" :class="`aa-atx-${block.level}`" v-html="block.text"></div>
+                <div v-else-if="block.type==='heading'" class="aa-heading">
                   <span class="aa-num">{{ block.num }}</span>
-                  <span class="aa-title">{{ block.text }}</span>
+                  <span class="aa-title" v-html="block.text"></span>
                 </div>
                 <div v-else-if="block.type==='bullet'" class="aa-bullet">
                   <span class="aa-dot"></span>
-                  <span class="aa-bullet-text">{{ block.text }}</span>
+                  <span class="aa-bullet-text" v-html="block.text"></span>
                 </div>
                 <div v-else-if="block.type==='spacer'" class="aa-spacer"></div>
-                <div v-else class="aa-text">{{ block.text }}</div>
+                <div v-else class="aa-text" v-html="block.text"></div>
               </template>
             </div>
           </div>
@@ -520,10 +521,11 @@ import {
   CircleCheck, CircleClose, RefreshRight, Clock, WarningFilled, Loading, Cpu, CopyDocument,
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import api from '../api'
+import api, { downloadPdf } from '../api'
 import { useWorkspaceStore } from '../stores/workspace'
 import { useAuthStore } from '../stores/auth'
 import WorkspaceRequired from '../components/WorkspaceRequired.vue'
+import { useWebSocket } from '../composables/useWebSocket'
 
 const wsStore = useWorkspaceStore()
 const auth = useAuthStore()
@@ -569,8 +571,7 @@ const aiAnalyzing = ref(false)
 // 批量选择报告
 const selectedReports = ref([])
 
-// WebSocket
-let ws = null
+// WebSocket — 由下方 useWebSocket 管理，此处不再声明 ws 变量
 
 // ── 计算 ─────────────────────────────────────────────────────────────────────
 const filteredPlans = computed(() =>
@@ -595,26 +596,41 @@ const filteredCandidateCases = computed(() => {
   return list
 })
 
-// AI 分析文本 → 结构化区块
+// AI 分析文本 → 结构化区块（支持 ## 标题、数字列表、- 无序列表、**bold**、`code`）
 const analysisBlocks = computed(() => {
   if (!aiAnalysis.value) return []
   const blocks = []
   for (const line of aiAnalysis.value.split('\n')) {
-    const heading = line.match(/^(\d+)[.、．]\s*(.*)/)
-    const bullet  = line.match(/^[-•*]\s+(.*)/)
-    if (heading) {
-      blocks.push({ type: 'heading', num: heading[1], text: heading[2] || '' })
+    // ATX 标题 ## / ###
+    const atxHeading = line.match(/^(#{1,3})\s+(.*)/)
+    // 数字列表 1. / 1、
+    const numHeading = line.match(/^(\d+)[.、．\)]\s+(.*)/)
+    // 无序列表
+    const bullet = line.match(/^(\s*)[-*•]\s+(.*)/)
+
+    if (atxHeading) {
+      blocks.push({ type: 'atx', level: atxHeading[1].length, text: fmtInline(atxHeading[2]) })
+    } else if (numHeading) {
+      blocks.push({ type: 'heading', num: numHeading[1], text: fmtInline(numHeading[2]) })
     } else if (bullet) {
-      blocks.push({ type: 'bullet', text: bullet[1] })
+      blocks.push({ type: 'bullet', text: fmtInline(bullet[2]) })
     } else if (!line.trim()) {
       if (blocks.length && blocks[blocks.length - 1].type !== 'spacer')
         blocks.push({ type: 'spacer' })
     } else {
-      blocks.push({ type: 'text', text: line })
+      blocks.push({ type: 'text', text: fmtInline(line) })
     }
   }
   return blocks
 })
+
+// 行内格式化：**bold** 和 `code`（返回 HTML 字符串，配合 v-html 使用）
+function fmtInline(s) {
+  return s
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/`(.+?)`/g, '<code style="background:#e8f4ff;padding:1px 5px;border-radius:3px;font-size:11px;color:#0958d9">$1</code>')
+}
 
 // ── 工具函数 ──────────────────────────────────────────────────────────────────
 function statusTagType(s) {
@@ -913,9 +929,10 @@ async function viewReport(id) {
   if (reportDetail.value.analysis) aiAnalysis.value = reportDetail.value.analysis
 }
 
-function exportReportPdf(reportId) {
+function exportReportPdf(reportId, planName) {
   ElMessage.info('正在生成 PDF，请稍候...')
-  window.open(`/api/v1/test-plans/reports/${reportId}/pdf`, '_blank')
+  const name = (planName || `plan_report_${reportId}`).replace(/[/\\]/g, '_')
+  downloadPdf(`/test-plans/reports/${reportId}/pdf`, `${name}.pdf`)
 }
 
 async function deleteReport(id) {
@@ -954,27 +971,20 @@ async function analyzeReport() {
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 let wsRetryTimer = null
-let wsDestroyed = false   // 组件卸载后阻止重连
+
+const { connect: _wsPlanConnect, isConnected: planWsConnected } = useWebSocket(handleWsMessage)
 
 function initWs() {
-  if (wsDestroyed) return
-  if (ws && ws.readyState === WebSocket.OPEN) return
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-  const url = `${proto}://${window.location.host}/ws?client_id=plan_${Date.now()}`
-  ws = new WebSocket(url)
-  ws.onmessage = (evt) => {
-    try {
-      const msg = JSON.parse(evt.data)
-      if (msg.type === 'ping') { ws?.readyState === 1 && ws.send(JSON.stringify({ type: 'pong' })); return }
-      handleWsMessage(msg)
-    } catch {}
-  }
-  ws.onclose = () => {
-    ws = null
-    if (!wsDestroyed) wsRetryTimer = setTimeout(initWs, 3000)
-  }
-  ws.onerror = () => { ws?.close() }
+  _wsPlanConnect(`plan_${Date.now()}`)
 }
+
+// WS 断线后 3 秒重连（组件未卸载时）
+let _wsDestroyed = false
+watch(planWsConnected, (val) => {
+  if (!val && !_wsDestroyed) {
+    wsRetryTimer = setTimeout(initWs, 3000)
+  }
+})
 
 function handleWsMessage(msg) {
   if (msg.type === 'plan_step_start' && msg.plan_id === activePlanId.value) {
@@ -1023,16 +1033,15 @@ function handleWsMessage(msg) {
 // ── 生命周期 ──────────────────────────────────────────────────────────────────
 watch(() => wsStore.currentId, () => { loadPlans() })
 onMounted(async () => {
-  wsDestroyed = false  // 重置，支持路由切回时重新连接
+  _wsDestroyed = false  // 重置，支持路由切回时重新连接
   await loadPlans()
   initWs()
 })
 
 onUnmounted(() => {
-  wsDestroyed = true
+  _wsDestroyed = true
   clearTimeout(wsRetryTimer)
   wsRetryTimer = null
-  ws?.close()
   clearRunningTimer()
 })
 
@@ -1494,6 +1503,17 @@ onUnmounted(() => {
   color: #606266;
   line-height: 1.7;
 }
+
+/* ATX 标题（## / ###） */
+.aa-atx {
+  margin: 16px 0 6px;
+  font-weight: 700;
+  color: #1a2a4a;
+}
+.aa-atx-1 { font-size: 15px; border-left: 3px solid #3a7bd5; padding-left: 10px; }
+.aa-atx-2 { font-size: 14px; color: #1a6fd4; }
+.aa-atx-3 { font-size: 13px; color: #409eff; }
+.aa-atx:first-child { margin-top: 0; }
 
 .aa-spacer { height: 6px; }
 

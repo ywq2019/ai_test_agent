@@ -8,7 +8,6 @@ from typing import List
 class Settings(BaseSettings):
     APP_NAME: str = "自动化UI测试Agent"
     APP_VERSION: str = "1.0.0"
-    VERSION: str = "1.0.0"
     DEBUG: bool = True
 
     HOST: str = "0.0.0.0"

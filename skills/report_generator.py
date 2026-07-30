@@ -2,11 +2,53 @@
 测试报告生成技能
 """
 import json
-from datetime import datetime
+import base64
+import mimetypes
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Any
 from pathlib import Path
 from loguru import logger
 from tools.config import settings
+
+_TZ_CST = timezone(timedelta(hours=8))
+
+
+def _fmt_dt_cst(dt_or_str) -> str:
+    """将 UTC naive datetime 或 ISO 字符串格式化为 CST（UTC+8）可读时间。"""
+    if not dt_or_str:
+        return "—"
+    if isinstance(dt_or_str, str):
+        try:
+            dt_or_str = datetime.fromisoformat(dt_or_str)
+        except ValueError:
+            return dt_or_str
+    if dt_or_str.tzinfo is None:
+        dt_or_str = dt_or_str.replace(tzinfo=timezone.utc)
+    return dt_or_str.astimezone(_TZ_CST).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _screenshot_data_uri(shot: str) -> str:
+    """把截图路径/URL 转成 base64 data URI，供 HTML/PDF 内嵌。"""
+    if not shot:
+        return shot
+    if shot.startswith("/screenshots/"):
+        filename = shot[len("/screenshots/"):]
+        disk_path = Path(settings.SCREENSHOT_DIR) / filename
+    elif shot.startswith("http://") or shot.startswith("https://"):
+        return shot  # 远程 URL 无法内嵌
+    else:
+        disk_path = Path(shot)
+
+    try:
+        if not disk_path.is_absolute():
+            disk_path = Path(__file__).parent.parent / disk_path
+        with open(disk_path, "rb") as fh:
+            raw = fh.read()
+        mime = mimetypes.guess_type(str(disk_path))[0] or "image/png"
+        b64  = base64.b64encode(raw).decode()
+        return f"data:{mime};base64,{b64}"
+    except Exception:
+        return shot
 
 
 class ReportGenerator:
@@ -27,6 +69,7 @@ class ReportGenerator:
         charts = self._generate_charts_data(summary)
         details = self._prepare_details(results)
 
+        now_cst = datetime.now(_TZ_CST)
         report = {
             "task_id": task_id,
             "task_name": task_name,
@@ -34,10 +77,10 @@ class ReportGenerator:
             "charts": charts,
             "details": details,
             "metadata": metadata or {},
-            "generated_at": datetime.utcnow().isoformat()
+            "generated_at": now_cst.strftime("%Y-%m-%d %H:%M:%S")
         }
 
-        ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+        ts = now_cst.strftime('%Y%m%d_%H%M%S')
         report_path = self.report_dir / f"report_{task_id}_{ts}.json"
         with open(report_path, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
@@ -117,7 +160,7 @@ class ReportGenerator:
         html_content = self._build_html_template(report, task_name)
 
         if ts is None:
-            ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+            ts = datetime.now(_TZ_CST).strftime('%Y%m%d_%H%M%S')
         html_path = self.report_dir / f"report_{report['task_id']}_{ts}.html"
         with open(html_path, "w", encoding="utf-8") as f:
             f.write(html_content)
@@ -134,12 +177,23 @@ class ReportGenerator:
                 "failed": "danger",
                 "skipped": "warning"
             }.get(detail["status"], "secondary")
+            status_label = {
+                "passed": "通过",
+                "failed": "失败",
+                "skipped": "跳过"
+            }.get(detail["status"], detail["status"])
 
             screenshot_cell = ""
             if detail.get("screenshot"):
-                screenshot_cell = f'<td><a href="{detail["screenshot"]}" target="_blank">查看截图</a></td>'
+                data_uri = _screenshot_data_uri(detail["screenshot"])
+                screenshot_cell = (
+                    f'<td><a href="{data_uri}" target="_blank" style="display:inline-block">'
+                    f'<img src="{data_uri}" style="max-width:120px;max-height:80px;'
+                    f'border-radius:4px;border:1px solid #e8e8e8;cursor:pointer" title="点击查看原图"/>'
+                    f'</a></td>'
+                )
             else:
-                screenshot_cell = "<td>-</td>"
+                screenshot_cell = "<td style='color:#ccc'>-</td>"
 
             error_cell = detail.get("error_message", "-")
             if error_cell and len(error_cell) > 100:
@@ -149,102 +203,76 @@ class ReportGenerator:
             <tr>
                 <td>{detail['id']}</td>
                 <td>{detail['case_name']}</td>
-                <td><span class="badge bg-{status_class}">{detail['status']}</span></td>
+                <td><span class="badge bg-{status_class}">{status_label}</span></td>
                 <td>{detail['duration']}s</td>
                 <td>{error_cell}</td>
                 {screenshot_cell}
             </tr>
             """
 
-        return f"""
-<!DOCTYPE html>
+        pass_rate = summary['pass_rate']
+        pr_color = "#52c41a" if pass_rate >= 80 else "#ff4d4f"
+        return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>测试报告 - {task_name}</title>
-    <style>
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; padding: 20px; }}
-        .container {{ max-width: 1200px; margin: 0 auto; }}
-        .header {{ background: white; padding: 24px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
-        .header h1 {{ color: #333; margin-bottom: 8px; }}
-        .meta {{ color: #666; font-size: 14px; }}
-        .summary-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 20px; }}
-        .summary-card {{ background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
-        .summary-card h3 {{ color: #666; font-size: 14px; margin-bottom: 8px; }}
-        .summary-card .value {{ font-size: 32px; font-weight: bold; color: #333; }}
-        .summary-card .value.success {{ color: #52c41a; }}
-        .summary-card .value.danger {{ color: #ff4d4f; }}
-        .summary-card .value.warning {{ color: #faad14; }}
-        .chart-section {{ background: white; padding: 24px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
-        .chart-section h2 {{ margin-bottom: 16px; color: #333; }}
-        table {{ width: 100%; border-collapse: collapse; }}
-        th, td {{ padding: 12px; text-align: left; border-bottom: 1px solid #eee; }}
-        th {{ background: #fafafa; font-weight: 600; color: #333; }}
-        .badge {{ padding: 4px 8px; border-radius: 4px; font-size: 12px; }}
-        .bg-success {{ background: #d9f7be; color: #52c41a; }}
-        .bg-danger {{ background: #fff1f0; color: #ff4d4f; }}
-        .bg-warning {{ background: #fffbe6; color: #faad14; }}
-        .bg-secondary {{ background: #f5f5f5; color: #666; }}
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>测试报告 - {task_name}</title>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f0f2f5;padding:24px;color:#1a1a1a}}
+.container{{max-width:1100px;margin:0 auto}}
+.header{{background:linear-gradient(135deg,#1a2a4a 0%,#2d4a7a 100%);color:#fff;padding:32px 36px;border-radius:10px;margin-bottom:20px;box-shadow:0 4px 12px rgba(0,0,0,.15)}}
+.header h1{{font-size:24px;font-weight:700;margin-bottom:6px}}
+.header .meta{{font-size:12px;opacity:.6;margin-top:12px}}
+.cards{{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin-bottom:20px}}
+.card{{background:#fff;padding:18px 12px;border-radius:8px;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.06)}}
+.card .num{{font-size:28px;font-weight:700;margin-bottom:4px}}
+.card .lbl{{font-size:12px;color:#888}}
+.section{{background:#fff;padding:24px;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.06);margin-bottom:20px}}
+.section h2{{font-size:15px;font-weight:700;padding-left:10px;border-left:4px solid #1890ff;margin-bottom:16px;color:#1a1a1a}}
+table{{width:100%;border-collapse:collapse}}
+th,td{{padding:9px 12px;text-align:left;border-bottom:1px solid #f0f0f0;font-size:12px;vertical-align:top}}
+th{{background:#f7f8fa;font-weight:600;color:#555;border-bottom:2px solid #e8e8e8}}
+tr:hover td{{background:#fafbff}}
+.badge{{display:inline-block;padding:2px 10px;border-radius:10px;font-size:11px;font-weight:600}}
+.bg-success{{background:#f6ffed;color:#389e0d;border:1px solid #b7eb8f}}
+.bg-danger{{background:#fff1f0;color:#cf1322;border:1px solid #ffa39e}}
+.bg-warning{{background:#fffbe6;color:#ad6800;border:1px solid #ffe58f}}
+.bg-secondary{{background:#f5f5f5;color:#666;border:1px solid #d9d9d9}}
+.footer{{text-align:center;color:#bbb;font-size:11px;padding:16px 0 4px}}
+@media print{{body{{background:#fff;padding:0}}@page{{margin:1.5cm}}}}
+</style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>{task_name}</h1>
-            <p class="meta">生成时间: {report['generated_at']}</p>
-        </div>
-
-        <div class="summary-grid">
-            <div class="summary-card">
-                <h3>总用例数</h3>
-                <div class="value">{summary['total']}</div>
-            </div>
-            <div class="summary-card">
-                <h3>通过率</h3>
-                <div class="value success">{summary['pass_rate']}%</div>
-            </div>
-            <div class="summary-card">
-                <h3>通过</h3>
-                <div class="value success">{summary['passed']}</div>
-            </div>
-            <div class="summary-card">
-                <h3>失败</h3>
-                <div class="value danger">{summary['failed']}</div>
-            </div>
-            <div class="summary-card">
-                <h3>跳过</h3>
-                <div class="value warning">{summary['skipped']}</div>
-            </div>
-            <div class="summary-card">
-                <h3>总耗时</h3>
-                <div class="value">{summary['total_duration']}s</div>
-            </div>
-        </div>
-
-        <div class="chart-section">
-            <h2>用例详情</h2>
-            <table>
-                <thead>
-                    <tr>
-                        <th>序号</th>
-                        <th>用例名称</th>
-                        <th>状态</th>
-                        <th>耗时</th>
-                        <th>错误信息</th>
-                        <th>截图</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {details_rows}
-                </tbody>
-            </table>
-        </div>
+<div class="container">
+  <div class="header">
+    <h1>{task_name}</h1>
+    <div style="font-size:13px;opacity:.75;margin-top:8px">
+      通过率：<b style="color:{'#73d13d' if pass_rate >= 80 else '#ff7875'};font-size:18px">{pass_rate}%</b>
+      &nbsp;&nbsp;总用例：{summary['total']}
     </div>
+    <div class="meta">生成时间：{report['generated_at']}（北京时间）</div>
+  </div>
+  <div class="cards">
+    <div class="card"><div class="num" style="color:#1890ff">{summary['total']}</div><div class="lbl">总用例数</div></div>
+    <div class="card"><div class="num" style="color:#52c41a">{summary['passed']}</div><div class="lbl">通过</div></div>
+    <div class="card"><div class="num" style="color:#ff4d4f">{summary['failed']}</div><div class="lbl">失败</div></div>
+    <div class="card"><div class="num" style="color:#faad14">{summary['skipped']}</div><div class="lbl">跳过</div></div>
+    <div class="card"><div class="num" style="color:{pr_color}">{pass_rate}%</div><div class="lbl">通过率</div></div>
+    <div class="card"><div class="num">{summary['total_duration']}s</div><div class="lbl">总耗时</div></div>
+  </div>
+  <div class="section">
+    <h2>用例执行详情</h2>
+    <table>
+      <thead><tr><th style="width:40px">#</th><th>用例名称</th><th style="width:64px">状态</th><th style="width:72px">耗时</th><th>错误信息</th><th style="width:56px">截图</th></tr></thead>
+      <tbody>{details_rows if details_rows else '<tr><td colspan="6" style="text-align:center;color:#aaa;padding:24px">暂无执行数据</td></tr>'}</tbody>
+    </table>
+  </div>
+  <div class="footer">本报告由 AI 测试平台自动生成 · {report['generated_at']}（北京时间）</div>
+</div>
 </body>
-</html>
-        """
+</html>"""
 
 
 report_generator = ReportGenerator()

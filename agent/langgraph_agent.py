@@ -53,8 +53,8 @@ def _build_llm(api_key: str, base_url: str, model_name: str, temperature: float 
     return llm
 
 
-# 定义代理状态
-class AgentState(TypedDict):
+# 定义图节点间传递的状态（TypedDict，与 agent/core.py 中的运行时 AgentState 类区分）
+class GraphState(TypedDict):
     task_id: Optional[int]
     task_name: str
     url: str
@@ -78,7 +78,7 @@ class LangGraphAgent:
         self.tool_node = ToolNode(self.tools)
         
         # 初始化状态
-        self.state = AgentState(
+        self.state = GraphState(
             task_id=None,
             task_name="",
             url="",
@@ -98,7 +98,7 @@ class LangGraphAgent:
 
     def _build_graph(self) -> StateGraph:
         """构建状态图"""
-        workflow = StateGraph(AgentState)
+        workflow = StateGraph(GraphState)
         
         # 添加节点
         workflow.add_node("parse_page", self._parse_page_node)
@@ -132,7 +132,7 @@ class LangGraphAgent:
         memory = MemorySaver()
         return workflow.compile(checkpointer=memory)
     
-    async def _decide_node(self, state: AgentState) -> AgentState:
+    async def _decide_node(self, state: GraphState) -> GraphState:
         """决策节点 - 决定下一步行动"""
         logger.info(f"决策节点: 当前状态 - {state['status']}")
         
@@ -148,11 +148,11 @@ class LangGraphAgent:
         else:
             return {**state, "next_step": "end"}
     
-    def _route_decision(self, state: AgentState) -> str:
+    def _route_decision(self, state: GraphState) -> str:
         """路由决策"""
         return state["next_step"]
     
-    async def _parse_page_node(self, state: AgentState) -> AgentState:
+    async def _parse_page_node(self, state: GraphState) -> GraphState:
         """解析页面节点"""
         logger.info(f"解析页面: {state['url']}")
 
@@ -183,11 +183,11 @@ class LangGraphAgent:
                 ]
             }
     
-    async def _generate_cases_node(self, state: AgentState) -> AgentState:
+    async def _generate_cases_node(self, state: GraphState) -> GraphState:
         """生成用例节点"""
         logger.info(f"生成测试用例: {len(state['page_elements'])} 个元素")
 
-        from skills.case_generator.scripts.run import execute
+        from skills.case_generator_skill.scripts.run import execute
         result = await execute(
             page_elements=state["page_elements"],
             url=state["url"]
@@ -213,11 +213,11 @@ class LangGraphAgent:
                 ]
             }
     
-    async def _execute_tests_node(self, state: AgentState) -> AgentState:
+    async def _execute_tests_node(self, state: GraphState) -> GraphState:
         """执行测试节点"""
         logger.info(f"执行测试用例: {len(state['cases'])} 个")
 
-        from skills.test_executor.scripts.run import execute
+        from skills.test_executor_skill.scripts.run import execute
         result = await execute(
             cases=state["cases"],
             url=state["url"],
@@ -248,11 +248,11 @@ class LangGraphAgent:
                 ]
             }
     
-    async def _generate_report_node(self, state: AgentState) -> AgentState:
+    async def _generate_report_node(self, state: GraphState) -> GraphState:
         """生成报告节点"""
         logger.info(f"生成测试报告: 任务ID {state['task_id']}")
 
-        from skills.report_generator.scripts.run import execute
+        from skills.report_generator_skill.scripts.run import execute
         result = await execute(
             task_id=state["task_id"] or 0,
             task_name=state["task_name"],
@@ -279,7 +279,7 @@ class LangGraphAgent:
                 ]
             }
     
-    async def run(self, task_name: str, url: str) -> AgentState:
+    async def run(self, task_name: str, url: str) -> GraphState:
         """
         运行完整的测试流程
         
@@ -293,7 +293,7 @@ class LangGraphAgent:
         logger.info(f"开始执行任务: {task_name}")
         
         # 设置初始状态
-        initial_state = AgentState(
+        initial_state = GraphState(
             task_id=int(datetime.utcnow().timestamp() * 1000),
             task_name=task_name,
             url=url,

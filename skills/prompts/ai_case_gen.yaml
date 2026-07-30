@@ -310,6 +310,8 @@ extract_requirements:
   system: |
     You are a requirements analyst. Extract structured requirement items from a product requirements document.
     Each requirement item represents ONE testable functional behavior — specific, atomic, and verifiable.
+    The extracted requirements will later be used to map against existing test cases, so the granularity
+    should match the test case level: one requirement per testable behavior, not per module or per field.
     Output ONLY valid JSON. No markdown, no explanation.
 
   user_template: |
@@ -317,6 +319,9 @@ extract_requirements:
 
     已识别的功能模块（供参考）：
     {modules_hint}
+
+    已生成的测试用例名称（供参考粒度对齐）：
+    {cases_hint}
 
     需求文档：
     ---
@@ -326,9 +331,10 @@ extract_requirements:
     提取规则：
     1. 每条需求必须是「可测试的具体行为」，如「用户输入手机号和验证码后点击登录，系统验证通过后跳转首页」
     2. 不要提取技术实现细节（如「使用 JWT 鉴权」）
-    3. 粒度适中：一个功能点一条需求，不要太粗（整个模块一条）也不要太细（一个字段一条）
+    3. 粒度对齐：参考上方用例名称的粒度，确保每条需求能被1~3条用例覆盖
     4. 优先级判断：P0=核心主流程，P1=主要功能，P2=边界/异常/次要功能
     5. 需求 ID 格式：模块缩写-序号，如 LOGIN-001、MEMBER-002
+    6. keywords：提取3~6个该需求的核心关键词（功能动词+名词），用于后续用例匹配
 
     只输出纯JSON：
     {{
@@ -338,7 +344,8 @@ extract_requirements:
           "module": "登录",
           "title": "手机号验证码登录",
           "description": "用户输入手机号和验证码，验证通过后登录成功并跳转首页",
-          "priority": "P0"
+          "priority": "P0",
+          "keywords": ["手机号", "验证码", "登录", "跳转首页"]
         }}
       ]
     }}
@@ -346,32 +353,39 @@ extract_requirements:
 # ── 用例-需求映射 ─────────────────────────────────────────────────────────────
 map_cases_to_requirements:
   system: |
-    You are a QA traceability analyst. Given a list of test cases and a list of requirements,
-    determine which requirements each test case covers.
+    You are a QA traceability analyst. Given a list of test cases (with steps and expected results)
+    and a list of requirements (with keywords), determine which requirements each test case covers.
+    Use semantic understanding, not just keyword matching.
+    A test case covers a requirement when its test steps directly verify the behavior described in that requirement.
     A test case may cover 0, 1, or multiple requirements.
+    Always assign a confidence score: high (directly verifies), medium (partially relates), low (tangential).
     Output ONLY valid JSON. No markdown, no explanation.
 
   user_template: |
     请分析以下测试用例，判断每条用例覆盖了哪些需求条目。
 
-    【需求列表】
+    【需求列表】（格式：ID | 模块 | 标题 | 描述 | 关键词）
     {requirements_text}
 
-    【测试用例列表】
+    【测试用例列表】（格式：序号 | 用例名称 | 测试步骤摘要 | 预期结果摘要）
     {cases_text}
 
     映射规则：
-    1. 只在用例的测试目标与需求描述实质相关时才建立关联
+    1. 基于语义理解，不只看标题文字，要看步骤和预期结果是否验证了需求描述的行为
     2. 一条用例可以覆盖多条需求（填多个 ID），也可以不覆盖任何需求（填空数组）
-    3. 通用测试用例（性能/兼容性/安全等）填空数组 []
+    3. 通用测试用例（性能/兼容性/安全/UI布局等）填空数组 []
     4. 严格使用需求列表中的原始 ID，不得自创
+    5. confidence 含义：high=直接验证该需求核心行为；medium=部分验证；low=仅边缘相关
 
     只输出纯JSON：
     {{
       "mappings": [
         {{
-          "case_id": "TC001",
-          "req_refs": ["LOGIN-001", "LOGIN-002"]
+          "case_id": "0",
+          "req_refs": [
+            {{"req_id": "LOGIN-001", "confidence": "high"}},
+            {{"req_id": "LOGIN-002", "confidence": "medium"}}
+          ]
         }}
       ]
     }}

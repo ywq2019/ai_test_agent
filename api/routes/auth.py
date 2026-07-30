@@ -16,7 +16,6 @@ from loguru import logger
 
 from api.schemas import HealthResponse
 from tools.database import get_db, User
-from agent.core import uitest_agent
 from tools.config import settings
 from api.auth import get_current_user, verify_password, hash_password, create_access_token
 
@@ -157,9 +156,10 @@ async def reset_user_password(
 
 @router.get("/health", response_model=HealthResponse)
 async def health_check():
+    from agent.core import uitest_agent  # 延迟导入，避免加载鉴权模块时触发 Agent 重型初始化
     return {
         "status": "healthy",
-        "version": "1.0.0",
+        "version": settings.APP_VERSION,
         "agent_state": uitest_agent.get_state()
     }
 

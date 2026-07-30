@@ -8,6 +8,13 @@ __pycache__/
 dist/
 build/
 .venv/
+
+# 编辑器备份 / 临时文件
+*.bak
+*.tmp
+*.swp
+*.swo
+*~
 venv/
 
 # Node

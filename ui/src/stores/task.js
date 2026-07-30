@@ -61,6 +61,13 @@ export const useTaskStore = defineStore('task', () => {
     tasks.value = tasks.value.filter(t => t.id !== id)
   }
 
+  async function updateTask(id, taskData) {
+    const data = await api.taskApi.update(id, taskData)
+    const idx = tasks.value.findIndex(t => t.id === id)
+    if (idx !== -1) tasks.value[idx] = data
+    return data
+  }
+
   async function parsePage(url, browser = 'chromium', taskId = null) {
     const data = await api.pageApi.parse(url, browser, taskId)
     pageElements.value = data.elements || []
@@ -147,8 +154,8 @@ export const useTaskStore = defineStore('task', () => {
     return data
   }
 
-  async function generateCases(taskId, options = {}) {
-    const data = await api.caseApi.generate(taskId, options)
+  async function generateCases(taskId, options = {}, signal = undefined) {
+    const data = await api.caseApi.generate(taskId, options, signal)
     cases.value = data
     return data
   }
@@ -199,6 +206,7 @@ export const useTaskStore = defineStore('task', () => {
     getTask,
     createTask,
     deleteTask,
+    updateTask,
     parsePage,
     uploadDocument,
     parseDocument,

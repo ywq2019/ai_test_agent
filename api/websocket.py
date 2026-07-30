@@ -31,6 +31,14 @@ async def websocket_endpoint(websocket: WebSocket):
                     # 客户端回应心跳，更新存活时间
                     ws_manager.record_pong(websocket)
 
+                elif message_type == "subscribe_workspace":
+                    # 客户端订阅工作空间，用于通知隔离
+                    ws_manager.subscribe_workspace(websocket, message_data.get("workspace_id", 0))
+                    await ws_manager.send_personal_message({
+                        "type": "subscribed",
+                        "workspace_id": message_data.get("workspace_id", 0),
+                    }, websocket)
+
                 elif message_type == "command":
                     command = message_data.get("message", "")
                     result = await uitest_agent.handle_command(command)

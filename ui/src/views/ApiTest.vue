@@ -485,7 +485,7 @@
                   <el-button size="small" type="primary" plain @click="showReportDetail(row)">
                     <el-icon><View /></el-icon> 详情
                   </el-button>
-                  <el-button size="small" type="warning" plain @click="exportReportPdf(row.id)">
+                  <el-button size="small" type="warning" plain @click="exportReportPdf(row.id, row.project_name, row.created_at)">
                     <el-icon><Document /></el-icon> PDF
                   </el-button>
                   <el-button size="small" type="danger" plain @click="deleteReports([row.id])">
@@ -1097,7 +1097,7 @@ async def create_order(user_id: int, product_id: int, quantity: int):
       </template>
       <template #footer>
         <el-button @click="reportDetailVisible = false">关闭</el-button>
-        <el-button type="warning" @click="exportReportPdf(selectedReport.id)">
+        <el-button type="warning" @click="exportReportPdf(selectedReport.id, selectedReport.project_name, selectedReport.created_at)">
           <el-icon><Document /></el-icon> 导出 PDF
         </el-button>
       </template>
@@ -1397,14 +1397,15 @@ async def create_order(user_id: int, product_id: int, quantity: int):
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { ref, reactive, computed, onMounted, nextTick, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Edit, Delete, MagicStick, VideoPlay, Refresh, Loading, View, Document, DocumentAdd, WarningFilled, Warning, SuccessFilled, ArrowRight } from '@element-plus/icons-vue'
-import { apiTestApi, scriptApi, gvarApi } from '../api'
+import { apiTestApi, scriptApi, gvarApi, downloadPdf } from '../api'
 import { marked } from 'marked'
 import ScriptDialog from './ApiTest/ScriptDialog.vue'
 import { useWorkspaceStore } from '../stores/workspace'
 import { useAuthStore } from '../stores/auth'
+import { useWebSocket } from '../composables/useWebSocket'
 import WorkspaceRequired from '../components/WorkspaceRequired.vue'
 
 const wsStore = useWorkspaceStore()
@@ -1664,24 +1665,9 @@ const analysisResult = ref('')
 const analysisHtml = computed(() => analysisResult.value ? marked.parse(analysisResult.value) : '')
 
 // ── WebSocket ──
-let ws = null
-const connectWs = (clientId) => {
-  disconnectWs()
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-  ws = new WebSocket(`${proto}://${window.location.host}/ws?client_id=${clientId}`)
-  ws.onmessage = (e) => {
-    try {
-      const data = JSON.parse(e.data)
-      // 回复心跳 pong，防止服务端因超时断开连接
-      if (data.type === 'ping') {
-        ws?.send(JSON.stringify({ type: 'pong' }))
-        return
-      }
-      handleWsMsg(data)
-    } catch {}
-  }
-}
-const disconnectWs = () => { ws?.close(); ws = null }
+// 连接管理、心跳 pong、卸载清理统一由 useWebSocket 负责
+// 用箭头函数包一层，避免 handleWsMsg 在下方声明造成的 TDZ 问题
+const { connect: connectWs, disconnect: disconnectWs } = useWebSocket(data => handleWsMsg(data))
 
 const handleWsMsg = (data) => {
   if (data.type === 'api_gen_progress') {
@@ -2253,9 +2239,13 @@ const showReportDetail = (r) => {
   reportDetailVisible.value = true
 }
 
-const exportReportPdf = (reportId) => {
+const exportReportPdf = (reportId, projectName, createdAt) => {
   ElMessage.info('正在生成 PDF，请稍候...')
-  window.open(`/api/v1/api-test/reports/${reportId}/pdf`, '_blank')
+  // 用"项目名_日期"组合，确保文件名有意义且不重复
+  const datePart = createdAt ? createdAt.slice(0, 10) : ''
+  const base = (projectName || 'api_report').replace(/[/\\]/g, '_')
+  const name = datePart ? `${base}_${datePart}` : base
+  downloadPdf(`/api-test/reports/${reportId}/pdf`, `${name}.pdf`)
 }
 
 const runAnalysis = async () => {
@@ -2376,7 +2366,6 @@ watch(() => wsStore.currentId, async () => {
   projects.value = await apiTestApi.listProjects(wsStore.currentId)
 })
 onMounted(loadProjects)
-onUnmounted(disconnectWs)
 
 watch(activeTab, (tab) => {
   if (tab === 'reports') loadReports()

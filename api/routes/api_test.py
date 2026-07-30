@@ -21,7 +21,198 @@ from tools.config import settings
 router = APIRouter()
 
 
-# ── 辅助字典构建 ──────────────────────────────────────────────────────────────
+def _md_to_html(text: str) -> str:
+    """将 AI 返回的 Markdown 文本转换为带样式的 HTML，用于 PDF 报告。
+
+    支持：
+      - # / ## / ### 标题
+      - **bold**、*italic*、`code`
+      - 数字列表（1. / 1、）、无序列表（- / * / •）含缩进嵌套
+      - > 引用块
+      - | 表格（含表头分隔行）
+      - --- 分割线
+      - 空行分段
+    """
+    import re, html as _html
+
+    def fmt_inline(s: str) -> str:
+        """行内格式：**bold**、*italic*、`code`。先转义再替换。"""
+        s = _html.escape(s)
+        s = re.sub(r'\*\*(.+?)\*\*', r'<strong style="color:#1a1a2e">\1</strong>', s)
+        s = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)',
+                   r'<em style="color:#555;font-style:italic">\1</em>', s)
+        s = re.sub(r'`(.+?)`',
+                   r'<code style="background:#eef0f8;padding:1px 6px;border-radius:3px;'
+                   r'font-size:11.5px;color:#0958d9;font-family:Consolas,monospace">\1</code>', s)
+        return s
+
+    def parse_table_row(line: str) -> list[str]:
+        """把 | a | b | c | 拆成 ['a','b','c']，去掉首尾空管道符。"""
+        cells = [c.strip() for c in line.strip().split('|')]
+        # 去掉首尾空字符串（行首/行尾的 |）
+        if cells and cells[0] == '':
+            cells = cells[1:]
+        if cells and cells[-1] == '':
+            cells = cells[:-1]
+        return cells
+
+    def is_table_row(line: str) -> bool:
+        return bool(re.match(r'\s*\|', line))
+
+    def is_separator_row(line: str) -> bool:
+        """表头与数据之间的分隔行，如 |---|:---:|---:|"""
+        return bool(re.match(r'\s*\|[\s\-:|]+\|\s*$', line))
+
+    def render_table(raw_rows: list[str]) -> str:
+        """将连续的表格行渲染成 HTML <table>。"""
+        rows   = [parse_table_row(r) for r in raw_rows if not is_separator_row(r)]
+        if not rows:
+            return ''
+        thead_cells = rows[0]
+        tbody_rows  = rows[1:]
+
+        th_html = ''.join(
+            f'<th style="background:#1d4ed8;color:#fff;padding:8px 12px;'
+            f'text-align:left;font-size:12px;font-weight:600;'
+            f'border:1px solid #2563eb;white-space:nowrap">'
+            f'{fmt_inline(c)}</th>'
+            for c in thead_cells
+        )
+        thead = f'<thead><tr>{th_html}</tr></thead>'
+
+        tbody_html = ''
+        for i, row in enumerate(tbody_rows):
+            bg = '#ffffff' if i % 2 == 0 else '#f0f5ff'
+            td_html = ''.join(
+                f'<td style="padding:7px 12px;font-size:12px;color:#2d3748;'
+                f'border:1px solid #dde8f8;background:{bg};vertical-align:top">'
+                f'{fmt_inline(c)}</td>'
+                for c in row
+            )
+            tbody_html += f'<tr>{td_html}</tr>'
+        tbody = f'<tbody>{tbody_html}</tbody>'
+
+        return (
+            f'<div style="overflow-x:auto;margin:10px 0">'
+            f'<table style="width:100%;border-collapse:collapse;'
+            f'border-radius:6px;overflow:hidden;border:1px solid #c7d8f8">'
+            f'{thead}{tbody}</table></div>'
+        )
+
+    # ── 预处理：先把原文按段落分成"表格块"和"普通块" ─────────────────────────
+    lines = text.split('\n')
+    out   = []
+    in_ul = False
+    table_buf: list[str] = []   # 正在积累的表格行
+
+    def close_ul():
+        nonlocal in_ul
+        if in_ul:
+            out.append('</ul>')
+            in_ul = False
+
+    def flush_table():
+        nonlocal table_buf
+        if table_buf:
+            out.append(render_table(table_buf))
+            table_buf = []
+
+    for line in lines:
+        stripped = line.rstrip()
+
+        # ── 表格行（含分隔行）
+        if is_table_row(stripped):
+            close_ul()
+            table_buf.append(stripped)
+            continue
+        else:
+            flush_table()
+
+        # ── 分割线 ---
+        if re.match(r'^-{3,}$', stripped) or re.match(r'^={3,}$', stripped):
+            close_ul()
+            out.append('<hr style="border:none;border-top:1px solid #dde3f0;margin:12px 0">')
+            continue
+
+        # ── ATX 标题 #、##、###
+        m = re.match(r'^(#{1,3})\s+(.*)', stripped)
+        if m:
+            close_ul()
+            lvl    = len(m.group(1))
+            txt    = fmt_inline(m.group(2))
+            size   = {1: '15px', 2: '14px', 3: '13px'}.get(lvl, '13px')
+            mt     = '18px' if lvl == 1 else '13px'
+            border = 'border-left:3px solid #3a7bd5;padding-left:9px;' if lvl <= 2 else ''
+            bg     = 'background:rgba(58,123,213,.06);border-radius:3px;padding:3px 9px;' if lvl == 1 else ''
+            out.append(
+                f'<div style="margin:{mt} 0 6px;font-size:{size};font-weight:700;'
+                f'color:#1a1a2e;{border}{bg}">{txt}</div>'
+            )
+            continue
+
+        # ── 引用块 >
+        m = re.match(r'^>\s?(.*)', stripped)
+        if m:
+            close_ul()
+            txt = fmt_inline(m.group(1))
+            out.append(
+                f'<div style="border-left:3px solid #3a7bd5;background:#f0f5ff;'
+                f'padding:6px 12px;margin:6px 0;border-radius:0 4px 4px 0;'
+                f'font-size:13px;color:#3a4a6b;line-height:1.65">{txt}</div>'
+            )
+            continue
+
+        # ── 数字列表 1. / 1、
+        m = re.match(r'^(\s*)(\d+)[.、．\)]\s+(.*)', stripped)
+        if m:
+            close_ul()
+            indent = len(m.group(1))
+            num    = m.group(2)
+            txt    = fmt_inline(m.group(3))
+            ml     = 8 + indent * 16
+            out.append(
+                f'<div style="display:flex;align-items:flex-start;gap:8px;margin:5px 0 5px {ml}px">'
+                f'<span style="min-width:20px;height:20px;border-radius:50%;background:#3a7bd5;color:#fff;'
+                f'font-size:10px;font-weight:700;display:inline-flex;align-items:center;'
+                f'justify-content:center;flex-shrink:0;margin-top:2px">{num}</span>'
+                f'<span style="font-size:13px;line-height:1.7;color:#2d3748">{txt}</span></div>'
+            )
+            continue
+
+        # ── 无序列表 - / * / •（含缩进嵌套）
+        m = re.match(r'^(\s*)[-*•]\s+(.*)', stripped)
+        if m:
+            indent = len(m.group(1))
+            txt    = fmt_inline(m.group(2))
+            if not in_ul:
+                out.append('<ul style="margin:4px 0 4px 24px;padding:0;list-style:none">')
+                in_ul = True
+            bullet_color = '#3a7bd5' if indent == 0 else '#84a4d4'
+            pl = indent * 14
+            out.append(
+                f'<li style="display:flex;align-items:flex-start;gap:6px;'
+                f'font-size:13px;line-height:1.7;color:#2d3748;margin:3px 0;padding-left:{pl}px">'
+                f'<span style="color:{bullet_color};font-size:16px;line-height:1.4;flex-shrink:0">•</span>'
+                f'<span>{txt}</span></li>'
+            )
+            continue
+
+        close_ul()
+
+        # ── 空行
+        if not stripped:
+            out.append('<div style="height:7px"></div>')
+            continue
+
+        # ── 普通段落
+        out.append(
+            f'<p style="margin:5px 0;font-size:13px;line-height:1.75;color:#2d3748">'
+            f'{fmt_inline(stripped)}</p>'
+        )
+
+    flush_table()
+    close_ul()
+    return '\n'.join(out)
 
 def _proj_dict(p: ApiProject) -> dict:
     # 清洗旧数据中 label 含 "undefined" 的前置用例条目，避免前端显示乱码
@@ -68,6 +259,7 @@ def _report_dict(r: ApiTestReport) -> dict:
         "report_type": r.report_type, "total": r.total, "passed": r.passed,
         "failed": r.failed, "summary": r.summary, "details": r.details,
         "analysis": r.analysis or "",
+        "created_by": r.created_by or "",
         "created_at": r.created_at.isoformat() if r.created_at else "",
     }
 
@@ -100,6 +292,7 @@ def _plan_report_dict(r: TestPlanReport) -> dict:
         "total": r.total, "passed": r.passed, "failed": r.failed,
         "pass_rate": r.pass_rate, "details": r.details or {},
         "var_snapshot": r.var_snapshot or {}, "analysis": r.analysis or "",
+        "created_by": r.created_by or "",
         "created_at": r.created_at.isoformat() if r.created_at else "",
     }
 
@@ -107,7 +300,11 @@ def _plan_report_dict(r: TestPlanReport) -> dict:
 # ── 调试端点 ──────────────────────────────────────────────────────────────────
 
 @router.get("/api-test/debug/claude")
-async def debug_claude_subprocess():
+async def debug_claude_subprocess(
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可访问调试接口")
     import asyncio, subprocess, shutil, os
     claude_bin = shutil.which("claude") or shutil.which("claude.cmd")
     if not claude_bin:
@@ -142,6 +339,9 @@ async def debug_claude_subprocess():
 
 @router.post("/api-test/projects")
 async def create_api_project(data: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    ws_id = data.get("workspace_id")
+    if ws_id:
+        await check_workspace_member(db, ws_id, current_user, "创建接口项目")
     proj = ApiProject(
         name=data.get("name", "未命名项目"), base_url=data.get("base_url", ""),
         description=data.get("description", ""), auth_type=data.get("auth_type", "none"),
@@ -220,13 +420,24 @@ async def list_all_cases_grouped(
         # admin 指定了空间：只返回该空间
         stmt = stmt.where(ApiProject.workspace_id == workspace_id)
     projects = (await db.execute(stmt)).scalars().all()
-    result = []
-    for p in projects:
-        cases = (await db.execute(
-            select(ApiCase).where(ApiCase.project_id == p.id).order_by(ApiCase.created_at)
-        )).scalars().all()
-        result.append({"project_id": p.id, "project_name": p.name, "cases": [_case_dict(c) for c in cases]})
-    return result
+    if not projects:
+        return []
+    # 一次性批量查询所有项目的用例，避免 N+1
+    project_ids = [p.id for p in projects]
+    all_cases = (await db.execute(
+        select(ApiCase)
+        .where(ApiCase.project_id.in_(project_ids))
+        .order_by(ApiCase.project_id, ApiCase.created_at)
+    )).scalars().all()
+    # Python 端按 project_id 分组
+    from collections import defaultdict
+    cases_by_project: dict = defaultdict(list)
+    for c in all_cases:
+        cases_by_project[c.project_id].append(_case_dict(c))
+    return [
+        {"project_id": p.id, "project_name": p.name, "cases": cases_by_project[p.id]}
+        for p in projects
+    ]
 
 
 @router.put("/api-test/projects/{project_id}")
@@ -277,7 +488,16 @@ async def list_api_cases(project_id: int, db: AsyncSession = Depends(get_db), cu
 
 
 @router.post("/api-test/cases")
-async def create_api_case(data: dict, db: AsyncSession = Depends(get_db)):
+async def create_api_case(data: dict, db: AsyncSession = Depends(get_db),
+                          current_user: User = Depends(get_current_user)):
+    project_id = data.get("project_id")
+    if not project_id:
+        raise HTTPException(status_code=400, detail="project_id 不能为空")
+    # 校验项目存在且用户是 workspace 成员
+    proj = (await db.execute(select(ApiProject).where(ApiProject.id == project_id))).scalar_one_or_none()
+    if not proj:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    await check_access(db, proj, current_user, "接口项目")
     case = ApiCase(
         project_id=data["project_id"], name=data.get("name", "未命名用例"),
         module=data.get("module", "通用"), method=data.get("method", "GET"),
@@ -294,11 +514,17 @@ async def create_api_case(data: dict, db: AsyncSession = Depends(get_db)):
 
 
 @router.put("/api-test/cases/{case_id}")
-async def update_api_case(case_id: int, data: dict, db: AsyncSession = Depends(get_db)):
+async def update_api_case(case_id: int, data: dict, db: AsyncSession = Depends(get_db),
+                          current_user: User = Depends(get_current_user)):
     result = await db.execute(select(ApiCase).where(ApiCase.id == case_id))
     case = result.scalar_one_or_none()
     if not case:
         raise HTTPException(status_code=404, detail="用例不存在")
+    # 校验用例所属项目的访问权限
+    proj = (await db.execute(select(ApiProject).where(ApiProject.id == case.project_id))).scalar_one_or_none()
+    if not proj:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    await check_access(db, proj, current_user, "接口项目")
     for field in ("name", "module", "method", "path", "headers", "params", "body", "body_type",
                   "body_raw", "assertions", "var_extracts", "priority", "enabled", "description"):
         if field in data:
@@ -309,7 +535,21 @@ async def update_api_case(case_id: int, data: dict, db: AsyncSession = Depends(g
 
 
 @router.delete("/api-test/cases")
-async def delete_api_cases(ids: List[int], db: AsyncSession = Depends(get_db)):
+async def delete_api_cases(ids: List[int], db: AsyncSession = Depends(get_db),
+                          current_user: User = Depends(get_current_user)):
+    # 校验所有用例属于同一 workspace 且用户有权访问
+    cases = (await db.execute(select(ApiCase).where(ApiCase.id.in_(ids)))).scalars().all()
+    if not cases:
+        raise HTTPException(status_code=404, detail="未找到指定用例")
+    project_ids = set(c.project_id for c in cases)
+    # 确保所有用例属于同一项目
+    if len(project_ids) > 1:
+        raise HTTPException(status_code=400, detail="只能批量删除同一项目的用例")
+    proj_id = project_ids.pop()
+    proj = (await db.execute(select(ApiProject).where(ApiProject.id == proj_id))).scalar_one_or_none()
+    if not proj:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    await check_access(db, proj, current_user, "接口项目")
     from sqlalchemy import delete as sql_del
     await db.execute(sql_del(ApiCase).where(ApiCase.id.in_(ids)))
     await db.commit()
@@ -443,10 +683,16 @@ async def analyze_code_vs_requirement(project_id: int, data: dict, db: AsyncSess
 
 
 @router.post("/api-test/projects/{project_id}/code-analyze/save-cases")
-async def save_analyze_cases(project_id: int, data: dict, db: AsyncSession = Depends(get_db)):
+async def save_analyze_cases(
+    project_id: int, data: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     result = await db.execute(select(ApiProject).where(ApiProject.id == project_id))
-    if not result.scalar_one_or_none():
+    proj = result.scalar_one_or_none()
+    if not proj:
         raise HTTPException(status_code=404, detail="项目不存在")
+    await check_access(db, proj, current_user, "接口项目")
     cases = data.get("cases", [])
     if not cases:
         raise HTTPException(status_code=400, detail="没有可保存的用例")
@@ -474,17 +720,30 @@ async def list_builtin_functions():
 
 
 @router.get("/api-test/scripts")
-async def list_scripts(project_id: int = None, db: AsyncSession = Depends(get_db)):
+async def list_scripts(project_id: int = None, db: AsyncSession = Depends(get_db),
+                       current_user: User = Depends(get_current_user)):
     from sqlalchemy import or_
     stmt = select(CustomScript).order_by(CustomScript.id)
     if project_id is not None:
+        # 校验用户有权访问该项目
+        proj = (await db.execute(select(ApiProject).where(ApiProject.id == project_id))).scalar_one_or_none()
+        if not proj:
+            raise HTTPException(status_code=404, detail="项目不存在")
+        await check_access(db, proj, current_user, "接口项目")
         stmt = stmt.where(or_(CustomScript.project_id == project_id, CustomScript.project_id == None))
     result = await db.execute(stmt)
     return [_script_dict(s) for s in result.scalars()]
 
 
 @router.post("/api-test/scripts")
-async def create_script(data: dict, db: AsyncSession = Depends(get_db)):
+async def create_script(data: dict, db: AsyncSession = Depends(get_db),
+                        current_user: User = Depends(get_current_user)):
+    pid = data.get("project_id")
+    if pid:
+        proj = (await db.execute(select(ApiProject).where(ApiProject.id == pid))).scalar_one_or_none()
+        if not proj:
+            raise HTTPException(status_code=404, detail="项目不存在")
+        await check_access(db, proj, current_user, "接口项目")
     s = CustomScript(
         project_id=data.get("project_id"), name=data.get("name", "my_func"),
         description=data.get("description", ""), code=data.get("code", ""),
@@ -546,11 +805,16 @@ async def ai_generate_script(data: dict):
 
 
 @router.put("/api-test/scripts/{script_id}")
-async def update_script(script_id: int, data: dict, db: AsyncSession = Depends(get_db)):
+async def update_script(script_id: int, data: dict, db: AsyncSession = Depends(get_db),
+                        current_user: User = Depends(get_current_user)):
     result = await db.execute(select(CustomScript).where(CustomScript.id == script_id))
     s = result.scalar_one_or_none()
     if not s:
         raise HTTPException(status_code=404, detail="脚本不存在")
+    if s.project_id:
+        proj = (await db.execute(select(ApiProject).where(ApiProject.id == s.project_id))).scalar_one_or_none()
+        if proj:
+            await check_access(db, proj, current_user, "接口项目")
     for field in ("name", "description", "code", "project_id"):
         if field in data:
             setattr(s, field, data[field])
@@ -560,11 +824,16 @@ async def update_script(script_id: int, data: dict, db: AsyncSession = Depends(g
 
 
 @router.delete("/api-test/scripts/{script_id}")
-async def delete_script(script_id: int, db: AsyncSession = Depends(get_db)):
+async def delete_script(script_id: int, db: AsyncSession = Depends(get_db),
+                        current_user: User = Depends(get_current_user)):
     result = await db.execute(select(CustomScript).where(CustomScript.id == script_id))
     s = result.scalar_one_or_none()
     if not s:
         raise HTTPException(status_code=404, detail="脚本不存在")
+    if s.project_id:
+        proj = (await db.execute(select(ApiProject).where(ApiProject.id == s.project_id))).scalar_one_or_none()
+        if proj:
+            await check_access(db, proj, current_user, "接口项目")
     await db.delete(s)
     await db.commit()
     return {"message": "已删除"}
@@ -617,6 +886,7 @@ async def execute_api_cases(
                 project_id=project_id, project_name=proj.name, report_type="unit",
                 total=summary["total"], passed=summary["passed"], failed=summary["failed"],
                 summary={"pass_rate": summary["pass_rate"]}, details=summary["results"],
+                created_by=current_user.username,
             )
             s.add(report)
             await s.commit()
@@ -667,6 +937,7 @@ async def run_load_test(
                 project_id=project_id, project_name=proj.name, report_type="load",
                 total=summary.get("total_requests", 0), passed=summary.get("passed", 0),
                 failed=summary.get("failed", 0), summary=summary, details=cases,
+                created_by=current_user.username,
             )
             s.add(report)
             await s.commit()
@@ -690,7 +961,13 @@ async def stop_load_test():
 # ── 接口测试报告 ──────────────────────────────────────────────────────────────
 
 @router.get("/api-test/projects/{project_id}/reports")
-async def list_api_reports(project_id: int, db: AsyncSession = Depends(get_db)):
+async def list_api_reports(project_id: int, db: AsyncSession = Depends(get_db),
+                           current_user: User = Depends(get_current_user)):
+    # 校验项目访问权限
+    proj = (await db.execute(select(ApiProject).where(ApiProject.id == project_id))).scalar_one_or_none()
+    if not proj:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    await check_access(db, proj, current_user, "接口项目")
     result = await db.execute(
         select(ApiTestReport).where(ApiTestReport.project_id == project_id)
         .order_by(ApiTestReport.created_at.desc())
@@ -699,11 +976,17 @@ async def list_api_reports(project_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/api-test/reports/{report_id}/analyze")
-async def analyze_api_report(report_id: int, db: AsyncSession = Depends(get_db)):
+async def analyze_api_report(report_id: int, db: AsyncSession = Depends(get_db),
+                             current_user: User = Depends(get_current_user)):
     result = await db.execute(select(ApiTestReport).where(ApiTestReport.id == report_id))
     report = result.scalar_one_or_none()
     if not report:
         raise HTTPException(status_code=404, detail="报告不存在")
+    # 校验报告所属项目的访问权限
+    proj = (await db.execute(select(ApiProject).where(ApiProject.id == report.project_id))).scalar_one_or_none()
+    if not proj:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    await check_access(db, proj, current_user, "接口项目")
     rdict    = _report_dict(report)
     analysis = await _ai_analyze_report(rdict)
     report.analysis = analysis
@@ -747,67 +1030,241 @@ async def _ai_analyze_report(report: dict) -> str:
 
 
 @router.get("/api-test/reports/{report_id}/pdf")
-async def export_api_report_pdf(report_id: int, db: AsyncSession = Depends(get_db)):
-    """将接口测试报告导出为 PDF。"""
+async def export_api_report_pdf(report_id: int, db: AsyncSession = Depends(get_db),
+                                current_user: User = Depends(get_current_user)):
+    """将接口测试报告导出为详细 PDF（单测 / 压测自动分支）。"""
     from fastapi.responses import Response
     from urllib.parse import quote
+    from datetime import timezone, timedelta
     from tools.pdf_exporter import html_to_pdf
 
     r = (await db.execute(select(ApiTestReport).where(ApiTestReport.id == report_id))).scalar_one_or_none()
     if not r:
         raise HTTPException(status_code=404, detail="报告不存在")
+    # 校验报告所属项目的访问权限
+    proj = (await db.execute(select(ApiProject).where(ApiProject.id == r.project_id))).scalar_one_or_none()
+    if not proj:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    await check_access(db, proj, current_user, "接口项目")
+
+    _TZ = timezone(timedelta(hours=8))
+    def _fmt(dt):
+        if not dt: return "—"
+        if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
     rdict    = _report_dict(r)
+    summary  = rdict.get("summary") or {}
     details  = rdict.get("details") or []
-    total    = rdict.get("total", 0)
-    passed   = rdict.get("passed", 0)
-    failed   = rdict.get("failed", 0)
-    pass_rate = round(passed / total * 100, 1) if total else 0
     title    = f"{r.project_name or '接口测试'} 报告"
-    created  = r.created_at.strftime("%Y-%m-%d %H:%M:%S") if r.created_at else ""
+    created  = _fmt(r.created_at)
+    now      = __import__('datetime').datetime.now(_TZ).strftime("%Y-%m-%d %H:%M:%S")
     analysis = rdict.get("analysis", "")
+    executor = rdict.get("created_by") or "—"
 
-    rows = ""
-    for d in details:
-        st = d.get("status", "")
-        cls = {"passed": "bg-success", "failed": "bg-danger"}.get(st, "bg-warning")
-        lbl = {"passed": "通过", "failed": "失败"}.get(st, st)
-        err = str(d.get("error") or d.get("error_message") or "-")[:200]
-        rows += (
-            f"<tr><td>{d.get('case_name','-')}</td>"
-            f"<td>{d.get('method','')}</td><td>{d.get('url','')[:80]}</td>"
-            f"<td>{d.get('status_code','')}</td>"
-            f"<td><span class='badge {cls}'>{lbl}</span></td>"
-            f"<td>{d.get('duration_ms',0)}ms</td>"
-            f"<td style='max-width:200px;word-break:break-all'>{err}</td></tr>"
-        )
-    analysis_block = f"<h3>AI 分析</h3><pre style='white-space:pre-wrap;background:#f9f9f9;padding:12px;border-radius:4px'>{analysis}</pre>" if analysis else ""
+    # ── 公共 CSS ────────────────────────────────────────────────────────────
+    common_css = """
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;color:#1a1a1a;font-size:13px;line-height:1.6}
+.cover{background:linear-gradient(135deg,#0f2027 0%,#203a43 50%,#2c5364 100%);color:#fff;padding:48px}
+.cover h1{font-size:28px;font-weight:700;margin-bottom:6px}
+.cover .sub{font-size:14px;opacity:.65;margin-bottom:24px}
+.cover .meta{font-size:12px;opacity:.5;margin-top:16px}
+.body{padding:32px 48px}
+.section{margin-bottom:32px}
+.section h2{font-size:17px;font-weight:700;padding-bottom:8px;border-bottom:2px solid #e8e8e8;margin-bottom:16px;color:#1a1a1a}
+.stats{display:flex;gap:14px;margin-bottom:4px}
+.stat{flex:1;background:#fafafa;border:1px solid #e8e8e8;border-radius:8px;padding:14px;text-align:center}
+.stat .n{font-size:28px;font-weight:700}.stat .l{font-size:11px;color:#888;margin-top:2px}
+table{width:100%;border-collapse:collapse}
+th,td{padding:8px 10px;border:1px solid #e8e8e8;text-align:left;font-size:12px;vertical-align:top}
+th{background:#f5f7fa;font-weight:600;color:#555}
+tr:nth-child(even) td{background:#fafbff}
+.method{display:inline-block;padding:1px 7px;border-radius:3px;font-size:11px;font-weight:700;background:#e6f4ff;color:#0958d9}
+.kv-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:4px}
+.kv-card{background:#fafafa;border:1px solid #e8e8e8;border-radius:8px;padding:14px;text-align:center}
+.kv-card .kv-v{font-size:24px;font-weight:700;margin-bottom:4px}
+.kv-card .kv-l{font-size:11px;color:#888}
+.kv-grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:4px}
+.badge-ok{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;background:#f6ffed;color:#389e0d}
+.badge-fail{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;background:#fff1f0;color:#cf1322}
+.footer{text-align:center;color:#bbb;font-size:11px;padding:20px 48px;border-top:1px solid #eee;margin-top:16px}
+@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}"""
 
-    html_str = f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>{title}</title>
-<style>
-body{{font-family:-apple-system,BlinkMacSystemFont,sans-serif;padding:24px;color:#333;font-size:13px}}
-h2{{margin-bottom:4px}}p.meta{{color:#888;margin-bottom:16px}}
-.stats{{display:flex;gap:16px;margin-bottom:20px}}
-.stat{{background:#f5f5f5;padding:10px 20px;border-radius:6px;text-align:center}}
-.stat .n{{font-size:24px;font-weight:700}}.stat .l{{font-size:12px;color:#888}}
-.green{{color:#52c41a}}.red{{color:#ff4d4f}}.blue{{color:#1890ff}}
-table{{width:100%;border-collapse:collapse;margin-bottom:20px}}
-th,td{{padding:7px 10px;border:1px solid #e8e8e8;font-size:12px}}th{{background:#fafafa;font-weight:600}}
-.badge{{padding:2px 8px;border-radius:4px;font-size:11px}}
-.bg-success{{background:#d9f7be;color:#389e0d}}.bg-danger{{background:#fff1f0;color:#cf1322}}
-.bg-warning{{background:#fffbe6;color:#ad6800}}
-</style></head><body>
-<h2>{title}</h2>
-<p class="meta">生成时间：{created}</p>
-<div class="stats">
-  <div class="stat"><div class="n blue">{total}</div><div class="l">总用例</div></div>
-  <div class="stat"><div class="n green">{passed}</div><div class="l">通过</div></div>
-  <div class="stat"><div class="n red">{failed}</div><div class="l">失败</div></div>
-  <div class="stat"><div class="n {'green' if pass_rate>=80 else 'red'}">{pass_rate}%</div><div class="l">通过率</div></div>
+    # ── AI 分析块（两种报告共用）────────────────────────────────────────────
+    analysis_block = ""
+    if analysis:
+        analysis_html = _md_to_html(analysis)
+        analysis_block = f"""
+<div class="section" style="page-break-inside:avoid">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;
+              padding:10px 16px;border-radius:8px 8px 0 0;
+              background:linear-gradient(90deg,#1d4ed8 0%,#3a7bd5 100%);color:#fff">
+    <span style="font-size:18px">🤖</span>
+    <span style="font-size:15px;font-weight:700;letter-spacing:.3px">AI 智能分析结论</span>
+  </div>
+  <div style="border:1px solid #c7d8f8;border-top:none;border-radius:0 0 8px 8px;
+              padding:20px 24px;background:#f8fbff;line-height:1.75">
+    {analysis_html}
+  </div>
+</div>"""
+
+    # ════════════════════════════════════════════════════════════════════════
+    # 压测报告
+    # ════════════════════════════════════════════════════════════════════════
+    if r.report_type == "load":
+        total_req    = summary.get("total_requests", 0)
+        passed_req   = summary.get("passed", 0)
+        failed_req   = summary.get("failed", 0)
+        success_rate = summary.get("success_rate", 0)
+        avg_tps      = summary.get("avg_tps", 0)
+        avg_ms       = summary.get("avg_ms", 0)
+        min_ms       = summary.get("min_ms", 0)
+        max_ms       = summary.get("max_ms", 0)
+        p50_ms       = summary.get("p50_ms", 0)
+        p95_ms       = summary.get("p95_ms", 0)
+        p99_ms       = summary.get("p99_ms", 0)
+        duration_s   = summary.get("duration_secs", 0)
+        cfg          = summary.get("config") or {}
+        concurrent   = cfg.get("concurrent_users", "—")
+        duration_cfg = cfg.get("duration", "—")
+        ramp_up      = cfg.get("ramp_up", "—")
+
+        sr_color = "#52c41a" if success_rate >= 95 else ("#faad14" if success_rate >= 80 else "#ff4d4f")
+
+        # 参与压测的用例列表
+        case_rows = ""
+        for i, c in enumerate(details, 1):
+            case_rows += (
+                f"<tr>"
+                f"<td style='color:#aaa;text-align:center'>{i}</td>"
+                f"<td style='font-weight:500'>{c.get('name', '-')}</td>"
+                f"<td><span class='method'>{c.get('method','')}</span></td>"
+                f"<td style='font-size:11px;color:#555;word-break:break-all'>{c.get('path','')}</td>"
+                f"</tr>"
+            )
+
+        body_content = f"""
+<div class="section">
+  <h2>📊 压测概览</h2>
+  <div class="kv-grid" style="margin-bottom:14px">
+    <div class="kv-card"><div class="kv-v" style="color:#1890ff">{total_req}</div><div class="kv-l">总请求数</div></div>
+    <div class="kv-card"><div class="kv-v" style="color:#52c41a">{passed_req}</div><div class="kv-l">成功</div></div>
+    <div class="kv-card"><div class="kv-v" style="color:#ff4d4f">{failed_req}</div><div class="kv-l">失败</div></div>
+    <div class="kv-card"><div class="kv-v" style="color:{sr_color}">{success_rate}%</div><div class="kv-l">成功率</div></div>
+  </div>
 </div>
-<table><thead><tr><th>用例名称</th><th>方法</th><th>URL</th><th>状态码</th><th>结果</th><th>耗时</th><th>错误信息</th></tr></thead>
-<tbody>{rows}</tbody></table>
-{analysis_block}
+
+<div class="section">
+  <h2>⚡ 性能指标</h2>
+  <div class="kv-grid" style="margin-bottom:14px">
+    <div class="kv-card"><div class="kv-v" style="color:#722ed1">{avg_tps}</div><div class="kv-l">平均 TPS（请求/秒）</div></div>
+    <div class="kv-card"><div class="kv-v" style="color:#1890ff">{avg_ms} ms</div><div class="kv-l">平均响应时间</div></div>
+    <div class="kv-card"><div class="kv-v" style="color:#13c2c2">{p50_ms} ms</div><div class="kv-l">P50 响应时间</div></div>
+    <div class="kv-card"><div class="kv-v" style="color:#faad14">{p95_ms} ms</div><div class="kv-l">P95 响应时间</div></div>
+  </div>
+  <div class="kv-grid-3">
+    <div class="kv-card"><div class="kv-v" style="color:#ff4d4f">{p99_ms} ms</div><div class="kv-l">P99 响应时间</div></div>
+    <div class="kv-card"><div class="kv-v" style="color:#52c41a">{min_ms} ms</div><div class="kv-l">最小响应时间</div></div>
+    <div class="kv-card"><div class="kv-v" style="color:#ff7a45">{max_ms} ms</div><div class="kv-l">最大响应时间</div></div>
+  </div>
+</div>
+
+<div class="section">
+  <h2>⚙️ 压测配置</h2>
+  <table style="width:auto;min-width:400px">
+    <tbody>
+      <tr><th style="width:140px">并发用户数</th><td>{concurrent}</td></tr>
+      <tr><th>持续时长</th><td>{duration_cfg} 秒</td></tr>
+      <tr><th>爬坡时长</th><td>{ramp_up} 秒</td></tr>
+      <tr><th>实际执行时长</th><td>{duration_s} 秒</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="section">
+  <h2>📋 参与压测用例（共 {len(details)} 条）</h2>
+  <table>
+    <thead><tr><th style="width:36px">#</th><th>用例名称</th><th style="width:60px">方法</th><th>路径</th></tr></thead>
+    <tbody>{case_rows if case_rows else '<tr><td colspan="4" style="text-align:center;color:#aaa;padding:24px">无用例数据</td></tr>'}</tbody>
+  </table>
+</div>
+{analysis_block}"""
+
+        report_type_label = "接口压力测试报告"
+        cover_sub = f"并发：{concurrent} 用户 &nbsp;·&nbsp; 时长：{duration_cfg}s &nbsp;·&nbsp; 成功率：<b style=\"color:{sr_color}\">{success_rate}%</b>"
+
+    # ════════════════════════════════════════════════════════════════════════
+    # 单元测试报告
+    # ════════════════════════════════════════════════════════════════════════
+    else:
+        total     = rdict.get("total", 0)
+        passed    = rdict.get("passed", 0)
+        failed    = rdict.get("failed", 0)
+        pass_rate = round(passed / total * 100, 1) if total else 0
+        pr_color  = "#52c41a" if pass_rate >= 80 else "#ff4d4f"
+
+        rows = ""
+        for i, d in enumerate(details, 1):
+            st  = d.get("status", "")
+            sty = {"passed": "background:#f6ffed;color:#389e0d", "failed": "background:#fff1f0;color:#cf1322"}.get(st, "background:#fffbe6;color:#ad6800")
+            lbl = {"passed": "✓ 通过", "failed": "✗ 失败"}.get(st, st)
+            err = str(d.get("error") or d.get("error_message") or "—")[:300]
+            url = (d.get("url") or "")[:100]
+            rows += (
+                f"<tr>"
+                f"<td style='color:#aaa;text-align:center'>{i}</td>"
+                f"<td style='font-weight:500'>{d.get('case_name','-')}</td>"
+                f"<td><span class='method'>{d.get('method','')}</span></td>"
+                f"<td style='font-size:11px;color:#555;word-break:break-all'>{url}</td>"
+                f"<td style='text-align:center'>{d.get('status_code','—')}</td>"
+                f"<td><span style='padding:2px 8px;border-radius:10px;font-size:11px;{sty}'>{lbl}</span></td>"
+                f"<td style='text-align:right;color:#666'>{d.get('duration_ms',0)} ms</td>"
+                f"<td style='font-size:11px;color:#888;word-break:break-all'>{err}</td>"
+                f"</tr>"
+            )
+
+        body_content = f"""
+<div class="section">
+  <h2>📊 执行统计</h2>
+  <div class="stats">
+    <div class="stat"><div class="n" style="color:#1890ff">{total}</div><div class="l">总用例数</div></div>
+    <div class="stat"><div class="n" style="color:#52c41a">{passed}</div><div class="l">通过</div></div>
+    <div class="stat"><div class="n" style="color:#ff4d4f">{failed}</div><div class="l">失败</div></div>
+    <div class="stat"><div class="n" style="color:{pr_color}">{pass_rate}%</div><div class="l">通过率</div></div>
+  </div>
+</div>
+<div class="section">
+  <h2>📋 用例详情</h2>
+  <table>
+    <thead><tr><th style="width:36px">#</th><th>用例名称</th><th style="width:60px">方法</th><th>请求 URL</th><th style="width:60px">状态码</th><th style="width:72px">结果</th><th style="width:72px">耗时</th><th>错误信息</th></tr></thead>
+    <tbody>{rows if rows else '<tr><td colspan="8" style="text-align:center;color:#aaa;padding:24px">暂无执行数据</td></tr>'}</tbody>
+  </table>
+</div>
+{analysis_block}"""
+
+        report_type_label = "接口自动化测试报告"
+        cover_sub = f"通过率：<b style=\"color:{'#52c41a' if pass_rate>=80 else '#ff4d4f'}\">{pass_rate}%</b>"
+
+    # ── 最终拼 HTML ──────────────────────────────────────────────────────────
+    html_str = f"""<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><title>{title}</title>
+<style>{common_css}</style></head><body>
+<div class="cover">
+  <div style="font-size:11px;opacity:.4;margin-bottom:10px;letter-spacing:2px">API TEST REPORT</div>
+  <h1>{title}</h1>
+  <div class="sub">{report_type_label}</div>
+  <div style="display:flex;gap:24px;font-size:13px;flex-wrap:wrap">
+    <span>执行时间：{created}</span>
+    <span>执行者：{executor}</span>
+    <span>{cover_sub}</span>
+  </div>
+  <div class="meta">导出时间：{now}</div>
+</div>
+<div class="body">
+{body_content}
+</div>
+<div class="footer">本报告由 AI 测试平台自动生成 · {now}</div>
 </body></html>"""
 
     try:
@@ -823,728 +1280,46 @@ th,td{{padding:7px 10px;border:1px solid #e8e8e8;font-size:12px}}th{{background:
 
 
 @router.delete("/api-test/reports/batch")
-async def delete_api_reports_batch(ids: List[int], db: AsyncSession = Depends(get_db)):
+async def delete_api_reports_batch(
+    ids: List[int],
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     from sqlalchemy import delete as sql_del
     if not ids:
         raise HTTPException(status_code=400, detail="未提供报告ID")
+    # 校验所有报告属于同一 workspace 且用户有权访问
+    reports = (await db.execute(select(ApiTestReport).where(ApiTestReport.id.in_(ids)))).scalars().all()
+    if not reports:
+        raise HTTPException(status_code=404, detail="未找到指定报告")
+    project_ids = set(r.project_id for r in reports)
+    if len(project_ids) > 1:
+        raise HTTPException(status_code=400, detail="只能批量删除同一项目的报告")
+    proj_id = project_ids.pop()
+    proj = (await db.execute(select(ApiProject).where(ApiProject.id == proj_id))).scalar_one_or_none()
+    if not proj:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    await check_access(db, proj, current_user, "接口项目")
     await db.execute(sql_del(ApiTestReport).where(ApiTestReport.id.in_(ids)))
     await db.commit()
     return {"message": f"已删除 {len(ids)} 条报告"}
 
 
 @router.delete("/api-test/reports/{report_id}")
-async def delete_api_report(report_id: int, db: AsyncSession = Depends(get_db)):
+async def delete_api_report(report_id: int, db: AsyncSession = Depends(get_db),
+                           current_user: User = Depends(get_current_user)):
     from sqlalchemy import delete as sql_del
     result = await db.execute(select(ApiTestReport).where(ApiTestReport.id == report_id))
-    if not result.scalar_one_or_none():
+    report = result.scalar_one_or_none()
+    if not report:
         raise HTTPException(status_code=404, detail="报告不存在")
+    # 校验报告所属项目的访问权限
+    proj = (await db.execute(select(ApiProject).where(ApiProject.id == report.project_id))).scalar_one_or_none()
+    if not proj:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    await check_access(db, proj, current_user, "接口项目")
     await db.execute(sql_del(ApiTestReport).where(ApiTestReport.id == report_id))
     await db.commit()
     return {"message": "已删除"}
 
 
-# ── 全局变量池 ────────────────────────────────────────────────────────────────
-
-def _gvar_dict(g: GlobalVariable) -> dict:
-    return {
-        "id": g.id, "name": g.name, "value": g.value or "",
-        "description": g.description or "", "source_project": g.source_project or "",
-        "updated_at": g.updated_at.isoformat() if g.updated_at else "",
-    }
-
-
-@router.get("/global-vars")
-async def list_global_vars(
-    workspace_id: int = None,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    stmt = select(GlobalVariable).order_by(GlobalVariable.name)
-    if current_user.role == "admin":
-        # admin 选了空间：只看该空间的；未选：看全部（含 NULL 的历史数据）
-        if workspace_id is not None:
-            stmt = stmt.where(GlobalVariable.workspace_id == workspace_id)
-        # workspace_id is None → 不加任何过滤，看全部
-    else:
-        from sqlalchemy import false as sql_false
-        from tools.database import ProjectMember
-        from sqlalchemy import select as _sel
-        if workspace_id is None:
-            stmt = stmt.where(sql_false())
-        else:
-            m = await db.execute(_sel(ProjectMember).where(
-                ProjectMember.project_id == workspace_id,
-                ProjectMember.username == current_user.username,
-            ))
-            if not m.scalar_one_or_none():
-                stmt = stmt.where(sql_false())
-            else:
-                # 普通用户选了空间：只看该空间的（不再包含 NULL，避免跨空间泄漏）
-                stmt = stmt.where(GlobalVariable.workspace_id == workspace_id)
-    result = await db.execute(stmt)
-    return [_gvar_dict(g) for g in result.scalars().all()]
-
-
-@router.post("/global-vars")
-async def create_global_var(
-    data: dict,
-    workspace_id: int = None,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    from skills.param_resolver import set_global_var, _gvar_dirty
-    name = (data.get("name") or "").strip()
-    if not name:
-        raise HTTPException(status_code=400, detail="变量名不能为空")
-    # 同一空间内变量名唯一（精确匹配 workspace_id，不再混入 NULL 数据）
-    ws_id = workspace_id or data.get("workspace_id")
-    stmt = select(GlobalVariable).where(GlobalVariable.name == name)
-    if ws_id:
-        stmt = stmt.where(GlobalVariable.workspace_id == ws_id)
-    else:
-        stmt = stmt.where(GlobalVariable.workspace_id.is_(None))
-    exist = (await db.execute(stmt)).scalar_one_or_none()
-    if exist:
-        raise HTTPException(status_code=400, detail=f"变量 '{name}' 已存在，请使用 PUT 更新")
-    g = GlobalVariable(name=name, value=data.get("value", ""),
-                       description=data.get("description", ""),
-                       source_project=data.get("source_project", "手动创建"),
-                       workspace_id=ws_id)
-    db.add(g)
-    await db.commit()
-    await db.refresh(g)
-    set_global_var(name, g.value or "", source_project=g.source_project)
-    _gvar_dirty.discard(name)
-    return _gvar_dict(g)
-
-
-@router.put("/global-vars/{var_id}")
-async def update_global_var(var_id: int, data: dict, db: AsyncSession = Depends(get_db)):
-    from skills.param_resolver import set_global_var, _gvar_dirty
-    from datetime import datetime as _dt
-    result = await db.execute(select(GlobalVariable).where(GlobalVariable.id == var_id))
-    g = result.scalar_one_or_none()
-    if not g:
-        raise HTTPException(status_code=404, detail="变量不存在")
-    for field in ("value", "description", "source_project"):
-        if field in data:
-            setattr(g, field, data[field])
-    g.updated_at = _dt.utcnow()
-    await db.commit()
-    await db.refresh(g)
-    set_global_var(g.name, g.value or "", source_project=g.source_project)
-    _gvar_dirty.discard(g.name)
-    return _gvar_dict(g)
-
-
-@router.delete("/global-vars/{var_id}")
-async def delete_global_var(var_id: int, db: AsyncSession = Depends(get_db)):
-    from skills.param_resolver import _gvar_cache, _gvar_dirty
-    result = await db.execute(select(GlobalVariable).where(GlobalVariable.id == var_id))
-    g = result.scalar_one_or_none()
-    if not g:
-        raise HTTPException(status_code=404, detail="变量不存在")
-    _gvar_cache.pop(g.name, None)
-    _gvar_dirty.discard(g.name)
-    await db.delete(g)
-    await db.commit()
-    return {"message": f"已删除全局变量 '{g.name}'"}
-
-
-# ── 测试计划 ──────────────────────────────────────────────────────────────────
-
-@router.get("/test-plans")
-async def list_test_plans(workspace_id: int = None, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
-    from sqlalchemy import func
-    stmt = select(TestPlan).order_by(TestPlan.created_at.desc())
-    if current_user.role != "admin":
-        from sqlalchemy import false as sql_false
-        from tools.database import ProjectMember
-        from sqlalchemy import select as _sel
-        if workspace_id is None:
-            stmt = stmt.where(sql_false())
-        else:
-            m = await db.execute(_sel(ProjectMember).where(
-                ProjectMember.project_id == workspace_id,
-                ProjectMember.username == current_user.username,
-            ))
-            if not m.scalar_one_or_none():
-                stmt = stmt.where(sql_false())
-            else:
-                stmt = stmt.where(TestPlan.workspace_id == workspace_id)
-    plans = (await db.execute(stmt)).scalars().all()
-    result = []
-    for p in plans:
-        step_count = (await db.execute(
-            select(func.count()).where(TestPlanStep.plan_id == p.id)
-        )).scalar() or 0
-        d = _plan_dict(p)
-        d["step_count"] = step_count
-        result.append(d)
-    return result
-
-
-@router.post("/test-plans")
-async def create_test_plan(data: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
-    name = (data.get("name") or "").strip()
-    if not name:
-        raise HTTPException(status_code=400, detail="计划名称不能为空")
-    plan = TestPlan(
-        name=name, description=data.get("description", ""),
-        project_id=data.get("project_id"), proxy_url=data.get("proxy_url", ""),
-        hosts_map=data.get("hosts_map", ""), status="pending",
-        workspace_id=data.get("workspace_id"),
-        created_by=current_user.username,
-    )
-    db.add(plan)
-    await db.flush()
-    for idx, s in enumerate(data.get("steps") or []):
-        db.add(TestPlanStep(
-            plan_id=plan.id, case_id=s.get("case_id"), case_project_id=s.get("case_project_id"),
-            sort_order=s.get("sort_order", idx), enabled=s.get("enabled", True),
-        ))
-    await db.commit()
-    await db.refresh(plan)
-    return _plan_dict(plan)
-
-
-@router.get("/test-plans/{plan_id}")
-async def get_test_plan(plan_id: int, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
-    plan = (await db.execute(select(TestPlan).where(TestPlan.id == plan_id))).scalar_one_or_none()
-    if not plan:
-        raise HTTPException(status_code=404, detail="测试计划不存在")
-    await check_access(db, plan, current_user, "测试计划")
-    steps_rows = (await db.execute(
-        select(TestPlanStep).where(TestPlanStep.plan_id == plan_id).order_by(TestPlanStep.sort_order)
-    )).scalars().all()
-    case_ids    = [s.case_id for s in steps_rows]
-    project_ids = list({s.case_project_id for s in steps_rows if s.case_project_id})
-    cases_map, projects_map = {}, {}
-    if case_ids:
-        cases_map = {c.id: c for c in (await db.execute(select(ApiCase).where(ApiCase.id.in_(case_ids)))).scalars().all()}
-    if project_ids:
-        projects_map = {p.id: p for p in (await db.execute(select(ApiProject).where(ApiProject.id.in_(project_ids)))).scalars().all()}
-    steps = [
-        _step_dict(
-            s,
-            case_name=getattr(cases_map.get(s.case_id), "name", f"[用例#{s.case_id}]"),
-            module=getattr(cases_map.get(s.case_id), "module", "") or "",
-            project_name=getattr(projects_map.get(s.case_project_id), "name", "") or "",
-        )
-        for s in steps_rows
-    ]
-    return _plan_dict(plan, steps)
-
-
-@router.put("/test-plans/{plan_id}")
-async def update_test_plan(plan_id: int, data: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
-    from datetime import datetime as _dt
-    plan = (await db.execute(select(TestPlan).where(TestPlan.id == plan_id))).scalar_one_or_none()
-    if not plan:
-        raise HTTPException(status_code=404, detail="测试计划不存在")
-    await check_access(db, plan, current_user, "测试计划")
-    for field in ("name", "description", "project_id", "proxy_url", "hosts_map"):
-        if field in data:
-            setattr(plan, field, data[field])
-    plan.updated_at = _dt.utcnow()
-    await db.commit()
-    await db.refresh(plan)
-    return _plan_dict(plan)
-
-
-@router.delete("/test-plans/{plan_id}")
-async def delete_test_plan(plan_id: int, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
-    from sqlalchemy import delete as sql_delete
-    plan = (await db.execute(select(TestPlan).where(TestPlan.id == plan_id))).scalar_one_or_none()
-    if not plan:
-        raise HTTPException(status_code=404, detail="测试计划不存在")
-    await check_access(db, plan, current_user, "测试计划")
-    await db.execute(sql_delete(TestPlanStep).where(TestPlanStep.plan_id == plan_id))
-    await db.execute(sql_delete(TestPlanReport).where(TestPlanReport.plan_id == plan_id))
-    await db.delete(plan)
-    await db.commit()
-    return {"message": f"测试计划 '{plan.name}' 已删除"}
-
-
-@router.post("/test-plans/{plan_id}/steps")
-async def add_plan_steps(plan_id: int, data: dict, db: AsyncSession = Depends(get_db)):
-    from sqlalchemy import delete as sql_delete
-    from datetime import datetime as _dt
-    plan = (await db.execute(select(TestPlan).where(TestPlan.id == plan_id))).scalar_one_or_none()
-    if not plan:
-        raise HTTPException(status_code=404, detail="测试计划不存在")
-    if data.get("replace", False):
-        await db.execute(sql_delete(TestPlanStep).where(TestPlanStep.plan_id == plan_id))
-    for idx, s in enumerate(data.get("steps") or []):
-        db.add(TestPlanStep(
-            plan_id=plan_id, case_id=s.get("case_id"), case_project_id=s.get("case_project_id"),
-            sort_order=s.get("sort_order", idx), enabled=s.get("enabled", True),
-        ))
-    plan.updated_at = _dt.utcnow()
-    await db.commit()
-    return {"message": "步骤已保存"}
-
-
-@router.delete("/test-plans/{plan_id}/steps/{step_id}")
-async def delete_plan_step(plan_id: int, step_id: int, db: AsyncSession = Depends(get_db)):
-    s = (await db.execute(
-        select(TestPlanStep).where(TestPlanStep.id == step_id, TestPlanStep.plan_id == plan_id)
-    )).scalar_one_or_none()
-    if not s:
-        raise HTTPException(status_code=404, detail="步骤不存在")
-    await db.delete(s)
-    await db.commit()
-    return {"message": "步骤已删除"}
-
-
-@router.post("/test-plans/{plan_id}/run")
-async def run_test_plan(
-    plan_id: int, background_tasks: BackgroundTasks,
-    db: AsyncSession = Depends(get_db), force: bool = False,
-):
-    from datetime import datetime as _dt
-    plan = (await db.execute(select(TestPlan).where(TestPlan.id == plan_id))).scalar_one_or_none()
-    if not plan:
-        raise HTTPException(status_code=404, detail="测试计划不存在")
-    if plan.status == "running" and not force:
-        raise HTTPException(status_code=409, detail="计划正在执行中，如需强制重跑请传 force=true")
-    plan.status = "running"
-    plan.updated_at = _dt.utcnow()
-    await db.commit()
-    background_tasks.add_task(_execute_plan_bg, plan_id)
-    return {"message": "测试计划已开始执行", "plan_id": plan_id}
-
-
-# ── CI/CD Webhook 触发 ────────────────────────────────────────────────────────
-
-@router.post("/test-plans/{plan_id}/trigger")
-async def trigger_test_plan(
-    plan_id: int,
-    background_tasks: BackgroundTasks,
-    token: str,                          # ?token=xxx 查询参数，无需 JWT
-    force: bool = False,
-    callback_url: Optional[str] = None,  # 执行完成后回调的 URL（可选）
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    CI/CD Webhook 触发接口，无需 JWT，用 token 鉴权。
-
-    用法（Jenkins / GitHub Actions）：
-        curl -X POST "http://your-host:4000/api/v1/test-plans/{plan_id}/trigger?token=xxx"
-        curl -X POST "...?token=xxx&callback_url=https://ci.example.com/hook"
-
-    token 通过 PUT /test-plans/{plan_id}/webhook-token 获取。
-    """
-    plan = (await db.execute(select(TestPlan).where(TestPlan.id == plan_id))).scalar_one_or_none()
-    if not plan:
-        raise HTTPException(status_code=404, detail="测试计划不存在")
-    # token 鉴权：未配置 token 或 token 不匹配均拒绝
-    if not plan.webhook_token or plan.webhook_token != token:
-        raise HTTPException(status_code=401, detail="无效的 webhook token")
-    if plan.status == "running" and not force:
-        raise HTTPException(status_code=409, detail="计划正在执行中，如需强制重跑请传 force=true")
-
-    from datetime import datetime as _dt
-    plan.status = "running"
-    plan.updated_at = _dt.utcnow()
-    await db.commit()
-    background_tasks.add_task(_execute_plan_bg, plan_id, callback_url=callback_url)
-    logger.info(f"[webhook] 计划 {plan_id}「{plan.name}」由 CI/CD 触发")
-    return {
-        "message": "测试计划已由 webhook 触发",
-        "plan_id": plan_id,
-        "plan_name": plan.name,
-    }
-
-
-@router.put("/test-plans/{plan_id}/webhook-token")
-async def set_webhook_token(
-    plan_id: int,
-    data: dict,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """
-    生成或更新 webhook token。
-    body: {} 表示自动生成新 token；{"token": "your-token"} 表示手动指定。
-    """
-    import secrets
-    plan = (await db.execute(select(TestPlan).where(TestPlan.id == plan_id))).scalar_one_or_none()
-    if not plan:
-        raise HTTPException(status_code=404, detail="测试计划不存在")
-    await check_access(db, plan, current_user, "测试计划")
-
-    new_token = data.get("token") or secrets.token_urlsafe(32)
-    if len(new_token) < 16:
-        raise HTTPException(status_code=400, detail="token 长度不能少于 16 个字符")
-
-    plan.webhook_token = new_token
-    await db.commit()
-    return {
-        "plan_id": plan_id,
-        "webhook_token": new_token,
-        "trigger_url": f"/api/v1/test-plans/{plan_id}/trigger?token={new_token}",
-    }
-
-
-@router.delete("/test-plans/{plan_id}/webhook-token")
-async def revoke_webhook_token(
-    plan_id: int,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """撤销 webhook token，撤销后 CI/CD 触发将返回 401。"""
-    plan = (await db.execute(select(TestPlan).where(TestPlan.id == plan_id))).scalar_one_or_none()
-    if not plan:
-        raise HTTPException(status_code=404, detail="测试计划不存在")
-    await check_access(db, plan, current_user, "测试计划")
-    plan.webhook_token = None
-    await db.commit()
-    return {"message": "webhook token 已撤销", "plan_id": plan_id}
-
-
-async def _execute_plan_bg(plan_id: int, callback_url: Optional[str] = None):
-    """后台执行测试计划：顺序执行 + 共享 var_store + 步骤级报告。
-    callback_url：可选，执行完成后向该 URL 发送 POST 回调（用于 CI/CD 流水线状态通知）。
-    """
-    import httpx
-    from sqlalchemy import select as _sel, or_
-    from skills.api_executor import ApiExecutor
-    from skills.param_resolver import flush_global_vars
-    from datetime import datetime as _dt
-    from tools.database import async_session_maker as _session_maker
-
-    executor = ApiExecutor()
-    step_results = []
-    var_store: dict = {}
-    final_status = "failed"
-    plan_name = ""
-    plan_workspace_id = None
-    report_id = None
-
-    try:
-        steps_plain, cases_plain, projects_plain = [], {}, {}
-        custom_scripts, scripts_by_project = [], {}
-
-        async with _session_maker() as db:
-            plan = (await db.execute(_sel(TestPlan).where(TestPlan.id == plan_id))).scalar_one_or_none()
-            if not plan:
-                logger.warning(f"[plan_exec] 计划 {plan_id} 不存在")
-                return
-            plan_name           = plan.name
-            plan_workspace_id   = plan.workspace_id
-            plan_proxy_url      = plan.proxy_url or ""
-            plan_hosts_map_text = plan.hosts_map or ""
-
-            steps_rows = (await db.execute(
-                _sel(TestPlanStep).where(TestPlanStep.plan_id == plan_id, TestPlanStep.enabled == True)
-                .order_by(TestPlanStep.sort_order)
-            )).scalars().all()
-
-            if not steps_rows:
-                plan.status = "passed"
-                plan.updated_at = _dt.utcnow()
-                await db.commit()
-                await ws_manager.broadcast_all({"type": "plan_done", "plan_id": plan_id,
-                                                "total": 0, "passed": 0, "failed": 0, "pass_rate": 100, "status": "passed"})
-                return
-
-            steps_plain = [{"case_id": s.case_id, "case_project_id": s.case_project_id, "sort_order": s.sort_order}
-                           for s in steps_rows]
-            project_ids = list({s["case_project_id"] for s in steps_plain if s["case_project_id"]})
-            if project_ids:
-                projs = (await db.execute(_sel(ApiProject).where(ApiProject.id.in_(project_ids)))).scalars().all()
-                projects_plain = {p.id: {"id": p.id, "name": p.name, "base_url": p.base_url or "",
-                                          "auth_type": p.auth_type or "none", "auth_config": p.auth_config or {},
-                                          "global_headers": p.global_headers or {},
-                                          "proxy_url": p.proxy_url or "", "hosts_map": p.hosts_map or ""}
-                                  for p in projs}
-            case_ids = [s["case_id"] for s in steps_plain]
-            cases_rows = (await db.execute(_sel(ApiCase).where(ApiCase.id.in_(case_ids)))).scalars().all()
-            cases_plain = {c.id: ApiExecutor._case_to_dict(c) for c in cases_rows}
-
-            all_pid = list({s["case_project_id"] for s in steps_plain if s["case_project_id"]})
-            if plan.project_id and plan.project_id not in all_pid:
-                all_pid.append(plan.project_id)
-            scripts_rows = (await db.execute(
-                _sel(CustomScript).where(or_(
-                    CustomScript.project_id.in_(all_pid) if all_pid else False,
-                    CustomScript.project_id == None,
-                ))
-            )).scalars().all()
-            global_scripts = [{"name": s.name, "code": s.code} for s in scripts_rows if s.project_id is None]
-            for s in scripts_rows:
-                if s.project_id is None:
-                    continue
-                scripts_by_project.setdefault(s.project_id, []).append({"name": s.name, "code": s.code})
-            for pid in all_pid:
-                proj_scripts = scripts_by_project.get(pid, [])
-                proj_names = {s["name"] for s in proj_scripts}
-                scripts_by_project[pid] = proj_scripts + [s for s in global_scripts if s["name"] not in proj_names]
-
-        total_steps = len(steps_plain)
-        for idx, step in enumerate(steps_plain):
-            case_dict = cases_plain.get(step["case_id"])
-            if not case_dict:
-                step_results.append({"step": idx+1, "case_id": step["case_id"],
-                                     "case_name": f"[用例#{step['case_id']} 不存在]",
-                                     "status": "skipped", "error": "用例不存在",
-                                     "duration_ms": 0, "assertions": [], "extracted_vars": {}, "response_preview": ""})
-                continue
-            proj           = projects_plain.get(step["case_project_id"], {})
-            base_url       = (proj.get("base_url", "") or "").rstrip("/")
-            auth_headers   = executor.build_auth_headers(proj) if proj else {}
-            global_headers = proj.get("global_headers") or {}
-            project_name   = proj.get("name", "")
-            step_scripts   = scripts_by_project.get(step["case_project_id"], global_scripts)
-            effective_proxy = plan_proxy_url or proj.get("proxy_url", "")
-            if effective_proxy and "://" not in effective_proxy:
-                effective_proxy = "http://" + effective_proxy
-            _proxy_kwargs = {"proxies": {"all://": effective_proxy}} if effective_proxy else {}
-            from skills.api_executor import _parse_hosts_map, _make_transport
-            _hosts_map = {**_parse_hosts_map(proj.get("hosts_map") or ""), **_parse_hosts_map(plan_hosts_map_text)}
-            _transport = _make_transport(_hosts_map, verify=False)
-            await ws_manager.broadcast_all({"type": "plan_step_start", "plan_id": plan_id,
-                                            "step": idx+1, "total": total_steps,
-                                            "case_name": case_dict.get("name", "")})
-            try:
-                async with httpx.AsyncClient(transport=_transport, verify=False, timeout=30.0, **_proxy_kwargs) as client:
-                    result = await executor._run_case(
-                        client, base_url, case_dict, auth_headers, global_headers,
-                        var_store=var_store, custom_scripts=step_scripts, project_name=project_name,
-                    )
-            except Exception as step_err:
-                result = {"case_id": case_dict.get("id"), "case_name": case_dict.get("name", ""),
-                          "method": case_dict.get("method", ""), "url": base_url + case_dict.get("path", ""),
-                          "status_code": None, "duration_ms": 0, "status": "failed",
-                          "assertions": [], "error": str(step_err), "extracted_vars": {}, "response_preview": ""}
-            step_results.append({"step": idx+1, "case_id": case_dict.get("id"),
-                                  "case_name": case_dict.get("name", ""), "module": case_dict.get("module", ""),
-                                  "project_name": project_name, "method": result.get("method", ""),
-                                  "url": result.get("url", ""), "status_code": result.get("status_code"),
-                                  "duration_ms": result.get("duration_ms", 0), "status": result.get("status", "failed"),
-                                  "assertions": result.get("assertions", []), "error": result.get("error", ""),
-                                  "extracted_vars": result.get("extracted_vars", {}),
-                                  "response_preview": result.get("response_preview", "")})
-            await ws_manager.broadcast_all({"type": "plan_step_done", "plan_id": plan_id,
-                                            "step": idx+1, "total": total_steps,
-                                            "case_name": case_dict.get("name", ""),
-                                            "status": result.get("status"), "duration_ms": result.get("duration_ms", 0),
-                                            "method": result.get("method", ""), "status_code": result.get("status_code"),
-                                            "error": result.get("error", ""), "var_store": dict(var_store)})
-
-        passed      = sum(1 for r in step_results if r["status"] == "passed")
-        total       = len(step_results)
-        failed_count = total - passed
-        pass_rate   = round(passed / total * 100, 1) if total else 0
-        final_status = "passed" if failed_count == 0 else "failed"
-
-        async with _session_maker() as db:
-            try:
-                await flush_global_vars(source_project=f"plan:{plan_id}", workspace_id=plan_workspace_id)
-            except Exception as fv_err:
-                logger.warning(f"[plan_exec] flush_global_vars 失败: {fv_err}")
-            report = TestPlanReport(plan_id=plan_id, plan_name=plan_name, total=total,
-                                    passed=passed, failed=failed_count, pass_rate=pass_rate,
-                                    details=step_results, var_snapshot=dict(var_store))
-            db.add(report)
-            plan_upd = (await db.execute(_sel(TestPlan).where(TestPlan.id == plan_id))).scalar_one_or_none()
-            if plan_upd:
-                plan_upd.status = final_status
-                plan_upd.updated_at = _dt.utcnow()
-            await db.commit()
-            await db.refresh(report)
-            report_id = report.id
-
-    except Exception as e:
-        logger.error(f"[plan_exec] 计划 {plan_id} 执行异常: {e}", exc_info=True)
-        try:
-            async with _session_maker() as db:
-                plan_upd = (await db.execute(_sel(TestPlan).where(TestPlan.id == plan_id))).scalar_one_or_none()
-                if plan_upd:
-                    plan_upd.status = "failed"
-                    plan_upd.updated_at = _dt.utcnow()
-                    await db.commit()
-        except Exception:
-            pass
-
-    passed      = sum(1 for r in step_results if r["status"] == "passed")
-    total       = len(step_results)
-    failed_count = total - passed
-    pass_rate   = round(passed / total * 100, 1) if total else 0
-    await ws_manager.broadcast_all({"type": "plan_done", "plan_id": plan_id, "report_id": report_id,
-                                    "total": total, "passed": passed, "failed": failed_count,
-                                    "pass_rate": pass_rate, "status": final_status})
-
-    # CI/CD 回调：执行完成后向 callback_url 发送 POST 通知
-    if callback_url:
-        import httpx as _httpx
-        payload = {
-            "plan_id": plan_id, "plan_name": plan_name,
-            "status": final_status, "report_id": report_id,
-            "total": total, "passed": passed, "failed": failed_count,
-            "pass_rate": pass_rate,
-        }
-        try:
-            async with _httpx.AsyncClient(timeout=10, verify=False) as _c:
-                resp = await _c.post(callback_url, json=payload)
-            logger.info(f"[webhook] 回调成功: {callback_url} → {resp.status_code}")
-        except Exception as cb_err:
-            logger.warning(f"[webhook] 回调失败: {callback_url} → {cb_err}")
-
-
-@router.get("/test-plans/{plan_id}/reports")
-async def list_plan_reports(plan_id: int, db: AsyncSession = Depends(get_db)):
-    rows = (await db.execute(
-        select(TestPlanReport).where(TestPlanReport.plan_id == plan_id).order_by(TestPlanReport.id.desc())
-    )).scalars().all()
-    result = []
-    for r in rows:
-        d = _plan_report_dict(r)
-        d.pop("details", None)
-        result.append(d)
-    return result
-
-
-@router.get("/test-plans/reports/{report_id}")
-async def get_plan_report(report_id: int, db: AsyncSession = Depends(get_db)):
-    r = (await db.execute(select(TestPlanReport).where(TestPlanReport.id == report_id))).scalar_one_or_none()
-    if not r:
-        raise HTTPException(status_code=404, detail="报告不存在")
-    return _plan_report_dict(r)
-
-
-@router.get("/test-plans/reports/{report_id}/pdf")
-async def export_plan_report_pdf(report_id: int, db: AsyncSession = Depends(get_db)):
-    """将测试计划报告导出为 PDF。"""
-    from fastapi.responses import Response
-    from urllib.parse import quote
-    from tools.pdf_exporter import html_to_pdf
-
-    r = (await db.execute(select(TestPlanReport).where(TestPlanReport.id == report_id))).scalar_one_or_none()
-    if not r:
-        raise HTTPException(status_code=404, detail="报告不存在")
-
-    rdict    = _plan_report_dict(r)
-    details  = rdict.get("details") or []
-    total    = rdict.get("total", 0)
-    passed   = rdict.get("passed", 0)
-    failed   = rdict.get("failed", 0)
-    pass_rate = rdict.get("pass_rate", 0)
-    title    = f"{r.plan_name or '测试计划'} 报告"
-    created  = r.created_at.strftime("%Y-%m-%d %H:%M:%S") if r.created_at else ""
-    analysis = rdict.get("analysis", "")
-
-    rows = ""
-    for d in details:
-        st  = d.get("status", "")
-        cls = {"passed": "bg-success", "failed": "bg-danger"}.get(st, "bg-warning")
-        lbl = {"passed": "通过", "failed": "失败"}.get(st, st)
-        err = str(d.get("error") or "-")[:200]
-        rows += (
-            f"<tr><td>{d.get('step','')}</td>"
-            f"<td>{d.get('case_name','-')}</td>"
-            f"<td>{d.get('project_name','')}</td>"
-            f"<td>{d.get('method','')}</td>"
-            f"<td>{d.get('status_code','')}</td>"
-            f"<td><span class='badge {cls}'>{lbl}</span></td>"
-            f"<td>{d.get('duration_ms',0)}ms</td>"
-            f"<td style='max-width:200px;word-break:break-all'>{err}</td></tr>"
-        )
-    analysis_block = f"<h3>AI 分析</h3><pre style='white-space:pre-wrap;background:#f9f9f9;padding:12px;border-radius:4px'>{analysis}</pre>" if analysis else ""
-
-    html_str = f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>{title}</title>
-<style>
-body{{font-family:-apple-system,BlinkMacSystemFont,sans-serif;padding:24px;color:#333;font-size:13px}}
-h2{{margin-bottom:4px}}p.meta{{color:#888;margin-bottom:16px}}
-.stats{{display:flex;gap:16px;margin-bottom:20px}}
-.stat{{background:#f5f5f5;padding:10px 20px;border-radius:6px;text-align:center}}
-.stat .n{{font-size:24px;font-weight:700}}.stat .l{{font-size:12px;color:#888}}
-.green{{color:#52c41a}}.red{{color:#ff4d4f}}.blue{{color:#1890ff}}
-table{{width:100%;border-collapse:collapse;margin-bottom:20px}}
-th,td{{padding:7px 10px;border:1px solid #e8e8e8;font-size:12px}}th{{background:#fafafa;font-weight:600}}
-.badge{{padding:2px 8px;border-radius:4px;font-size:11px}}
-.bg-success{{background:#d9f7be;color:#389e0d}}.bg-danger{{background:#fff1f0;color:#cf1322}}
-.bg-warning{{background:#fffbe6;color:#ad6800}}
-</style></head><body>
-<h2>{title}</h2>
-<p class="meta">生成时间：{created}</p>
-<div class="stats">
-  <div class="stat"><div class="n blue">{total}</div><div class="l">总步骤</div></div>
-  <div class="stat"><div class="n green">{passed}</div><div class="l">通过</div></div>
-  <div class="stat"><div class="n red">{failed}</div><div class="l">失败</div></div>
-  <div class="stat"><div class="n {'green' if pass_rate>=80 else 'red'}">{pass_rate}%</div><div class="l">通过率</div></div>
-</div>
-<table><thead><tr><th>#</th><th>用例名称</th><th>所属项目</th><th>方法</th><th>状态码</th><th>结果</th><th>耗时</th><th>错误信息</th></tr></thead>
-<tbody>{rows}</tbody></table>
-{analysis_block}
-</body></html>"""
-
-    try:
-        pdf_bytes = await html_to_pdf(html_str=html_str)
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-    encoded = quote(f"{r.plan_name or 'plan_report'}_{report_id}.pdf", safe="")
-    return Response(
-        content=pdf_bytes, media_type="application/pdf",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded}"},
-    )
-
-
-@router.delete("/test-plans/reports/batch")
-async def delete_plan_reports_batch(ids: List[int], db: AsyncSession = Depends(get_db)):
-    from sqlalchemy import delete as sql_del
-    if not ids:
-        raise HTTPException(status_code=400, detail="未提供报告ID")
-    await db.execute(sql_del(TestPlanReport).where(TestPlanReport.id.in_(ids)))
-    await db.commit()
-    return {"message": f"已删除 {len(ids)} 条报告"}
-
-
-@router.post("/test-plans/reports/{report_id}/analyze")
-async def analyze_plan_report(report_id: int, db: AsyncSession = Depends(get_db)):
-    import httpx
-    r = (await db.execute(select(TestPlanReport).where(TestPlanReport.id == report_id))).scalar_one_or_none()
-    if not r:
-        raise HTTPException(status_code=404, detail="报告不存在")
-    rdict    = _plan_report_dict(r)
-    analysis = await _ai_analyze_plan_report(rdict)
-    r.analysis = analysis
-    await db.commit()
-    return {"analysis": analysis}
-
-
-async def _ai_analyze_plan_report(report: dict) -> str:
-    import httpx
-    total     = report.get("total", 0)
-    passed    = report.get("passed", 0)
-    failed    = report.get("failed", 0)
-    pass_rate = report.get("pass_rate", 0)
-    plan_name = report.get("plan_name", "")
-    details   = report.get("details") or []
-    failed_steps = [d for d in details if d.get("status") == "failed"]
-    failed_summary = "\n".join(
-        f"- 步骤 {d.get('step')} [{d.get('method','')} {d.get('url','')}] {d.get('case_name','')}: "
-        f"{d.get('error') or '断言失败'}"
-        for d in failed_steps[:20]
-    )
-    prompt = (
-        f"以下是接口测试计划「{plan_name}」的执行报告，请分析失败原因并给出改进建议。\n\n"
-        f"执行概况：共 {total} 个步骤，通过 {passed}，失败 {failed}，通过率 {pass_rate}%\n\n"
-        + (f"失败步骤明细：\n{failed_summary}\n\n" if failed_steps else "所有步骤均通过。\n\n")
-        + "请输出：\n1. 失败原因分析\n2. 修复建议\n3. 测试质量总结"
-    )
-    sys_msg = "你是一名资深测试工程师，擅长分析接口测试报告，给出精准、可操作的建议。用中文回答，使用 Markdown 格式输出。"
-    from tools.llm_client import call_llm
-    return await call_llm(sys_msg, prompt, max_tokens=2048, timeout_secs=90)
-
-
-@router.delete("/test-plans/reports/{report_id}")
-async def delete_plan_report(report_id: int, db: AsyncSession = Depends(get_db)):
-    r = (await db.execute(select(TestPlanReport).where(TestPlanReport.id == report_id))).scalar_one_or_none()
-    if not r:
-        raise HTTPException(status_code=404, detail="报告不存在")
-    await db.delete(r)
-    await db.commit()
-    return {"message": "报告已删除"}

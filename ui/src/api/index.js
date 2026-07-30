@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { ElMessage } from 'element-plus'
 
 const api = axios.create({
   baseURL: '/api/v1',
@@ -33,11 +34,15 @@ api.interceptors.response.use(
       }
       return Promise.reject(error)
     }
+    // 如果请求配置了 skipGlobalError，不展示全局错误提示（由调用方自行处理）
+    if (error.config?.skipGlobalError) {
+      return Promise.reject(error)
+    }
     // 其他错误：取后端 detail 字段展示，没有则用通用提示
     const msg = error.response?.data?.detail || error.message || '请求失败，请稍后重试'
     // 不在登录页时才弹提示（避免循环）
     if (!window.location.pathname.includes('/login')) {
-      import('element-plus').then(({ ElMessage }) => ElMessage.error(msg))
+      ElMessage.error(msg)
     }
     return Promise.reject(error)
   }
@@ -45,10 +50,37 @@ api.interceptors.response.use(
 
 export default api
 
+/**
+ * 通用 PDF 下载辅助：用 axios（携带 Authorization）fetch 二进制流，
+ * 再以 <a> blob URL 触发下载，避免 window.open 丢失 token 的问题。
+ * @param {string} url      后端 PDF 路径，如 /api/v1/pentest/tasks/1/pdf
+ * @param {string} filename 下载文件名，如 report.pdf
+ */
+export async function downloadPdf(url, filename) {
+  try {
+    const blob = await api.get(url, { responseType: 'blob', timeout: 120000 })
+    // 注意：axios 拦截器已 unwrap response.data，此处 blob 本身就是 Blob 对象
+    const blobUrl = URL.createObjectURL(new Blob([blob], { type: 'application/pdf' }))
+    const a = document.createElement('a')
+    a.href = blobUrl
+    a.download = filename || 'report.pdf'
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 10000)
+  } catch (e) {
+    const msg = e.response?.data
+      ? await e.response.data.text?.().catch(() => '') || e.message
+      : e.message
+    ElMessage.error('PDF 导出失败：' + msg)
+  }
+}
+
 export const taskApi = {
   create: (data) => api.post('/tasks', data),
   list: (params) => api.get('/tasks', { params }),
   get: (id) => api.get(`/tasks/${id}`),
+  update: (id, data) => api.put(`/tasks/${id}`, data),
   delete: (id) => api.delete(`/tasks/${id}`)
 }
 
@@ -57,12 +89,18 @@ export const caseApi = {
   create: (data) => api.post('/cases', data),
   update: (id, data) => api.put(`/cases/${id}`, data),
   delete: (id) => api.delete(`/cases/${id}`),
-  generate: (taskId, options = {}) => api.post(`/cases/generate/${taskId}`, options, { timeout: 600000 }),
-  optimize: (taskId) => api.post(`/cases/optimize/${taskId}`, {}, { timeout: 300000 }),
+  generate: (taskId, options = {}, config = {}) => api.post(`/cases/generate/${taskId}`, options, { timeout: 600000, ...config }),
+  optimize: (taskId, wsClientId = 'cases_gen') => api.post(`/cases/optimize/${taskId}`, { ws_client_id: wsClientId }, { timeout: 300000 }),
   coverage: (taskId) => api.get(`/cases/coverage/${taskId}`),
   // 文档变更检测与增量更新
   docDiffCheck: (taskId, data) => api.post(`/cases/doc-diff-check/${taskId}`, data, { timeout: 120000 }),
   incrementalUpdate: (taskId, data) => api.post(`/cases/incremental-update/${taskId}`, data, { timeout: 420000 }),
+  // 用例自我修正 & 覆盖率补全
+  selfCorrect: (taskId, data) => api.post(`/cases/self-correct/${taskId}`, data, { timeout: 300000 }),
+  fillGaps: (taskId, data) => api.post(`/cases/fill-gaps/${taskId}`, data, { timeout: 300000 }),
+  autoFix: (taskId, data) => api.post(`/cases/auto-fix/${taskId}`, data, { timeout: 600000 }),
+  // 获取最近一次执行的失败用例（静默请求，不弹全局错误）
+  latestFailedCases: (taskId) => api.get(`/cases/latest-failed/${taskId}`, { skipGlobalError: true }),
 }
 
 export const executeApi = {
@@ -95,10 +133,11 @@ export const reportApi = {
   get: (taskId) => api.get(`/tasks/${taskId}/report`),
   list: (workspaceId = null) => api.get(`/reports`, { params: workspaceId ? { workspace_id: workspaceId } : {} }),
   getById: (reportId) => api.get(`/reports/${reportId}`),
+  getProgress: (reportId) => api.get(`/reports/${reportId}/progress`),
   delete: (reportId) => api.delete(`/reports/${reportId}`),
   deleteBatch: (reportIds) => api.delete(`/reports`, { data: reportIds }),
   exportHtml: (reportId) => window.open(`/api/v1/reports/${reportId}/export`, '_blank'),
-  exportPdf: (reportId) => window.open(`/api/v1/reports/${reportId}/pdf`, '_blank'),
+  exportPdf: (reportId, name) => downloadPdf(`/reports/${reportId}/pdf`, `${name || `report_${reportId}`}.pdf`),
 }
 
 export const agentApi = {
@@ -112,6 +151,7 @@ export const aiCaseApi = {
   list: (workspaceId = null) => api.get('/ai-cases', { params: workspaceId ? { workspace_id: workspaceId } : {} }),
   getById: (id) => api.get(`/ai-cases/${id}`),
   downloadUrl: (id, format) => `/api/v1/ai-cases/${id}/download?format=${format}`,
+  exportExcel: (id) => api.get(`/ai-cases/${id}/export-excel`, { responseType: 'blob', timeout: 30000 }),
   delete: (id) => api.delete(`/ai-cases/${id}`),
   // 单条用例 CRUD
   addCase: (recordId, data) => api.post(`/ai-cases/${recordId}/cases`, data),
@@ -191,4 +231,46 @@ export const workspaceApi = {
   listMembers: (id) => api.get(`/workspaces/${id}/members`),
   inviteMember: (id, data) => api.post(`/workspaces/${id}/members`, data),
   removeMember: (id, username) => api.delete(`/workspaces/${id}/members/${username}`),
+}
+
+export const pentestApi = {
+  listTasks:    (workspaceId = null) => api.get('/pentest/tasks', { params: workspaceId ? { workspace_id: workspaceId } : {} }),
+  createTask:   (data) => api.post('/pentest/tasks', data),
+  updateTask:   (id, data) => api.put(`/pentest/tasks/${id}`, data),
+  deleteTask:   (id) => api.delete(`/pentest/tasks/${id}`),
+  runTask:      (id) => api.post(`/pentest/tasks/${id}/run`, {}, { timeout: 600000 }),
+  cancelTask:   (id) => api.post(`/pentest/tasks/${id}/cancel`),
+  listFindings: (id, params = {}) => api.get(`/pentest/tasks/${id}/findings`, { params }),
+  exportPdf:    (id, name) => downloadPdf(`/pentest/tasks/${id}/pdf`, `${name || `pentest_${id}`}.pdf`),
+}
+
+// ── 方案C：录制 / 环境变量 / 多浏览器 / pytest 导出 ───────────────────────────
+
+export const recordingApi = {
+  // taskId, url, browserType → POST /recording/start { task_id, url, browser_type }
+  start:  (taskId, url = '', browserType = 'chromium') =>
+    api.post('/recording/start', { task_id: taskId, url, browser_type: browserType }),
+  // sessionId → POST /recording/stop  { session_id }
+  stop:   (sessionId)                  => api.post('/recording/stop', { session_id: sessionId }),
+  status: (sessionId)                  => api.get(`/recording/status/${sessionId}`),
+  // taskId, steps, name → POST /recording/save  { task_id, steps, name, page_title }
+  save:   (taskId, steps, name = '', pageTitle = '')   => api.post('/recording/save', { task_id: taskId, steps, name, page_title: pageTitle }),
+}
+
+export const envVarApi = {
+  list:   (taskId)      => api.get(`/tasks/${taskId}/env-vars`),
+  // create 映射到 upsert 端点
+  create: (taskId, d)   => api.post(`/tasks/${taskId}/env-vars`, d),
+  // delete 只需 varId（后端通过 id 定位）
+  delete: (id)          => api.delete(`/env-vars/${id}`),
+}
+
+export const multiBrowserApi = {
+  execute: (data) => api.post('/execute/multi-browser', data),
+}
+
+export const pytestExportApi = {
+  // export → 生成 + 下载，返回 Blob
+  export: (taskId, opts = {}) =>
+    api.post(`/tasks/${taskId}/export/pytest`, opts, { responseType: 'blob' }),
 }

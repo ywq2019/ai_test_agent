@@ -11,7 +11,7 @@ from tools.config import settings
 from pathlib import Path
 
 # 最多同时运行的浏览器 Context 数量，超出则排队等待
-MAX_CONCURRENT = 3
+MAX_CONCURRENT = 6
 
 
 class BrowserTool:

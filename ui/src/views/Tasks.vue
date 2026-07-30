@@ -2,157 +2,254 @@
   <div class="tasks-page">
     <WorkspaceRequired v-if="auth.role !== 'admin' && !wsStore.currentId" />
     <template v-else>
-    <el-card shadow="hover">
-      <template #header>
-        <div class="card-header">
-          <span>测试任务列表</span>
-          <el-button type="primary" @click="showCreateDialog = true">
-            <el-icon><Plus /></el-icon>
-            新建任务
-          </el-button>
+
+      <!-- 顶部操作栏 -->
+      <div class="page-header">
+        <div class="page-header-left">
+          <span class="page-title">任务管理</span>
+          <el-tag type="info" size="small" style="margin-left:10px">
+            {{ taskStore.tasks.length }} 个任务
+          </el-tag>
         </div>
-      </template>
-
-      <el-table :data="taskStore.tasks" stripe style="width: 100%">
-        <el-table-column prop="id" label="ID" width="80" />
-        <el-table-column prop="name" label="任务名称" min-width="150" />
-        <el-table-column prop="url" label="测试URL" min-width="200" show-overflow-tooltip />
-        <el-table-column prop="browser" label="浏览器" width="100">
-          <template #default="{ row }">
-            <el-tag>{{ row.browser }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column prop="environment" label="环境" width="100">
-          <template #default="{ row }">
-            <el-tag type="info">{{ getEnvLabel(row.environment) }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column prop="status" label="状态" width="100">
-          <template #default="{ row }">
-            <el-tag :type="getStatusType(row.status)">{{ getStatusLabel(row.status) }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column prop="created_at" label="创建时间" width="180">
-          <template #default="{ row }">
-            {{ formatDate(row.created_at) }}
-          </template>
-        </el-table-column>
-        <el-table-column label="操作" width="210" fixed="right">
-          <template #default="{ row }">
-            <div class="action-btns">
-              <el-tooltip content="查看用例" placement="top">
-                <el-button type="primary" link size="small" @click="viewTask(row)">
-                  <el-icon><View /></el-icon>查看
-                </el-button>
-              </el-tooltip>
-              <el-divider direction="vertical" />
-              <el-tooltip content="开始执行测试" placement="top">
-                <el-button type="success" link size="small" @click="startTest(row)">
-                  <el-icon><VideoPlay /></el-icon>测试
-                </el-button>
-              </el-tooltip>
-              <el-divider direction="vertical" />
-              <el-tooltip content="删除任务" placement="top">
-                <el-button type="danger" link size="small" @click="deleteTask(row)">
-                  <el-icon><Delete /></el-icon>删除
-                </el-button>
-              </el-tooltip>
-            </div>
-          </template>
-        </el-table-column>
-      </el-table>
-    </el-card>
-
-    <el-dialog v-model="showCreateDialog" title="创建测试任务" width="600px" @close="onDialogClose">
-      <el-form :model="taskForm" label-width="100px">
-        <el-form-item label="任务名称">
-          <el-input v-model="taskForm.name" placeholder="请输入任务名称" />
-        </el-form-item>
-        <el-form-item label="测试URL">
-          <el-input v-model="taskForm.url" placeholder="请输入待测试页面URL" />
-        </el-form-item>
-        <el-form-item label="需求文档">
-          <el-upload
-            ref="uploadRef"
-            :auto-upload="false"
-            :limit="1"
-            :accept="ACCEPTED_EXTS"
-            :before-upload="() => false"
-            :on-change="handleFileChange"
-            :on-remove="handleFileRemove"
-          >
-            <el-button><el-icon><Upload /></el-icon> 选择文件</el-button>
-            <template #tip>
-              <div class="el-upload__tip">
-                支持：PDF · Word（DOCX/DOC）· Excel（XLSX/XLS）· PowerPoint（PPTX）·
-                Markdown · 纯文本（TXT）· CSV · HTML · JSON
-                <span style="color:#f56c6c;margin-left:6px;">文件大小 ≤ 20MB</span>
-              </div>
-            </template>
-          </el-upload>
-          <el-alert
-            v-if="fileError"
-            :title="fileError"
-            type="error"
-            show-icon
-            :closable="false"
-            style="margin-top:8px;"
-          />
-        </el-form-item>
-        <el-form-item label="浏览器">
-          <el-select v-model="taskForm.browser" style="width: 100%">
-            <el-option label="Chromium" value="chromium" />
-            <el-option label="Firefox" value="firefox" />
-            <el-option label="WebKit" value="webkit" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="测试环境">
-          <el-select v-model="taskForm.environment" style="width: 100%">
-            <el-option label="测试环境" value="test" />
-            <el-option label="预发环境" value="staging" />
-            <el-option label="生产环境" value="production" />
-          </el-select>
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="showCreateDialog = false">取消</el-button>
-        <el-button type="primary" @click="createTask" :loading="creating">创建</el-button>
-      </template>
-    </el-dialog>
-
-    <el-dialog v-model="showParseDialog" title="解析页面" width="800px">
-      <el-form :model="parseForm" label-width="100px">
-        <el-form-item label="页面URL">
-          <el-input v-model="parseForm.url" placeholder="请输入要解析的页面URL" />
-        </el-form-item>
-        <el-form-item label="浏览器">
-          <el-select v-model="parseForm.browser" style="width: 100%">
-            <el-option label="Chromium" value="chromium" />
-            <el-option label="Firefox" value="firefox" />
-            <el-option label="WebKit" value="webkit" />
-          </el-select>
-        </el-form-item>
-      </el-form>
-
-      <div v-if="taskStore.pageElements.length > 0" style="margin-top: 20px;">
-        <el-divider>解析结果</el-divider>
-        <el-tag type="success" style="margin-bottom: 10px;">
-          共解析 {{ taskStore.pageElements.length }} 个可交互元素
-        </el-tag>
-        <el-table :data="taskStore.pageElements.slice(0, 20)" size="small" max-height="300">
-          <el-table-column prop="tag" label="标签" width="80" />
-          <el-table-column prop="type" label="类型" width="80" />
-          <el-table-column prop="name" label="名称" width="120" show-overflow-tooltip />
-          <el-table-column prop="text" label="文本" min-width="150" show-overflow-tooltip />
-          <el-table-column prop="selector" label="选择器" min-width="150" show-overflow-tooltip />
-        </el-table>
+        <el-button type="primary" @click="showCreateDialog = true">
+          <el-icon><Plus /></el-icon>新建任务
+        </el-button>
       </div>
 
-      <template #footer>
-        <el-button @click="showParseDialog = false">关闭</el-button>
-        <el-button type="primary" @click="parsePage" :loading="parsing">开始解析</el-button>
-      </template>
-    </el-dialog>
+      <!-- 空状态 -->
+      <el-empty v-if="taskStore.tasks.length === 0" description="暂无测试任务，点击右上角新建">
+        <el-button type="primary" @click="showCreateDialog = true">
+          <el-icon><Plus /></el-icon>新建第一个任务
+        </el-button>
+      </el-empty>
+
+      <!-- 任务卡片网格 -->
+      <div v-else class="task-grid">
+        <div v-for="task in taskStore.tasks" :key="task.id" class="task-card">
+          <!-- 卡片头 -->
+          <div class="task-card-header">
+            <div class="task-name-row">
+              <el-icon class="task-icon"><Monitor /></el-icon>
+              <span class="task-name" :title="task.name">{{ task.name }}</span>
+            </div>
+            <el-tag :type="getStatusType(task.status)" size="small" effect="plain">
+              {{ getStatusLabel(task.status) }}
+            </el-tag>
+          </div>
+
+          <!-- URL -->
+          <div class="task-url" :title="task.url">
+            <el-icon size="12" style="flex-shrink:0;color:#aaa"><Link /></el-icon>
+            <span class="url-text">{{ task.url || '未设置 URL' }}</span>
+          </div>
+
+          <!-- 元信息行 -->
+          <div class="task-meta">
+            <el-tag size="small" effect="plain" class="browser-tag">
+              <el-icon style="margin-right:3px"><Monitor /></el-icon>
+              {{ browserLabel(task.browser) }}
+            </el-tag>
+            <el-tag size="small" type="info" effect="plain">
+              {{ envLabel(task.environment) }}
+            </el-tag>
+            <span class="task-time">{{ formatDate(task.created_at) }}</span>
+          </div>
+
+          <!-- 统计行 -->
+          <div class="task-stats">
+            <div class="stat-item">
+              <span class="stat-num">{{ caseCountMap[task.id] ?? '—' }}</span>
+              <span class="stat-label">用例</span>
+            </div>
+            <div class="stat-divider"></div>
+            <div class="stat-item">
+              <span class="stat-num">{{ reportCountMap[task.id] ?? '—' }}</span>
+              <span class="stat-label">报告</span>
+            </div>
+          </div>
+
+          <!-- 操作按钮 -->
+          <div class="task-actions">
+            <div class="action-row primary">
+              <el-button size="small" plain @click="goCases(task)">
+                <el-icon><Document /></el-icon>用例<span class="badge">{{ caseCountMap[task.id] ?? '-' }}</span>
+              </el-button>
+              <el-button size="small" plain type="warning" @click="goRecord(task)">
+                <el-icon><VideoCamera /></el-icon>录制
+              </el-button>
+              <el-button size="small" plain type="success" @click="goExecution(task)">
+                <el-icon><VideoPlay /></el-icon>执行
+              </el-button>
+              <el-button size="small" type="primary" plain @click="goReports(task)">
+                <el-icon><DataAnalysis /></el-icon>报告<span class="badge">{{ reportCountMap[task.id] ?? '-' }}</span>
+              </el-button>
+            </div>
+            <div class="action-row secondary">
+              <span class="spacer"></span>
+              <el-button size="small" plain class="btn-edit" @click="openEditDialog(task)">
+                <el-icon><Edit /></el-icon>编辑
+              </el-button>
+              <el-popconfirm
+                title="确定删除该任务？"
+                confirm-button-text="删除"
+                cancel-button-text="取消"
+                confirm-button-type="danger"
+                @confirm="deleteTask(task)"
+              >
+                <template #reference>
+                  <el-button size="small" plain type="danger" class="btn-delete">
+                    <el-icon><Delete /></el-icon>删除
+                  </el-button>
+                </template>
+              </el-popconfirm>
+              <span class="spacer"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 新建任务对话框 -->
+      <el-dialog v-model="showCreateDialog" title="新建测试任务" width="560px" @close="onDialogClose">
+        <el-form :model="taskForm" label-width="90px">
+          <el-form-item label="任务名称" required>
+            <el-input v-model="taskForm.name" placeholder="例如：登录功能回归测试" clearable />
+          </el-form-item>
+          <el-form-item label="目标 URL" required>
+            <el-input v-model="taskForm.url" placeholder="https://example.com/login" clearable>
+              <template #prepend><el-icon><Link /></el-icon></template>
+            </el-input>
+          </el-form-item>
+          <el-form-item label="需求文档">
+            <el-upload
+              ref="uploadRef"
+              :auto-upload="false"
+              :limit="1"
+              :accept="ACCEPTED_EXTS"
+              :on-change="handleFileChange"
+              :on-remove="() => { uploadedFile = null; fileError = '' }"
+              drag
+              style="width:100%"
+            >
+              <el-icon size="28" color="#c0c4cc"><UploadFilled /></el-icon>
+              <div style="font-size:13px;color:#909399;margin-top:6px">
+                拖拽文档到此，或 <em style="color:#409eff">点击上传</em>
+              </div>
+              <template #tip>
+                <div style="font-size:11px;color:#c0c4cc;margin-top:4px">
+                  PDF / Word / Excel / PPTX / Markdown / TXT / JSON，≤ 20MB
+                </div>
+              </template>
+            </el-upload>
+            <el-alert v-if="fileError" :title="fileError" type="error" show-icon :closable="false" style="margin-top:6px" />
+          </el-form-item>
+          <el-row :gutter="12">
+            <el-col :span="12">
+              <el-form-item label="默认浏览器">
+                <el-select v-model="taskForm.browser" style="width:100%">
+                  <el-option label="🌐 Chromium" value="chromium" />
+                  <el-option label="🦊 Firefox" value="firefox" />
+                  <el-option label="🧭 WebKit" value="webkit" />
+                </el-select>
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="测试环境">
+                <el-select v-model="taskForm.environment" style="width:100%">
+                  <el-option label="测试环境" value="test" />
+                  <el-option label="预发环境" value="staging" />
+                  <el-option label="生产环境" value="production" />
+                </el-select>
+              </el-form-item>
+            </el-col>
+          </el-row>
+        </el-form>
+
+        <el-alert
+          title="创建后可在「用例管理」中 AI 生成用例，或在「测试执行」中录制操作步骤"
+          type="info"
+          show-icon
+          :closable="false"
+          style="margin-top:4px"
+        />
+
+        <template #footer>
+          <el-button @click="showCreateDialog = false">取消</el-button>
+          <el-button type="primary" @click="createTask" :loading="creating">创建任务</el-button>
+        </template>
+      </el-dialog>
+
+      <!-- 编辑任务对话框 -->
+      <el-dialog v-model="showEditDialog" title="编辑任务" width="560px" @close="onEditDialogClose">
+        <el-form :model="editForm" label-width="90px">
+          <el-form-item label="任务名称" required>
+            <el-input v-model="editForm.name" placeholder="例如：登录功能回归测试" clearable />
+          </el-form-item>
+          <el-form-item label="目标 URL" required>
+            <el-input v-model="editForm.url" placeholder="https://example.com/login" clearable>
+              <template #prepend><el-icon><Link /></el-icon></template>
+            </el-input>
+          </el-form-item>
+          <el-form-item label="需求文档">
+            <div v-if="editForm.document_path" class="current-doc">
+              <el-icon><Document /></el-icon>
+              <span>{{ editForm.document_path.split('/').pop() || editForm.document_path.split('\\').pop() }}</span>
+            </div>
+            <el-upload
+              ref="editUploadRef"
+              :auto-upload="false"
+              :limit="1"
+              :accept="ACCEPTED_EXTS"
+              :on-change="handleEditFileChange"
+              :on-remove="() => { editUploadedFile = null; editFileError = '' }"
+              drag
+              style="width:100%"
+            >
+              <el-icon size="28" color="#c0c4cc"><UploadFilled /></el-icon>
+              <div style="font-size:13px;color:#909399;margin-top:6px">
+                拖拽新文档到此，或 <em style="color:#409eff">点击上传</em>
+              </div>
+              <template #tip>
+                <div style="font-size:11px;color:#c0c4cc;margin-top:4px">
+                  PDF / Word / Excel / PPTX / Markdown / TXT / JSON，≤ 20MB
+                </div>
+              </template>
+            </el-upload>
+            <el-alert v-if="editFileError" :title="editFileError" type="error" show-icon :closable="false" style="margin-top:6px" />
+          </el-form-item>
+          <el-row :gutter="12">
+            <el-col :span="12">
+              <el-form-item label="默认浏览器">
+                <el-select v-model="editForm.browser" style="width:100%">
+                  <el-option label="Chromium" value="chromium" />
+                  <el-option label="Firefox" value="firefox" />
+                  <el-option label="WebKit" value="webkit" />
+                </el-select>
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="测试环境">
+                <el-select v-model="editForm.environment" style="width:100%">
+                  <el-option label="测试环境" value="test" />
+                  <el-option label="预发环境" value="staging" />
+                  <el-option label="生产环境" value="production" />
+                </el-select>
+              </el-form-item>
+            </el-col>
+          </el-row>
+        </el-form>
+        <el-alert
+          title="文档变更不影响已有用例和执行记录。如需用新文档重新生成用例，请前往「用例管理」手动触发。"
+          type="info"
+          show-icon
+          :closable="false"
+          style="margin-top:4px"
+        />
+        <template #footer>
+          <el-button @click="showEditDialog = false">取消</el-button>
+          <el-button type="primary" @click="updateTask" :loading="updating">保存修改</el-button>
+        </template>
+      </el-dialog>
+
     </template>
   </div>
 </template>
@@ -164,273 +261,470 @@ import { useTaskStore } from '../stores/task'
 import { useWorkspaceStore } from '../stores/workspace'
 import { useAuthStore } from '../stores/auth'
 import WorkspaceRequired from '../components/WorkspaceRequired.vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
-import { View, VideoPlay, Delete, Plus, Upload } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
+import { caseApi, reportApi } from '../api/index'
 
 const ACCEPTED_EXTS = '.pdf,.docx,.doc,.xlsx,.xls,.pptx,.md,.txt,.csv,.html,.htm,.json'
-const ACCEPTED_SET = new Set(ACCEPTED_EXTS.split(','))
-const MAX_SIZE_MB = 20
+const ACCEPTED_SET  = new Set(ACCEPTED_EXTS.split(','))
+const MAX_SIZE_MB   = 20
 
-const router = useRouter()
+const router    = useRouter()
 const taskStore = useTaskStore()
-const wsStore = useWorkspaceStore()
-const auth = useAuthStore()
+const wsStore   = useWorkspaceStore()
+const auth      = useAuthStore()
 
 const showCreateDialog = ref(false)
-const showParseDialog = ref(false)
-const creating = ref(false)
-const parsing = ref(false)
-const uploadRef = ref(null)
-const uploadedFile = ref(null)
-const fileError = ref('')
+const showEditDialog   = ref(false)
+const editingTaskId    = ref(null)
+const creating         = ref(false)
+const updating         = ref(false)
+const uploadRef        = ref(null)
+const uploadedFile     = ref(null)
+const fileError        = ref('')
+const editUploadRef    = ref(null)
+const editUploadedFile = ref(null)
+const editFileError    = ref('')
+
+// 每个任务的用例数 / 报告数
+const caseCountMap   = ref({})
+const reportCountMap = ref({})
 
 const taskForm = reactive({
-  name: '',
-  url: '',
+  name: '', url: '',
   document_path: '',
   browser: 'chromium',
-  environment: 'test'
+  environment: 'test',
 })
 
-const parseForm = reactive({
-  url: '',
-  browser: 'chromium'
+const editForm = reactive({
+  name: '', url: '',
+  document_path: '',
+  browser: 'chromium',
+  environment: 'test',
 })
 
-const getStatusType = (status) => {
-  const types = {
-    created: 'info',
-    parsing: 'warning',
-    parsed: 'info',
-    generating: 'warning',
-    generated: 'info',
-    executing: 'primary',
-    reporting: 'warning',
-    completed: 'success',
-    failed: 'danger'
-  }
-  return types[status] || 'info'
+// ── 辅助 ──────────────────────────────────────────────────────────────────────
+const browserLabel = (b) => ({ chromium: 'Chromium', firefox: 'Firefox', webkit: 'WebKit' }[b] || b || 'Chromium')
+const envLabel     = (e) => ({ test: '测试', staging: '预发', production: '生产' }[e] || e)
+const getStatusType  = (s) => ({ created: 'info', completed: 'success', failed: 'danger', executing: 'primary', generating: 'warning' }[s] || 'info')
+const getStatusLabel = (s) => ({ created: '已创建', completed: '已完成', failed: '失败', executing: '执行中', generating: '生成中', generated: '已生成' }[s] || s || '已创建')
+
+const formatDate = (d) => {
+  if (!d) return ''
+  try { return new Date(d.includes('Z') ? d : d + 'Z').toLocaleDateString('zh-CN') } catch { return '' }
 }
 
-const getStatusLabel = (status) => {
-  const labels = {
-    created: '已创建',
-    parsing: '解析中',
-    parsed: '已解析',
-    generating: '生成中',
-    generated: '已生成',
-    executing: '执行中',
-    reporting: '生成报告',
-    completed: '已完成',
-    failed: '失败'
-  }
-  return labels[status] || status
+// ── 用例/报告数量（并行加载，避免串行 N 次请求）───────────────────────────────
+const loadCounts = async (tasks) => {
+  if (!tasks || tasks.length === 0) return
+  // 并行拉取所有任务的用例列表
+  const results = await Promise.allSettled(
+    tasks.map(t => caseApi.list(t.id).then(cases => ({ id: t.id, count: Array.isArray(cases) ? cases.length : 0 })))
+  )
+  results.forEach(r => {
+    if (r.status === 'fulfilled') {
+      caseCountMap.value[r.value.id] = r.value.count
+    }
+  })
+  // 并行拉取报告数（从报告列表按 task_id 聚合）
+  try {
+    const { reportApi } = await import('../api/index')
+    const wsId = wsStore.currentId
+    const reports = await reportApi.list(wsId)
+    if (Array.isArray(reports)) {
+      const countByTask = {}
+      reports.forEach(r => {
+        if (r.task_id) countByTask[r.task_id] = (countByTask[r.task_id] || 0) + 1
+      })
+      tasks.forEach(t => {
+        reportCountMap.value[t.id] = countByTask[t.id] || 0
+      })
+    }
+  } catch { /* 报告数加载失败不影响主流程 */ }
 }
 
-const getEnvLabel = (env) => {
-  const labels = {
-    test: '测试环境',
-    staging: '预发环境',
-    production: '生产环境'
-  }
-  return labels[env] || env
-}
-
-const formatDate = (dateStr) => {
-  if (!dateStr) return '-'
-  return new Date(dateStr).toLocaleString('zh-CN')
-}
-
+// ── 文件上传 ───────────────────────────────────────────────────────────────────
 const handleFileChange = (file) => {
   fileError.value = ''
-  const raw = file.raw
-  // 扩展名校验
-  const name = raw.name || ''
-  const ext = ('.' + name.split('.').pop()).toLowerCase()
+  const ext = ('.' + file.name.split('.').pop()).toLowerCase()
   if (!ACCEPTED_SET.has(ext)) {
-    fileError.value = `不支持的文件格式「${ext}」，请选择：PDF / Word / Excel / PPTX / Markdown / TXT / CSV / HTML / JSON`
+    fileError.value = `不支持的文件格式 "${ext}"，请上传 PDF / Word / Excel / PPTX / Markdown / TXT / CSV / HTML / JSON`
     uploadRef.value?.clearFiles()
-    uploadedFile.value = null
     return
   }
-  // 大小校验
-  if (raw.size > MAX_SIZE_MB * 1024 * 1024) {
-    fileError.value = `文件大小 ${(raw.size / 1024 / 1024).toFixed(1)} MB 超过限制（${MAX_SIZE_MB} MB）`
+  if (file.raw.size > MAX_SIZE_MB * 1024 * 1024) {
+    fileError.value = `文件过大（${(file.raw.size / 1024 / 1024).toFixed(1)} MB），请上传 20 MB 以内的文件`
     uploadRef.value?.clearFiles()
-    uploadedFile.value = null
     return
   }
-  uploadedFile.value = raw
+  uploadedFile.value = file.raw
 }
 
-const handleFileRemove = () => {
-  uploadedFile.value = null
-  fileError.value = ''
+const handleEditFileChange = (file) => {
+  editFileError.value = ''
+  const ext = ('.' + file.name.split('.').pop()).toLowerCase()
+  if (!ACCEPTED_SET.has(ext)) {
+    editFileError.value = `不支持的文件格式 "${ext}"`
+    editUploadRef.value?.clearFiles()
+    return
+  }
+  if (file.raw.size > MAX_SIZE_MB * 1024 * 1024) {
+    editFileError.value = `文件过大（${(file.raw.size / 1024 / 1024).toFixed(1)} MB），请上传 20 MB 以内的文件`
+    editUploadRef.value?.clearFiles()
+    return
+  }
+  editUploadedFile.value = file.raw
 }
 
 const onDialogClose = () => {
-  fileError.value = ''
+  fileError.value   = ''
   uploadedFile.value = null
   uploadRef.value?.clearFiles()
+  Object.assign(taskForm, { name: '', url: '', document_path: '', browser: 'chromium', environment: 'test' })
 }
 
+// ── 创建任务（仅创建，不自动生成，引导用户去用例页） ─────────────────────────
 const createTask = async () => {
-  if (!taskForm.name || !taskForm.url) {
-    ElMessage.warning('请填写任务名称和URL')
-    return
-  }
+  if (!taskForm.name.trim()) { ElMessage.warning('请填写任务名称'); return }
+  if (!taskForm.url.trim())  { ElMessage.warning('请填写目标 URL'); return }
 
   creating.value = true
-
-  // Step 1: 上传文档（可选）
   let docPath = ''
+
   if (uploadedFile.value) {
     try {
-      const uploadRes = await taskStore.uploadDocument(uploadedFile.value)
-      docPath = uploadRes.path || ''
-    } catch (err) {
-      ElMessage.warning('需求文档上传失败，将跳过文档解析：' + (err.message || err))
-    }
+      const res = await taskStore.uploadDocument(uploadedFile.value)
+      docPath = res.path || ''
+    } catch { ElMessage.warning('需求文档上传失败，已跳过') }
   }
 
-  // Step 2: 创建任务（核心步骤，失败则终止）
-  let task
   try {
-    task = await taskStore.createTask({ ...taskForm, document_path: docPath, workspace_id: wsStore.currentId || null })
-    ElMessage.success('任务创建成功')
+    await taskStore.createTask({
+      ...taskForm,
+      document_path: docPath,
+      workspace_id: wsStore.currentId || null,
+    })
+    ElMessage.success('任务创建成功，可前往「用例管理」AI 生成用例或「测试执行」录制步骤')
     showCreateDialog.value = false
-    resetForm()
-  } catch (error) {
-    ElMessage.error('任务创建失败: ' + (error.response?.data?.detail || error.message))
+    onDialogClose()
+    await loadCounts(taskStore.tasks)
+  } catch (e) {
+    ElMessage.error('创建失败：' + (e.response?.data?.detail || e.message))
+  } finally {
     creating.value = false
-    return
   }
-
-  // Step 3: 解析页面（失败给提示但不中断流程）
-  try {
-    ElMessage.info('正在解析页面元素...')
-    await taskStore.parsePage(task.url, task.browser, task.id)
-    ElMessage.success('页面解析完成')
-  } catch (err) {
-    ElMessage.warning('页面解析失败（可稍后在用例管理中手动解析）：' + (err.message || err))
-    creating.value = false
-    return
-  }
-
-  // Step 4: 解析文档（可选，失败继续）
-  if (docPath) {
-    try {
-      ElMessage.info('正在解析需求文档...')
-      await taskStore.parseDocument(docPath)
-      ElMessage.success('需求文档解析完成')
-    } catch (err) {
-      ElMessage.warning('需求文档解析失败，AI 将仅依据页面元素生成用例')
-    }
-  }
-
-  // Step 5: AI 生成用例
-  try {
-    ElMessage.info('正在生成测试用例...')
-    await taskStore.generateCases(task.id)
-    ElMessage.success('测试用例生成完成')
-  } catch (err) {
-    ElMessage.warning('用例生成失败（可稍后在用例管理中重新生成）：' + (err.message || err))
-  }
-
-  creating.value = false
 }
 
-const resetForm = () => {
-  taskForm.name = ''
-  taskForm.url = ''
-  taskForm.document_path = ''
-  taskForm.browser = 'chromium'
-  taskForm.environment = 'test'
-  uploadedFile.value = null
-  fileError.value = ''
-  uploadRef.value?.clearFiles()
-}
-
-const viewTask = (task) => {
-  router.push({ name: 'Cases', query: { taskId: task.id } })
-}
-
-const startTest = (task) => {
-  router.push({ name: 'Execution', query: { taskId: task.id } })
-}
-
+// ── 删除 ──────────────────────────────────────────────────────────────────────
 const deleteTask = async (task) => {
   try {
-    await ElMessageBox.confirm('确定要删除这个任务吗?', '提示', {
-      type: 'warning'
-    })
     await taskStore.deleteTask(task.id)
-    ElMessage.success('删除成功')
-  } catch (error) {
-    if (error !== 'cancel') {
-      ElMessage.error('删除失败')
-    }
-  }
+    ElMessage.success('已删除')
+    delete caseCountMap.value[task.id]
+    delete reportCountMap.value[task.id]
+  } catch { ElMessage.error('删除失败') }
 }
 
-const parsePage = async () => {
-  if (!parseForm.url) {
-    ElMessage.warning('请输入要解析的页面URL')
-    return
+// ── 编辑 ──────────────────────────────────────────────────────────────────────
+const openEditDialog = (task) => {
+  editingTaskId.value = task.id
+  editForm.name          = task.name || ''
+  editForm.url           = task.url || ''
+  editForm.document_path = task.document_path || ''
+  editForm.browser       = task.browser || 'chromium'
+  editForm.environment   = task.environment || 'test'
+  editUploadedFile.value = null
+  editFileError.value    = ''
+  editUploadRef.value?.clearFiles()
+  showEditDialog.value = true
+}
+
+const updateTask = async () => {
+  if (!editForm.name.trim()) { ElMessage.warning('请填写任务名称'); return }
+  if (!editForm.url.trim())  { ElMessage.warning('请填写目标 URL'); return }
+  updating.value = true
+
+  let docPath = editForm.document_path  // 未上传新文档时保留原路径
+  if (editUploadedFile.value) {
+    try {
+      const res = await taskStore.uploadDocument(editUploadedFile.value)
+      docPath = res.path || ''
+    } catch { ElMessage.warning('文档上传失败，已跳过') }
   }
 
-  parsing.value = true
   try {
-    await taskStore.parsePage(parseForm.url, parseForm.browser)
-    ElMessage.success('页面解析完成')
-  } catch (error) {
-    ElMessage.error('解析失败: ' + error.message)
+    await taskStore.updateTask(editingTaskId.value, {
+      name: editForm.name.trim(),
+      url: editForm.url.trim(),
+      document_path: docPath,
+      browser: editForm.browser,
+      environment: editForm.environment,
+    })
+    ElMessage.success('任务已更新')
+    showEditDialog.value = false
+  } catch (e) {
+    ElMessage.error('更新失败：' + (e.response?.data?.detail || e.message))
   } finally {
-    parsing.value = false
+    updating.value = false
   }
 }
 
+const onEditDialogClose = () => {
+  editingTaskId.value = null
+  editUploadedFile.value = null
+  editFileError.value = ''
+  editUploadRef.value?.clearFiles()
+  Object.assign(editForm, { name: '', url: '', document_path: '', browser: 'chromium', environment: 'test' })
+}
+
+// ── 跳转 ──────────────────────────────────────────────────────────────────────
+const goCases     = (t) => router.push({ name: 'Cases',     query: { taskId: t.id } })
+const goExecution = (t) => router.push({ name: 'Execution', query: { taskId: t.id } })
+const goRecord    = (t) => router.push({ name: 'Execution', query: { taskId: t.id, startRecord: '1' } })
+const goReports   = (t) => router.push({ name: 'Reports' })
+
+// ── 生命周期 ───────────────────────────────────────────────────────────────────
 onMounted(async () => {
-  // 如果 workspace 已初始化直接 fetch；否则等 watch 触发
   if (wsStore.initialized) {
     await taskStore.fetchTasks(wsStore.currentId)
+    await loadCounts(taskStore.tasks)
   }
 })
 
-// workspace 初始化完成 或 切换工作空间 时刷新列表
-watch(() => wsStore.currentId, (id) => {
-  taskStore.fetchTasks(id)
+watch(() => wsStore.currentId, async (id) => {
+  await taskStore.fetchTasks(id)
+  await loadCounts(taskStore.tasks)
 })
-watch(() => wsStore.initialized, (ready) => {
-  if (ready) taskStore.fetchTasks(wsStore.currentId)
+
+watch(() => wsStore.initialized, async (ready) => {
+  if (ready) {
+    await taskStore.fetchTasks(wsStore.currentId)
+    await loadCounts(taskStore.tasks)
+  }
 })
 </script>
 
 <style scoped>
-.tasks-page {
-  padding: 0;
-}
+.tasks-page { padding: 0; }
 
-.card-header {
+/* 顶部操作栏 */
+.page-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  margin-bottom: 20px;
+}
+.page-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #1a2332;
 }
 
-.action-btns {
+/* 卡片网格 */
+.task-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+}
+
+.task-card {
+  background: #fff;
+  border: 1px solid #e8ecf0;
+  border-radius: 10px;
+  padding: 18px;
+  transition: box-shadow 0.2s, border-color 0.2s;
   display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.task-card:hover {
+  box-shadow: 0 4px 16px rgba(0,0,0,0.08);
+  border-color: #c6d8f0;
+}
+
+/* 卡片头 */
+.task-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.task-name-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+.task-icon {
+  font-size: 16px;
+  color: #409eff;
+  flex-shrink: 0;
+}
+
+.task-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: #1a2332;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* URL */
+.task-url {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: #909399;
+  min-height: 18px;
+}
+
+.url-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+}
+
+/* 元信息 */
+.task-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.browser-tag { font-size: 11px !important; }
+
+.task-time {
+  font-size: 11px;
+  color: #c0c4cc;
+  margin-left: auto;
+}
+
+/* 统计 */
+.task-stats {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: #f8fafc;
+  border-radius: 6px;
+}
+
+.stat-item {
+  display: flex;
+  flex-direction: column;
   align-items: center;
   gap: 2px;
 }
 
-.action-btns .el-button.is-link {
-  padding: 4px 6px;
-  font-size: 13px;
-  gap: 3px;
+.stat-num {
+  font-size: 18px;
+  font-weight: 700;
+  color: #303133;
+  line-height: 1;
 }
 
-.action-btns .el-divider--vertical {
-  margin: 0 2px;
-  height: 14px;
+.stat-label {
+  font-size: 11px;
+  color: #909399;
+}
+
+.stat-divider {
+  width: 1px;
+  height: 28px;
+  background: #e4e7ed;
+}
+
+/* 操作按钮 */
+.task-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.action-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.action-row.secondary {
+  padding-top: 8px;
+  border-top: 1px dashed #ebeef5;
+}
+
+.action-row.secondary .el-button {
+  font-size: 12px;
+  height: 28px;
+}
+
+.spacer {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 编辑/删除按钮美化 */
+.btn-edit {
+  --el-button-hover-text-color: var(--el-color-primary);
+  --el-button-hover-border-color: var(--el-color-primary-light-5);
+  --el-button-hover-bg-color: var(--el-color-primary-light-9);
+}
+
+.btn-delete {
+  opacity: .75;
+  transition: opacity .2s;
+}
+.btn-delete:hover {
+  opacity: 1;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  max-width: 40px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #909399;
+  background: #f4f4f5;
+  margin-left: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.current-doc {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: #f0f9eb;
+  border: 1px solid #e1f3d8;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #67c23a;
+  margin-bottom: 8px;
+}
+
+.current-doc .el-icon {
+  flex-shrink: 0;
+}
+
+.current-doc span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>

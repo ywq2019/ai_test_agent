@@ -131,12 +131,22 @@
                   </el-button>
                 </div>
                 <!-- 下载组 -->
-                <div class="btn-group" v-if="current.has_md || current.has_xmind">
+                <div class="btn-group" v-if="current.has_md || current.has_xmind || current.case_count > 0">
                   <el-button v-if="current.has_md" size="small" @click="download(current.id, 'md')">
                     <el-icon><Download /></el-icon>MD
                   </el-button>
                   <el-button v-if="current.has_xmind" size="small" type="warning" plain @click="download(current.id, 'xmind')">
                     <el-icon><Download /></el-icon>XMind
+                  </el-button>
+                  <el-button
+                    v-if="current.case_count > 0"
+                    size="small"
+                    type="success"
+                    plain
+                    :loading="exportingExcel"
+                    @click="downloadExcel(current)"
+                  >
+                    <el-icon><Download /></el-icon>Excel
                   </el-button>
                 </div>
               </div>
@@ -355,8 +365,23 @@
 
           <!-- 进度条（提取/映射进行中时显示） -->
           <div v-if="tracExtracting || tracMapping" class="trac-progress-box">
-            <el-progress :percentage="tracPercent" :status="tracPercent >= 100 ? 'success' : ''" :stroke-width="10" />
-            <p class="trac-stage-text">{{ tracStage }}</p>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+              <el-icon class="is-loading" style="color:#409eff;font-size:16px"><Loading /></el-icon>
+              <span style="font-size:13px;font-weight:600;color:#333">
+                {{ tracExtracting ? '正在提取需求...' : '正在建立用例映射...' }}
+              </span>
+            </div>
+            <el-progress
+              :percentage="tracPercent"
+              :status="tracPercent >= 100 ? 'success' : undefined"
+              :stroke-width="12"
+              :striped="tracPercent < 100"
+              :striped-flow="tracPercent < 100"
+              :duration="8"
+            />
+            <p class="trac-stage-text" style="margin-top:8px;min-height:18px;font-size:12px;color:#666;transition:all .3s">
+              {{ tracStage }}
+            </p>
           </div>
 
           <div v-else-if="tracStep === 0" style="text-align:center">
@@ -368,7 +393,7 @@
           <div v-else-if="tracStep === 1" style="text-align:center">
             <p style="color:#666;margin-bottom:8px">已提取 <b>{{ tracRequirements.length }}</b> 条需求，点击下方建立用例映射</p>
             <p style="color:#999;font-size:12px;margin-bottom:16px">AI 将分析每条用例对应哪些需求（用例较多时需要几分钟）</p>
-            <el-button type="primary" :loading="tracMapping" @click="doMapCases">
+            <el-button type="primary" :loading="tracMapping" :disabled="tracExtracting" @click="doMapCases">
               <el-icon><Connection /></el-icon> 建立用例-需求映射
             </el-button>
           </div>
@@ -394,12 +419,25 @@
               提取于 {{ formatDate(tracData.extracted_at) }}
               · 映射于 {{ formatDate(tracData.mapped_at) }}
               <el-button link size="small" @click="doExtractRequirements" :loading="tracExtracting" style="margin-left:8px">重新提取</el-button>
-              <el-button link size="small" @click="doMapCases" :loading="tracMapping">重新映射</el-button>
+              <el-button link size="small" @click="doMapCases" :loading="tracMapping" :disabled="tracExtracting">重新映射</el-button>
             </div>
 
             <!-- 重新提取/映射时的进度条（在已有矩阵基础上操作） -->
             <div v-if="tracExtracting || tracMapping" class="trac-progress-box" style="margin-top:12px">
-              <el-progress :percentage="tracPercent" :stroke-width="8" />
+              <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+                <el-icon class="is-loading" style="color:#409eff;font-size:14px"><Loading /></el-icon>
+                <span style="font-size:12px;font-weight:600;color:#333">
+                  {{ tracExtracting ? '重新提取需求中...' : '重新映射中...' }}
+                </span>
+              </div>
+              <el-progress
+                :percentage="tracPercent"
+                :status="tracPercent >= 100 ? 'success' : undefined"
+                :stroke-width="8"
+                :striped="tracPercent < 100"
+                :striped-flow="tracPercent < 100"
+                :duration="8"
+              />
               <p class="trac-stage-text">{{ tracStage }}</p>
             </div>
           </div>
@@ -528,8 +566,21 @@
 
         <!-- 补充进行中进度条 -->
         <div v-if="supplementing" class="gap-progress">
-          <el-progress :percentage="supplementPercent" :stroke-width="8" />
-          <p style="font-size:13px;color:#666;margin-top:6px">{{ supplementStage }}</p>
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
+            <el-icon class="is-loading" style="color:#409eff;font-size:14px"><Loading /></el-icon>
+            <span style="font-size:13px;font-weight:600;color:#333">正在生成补充用例...</span>
+          </div>
+          <el-progress
+            :percentage="supplementPercent"
+            :status="supplementPercent >= 100 ? 'success' : undefined"
+            :stroke-width="8"
+            :striped="supplementPercent < 100"
+            :striped-flow="supplementPercent < 100"
+            :duration="8"
+          />
+          <p style="font-size:12px;color:#666;margin-top:6px;min-height:16px;transition:all .3s">
+            {{ supplementStage }}
+          </p>
         </div>
       </div>
       <template #footer>
@@ -1026,6 +1077,7 @@ import { aiCaseApi, documentApi } from '../api'
 import { useWorkspaceStore } from '../stores/workspace'
 import { useAuthStore } from '../stores/auth'
 import WorkspaceRequired from '../components/WorkspaceRequired.vue'
+import { useWebSocket } from '../composables/useWebSocket'
 
 // ============================================================
 // Diff / 增量更新状态
@@ -1244,7 +1296,86 @@ const tracFilter        = ref('')
 const tracPercent       = ref(0)
 const tracStage         = ref('')
 const tracOrphanCases   = ref([])   // 用例视角：未关联需求的用例（可操作）
-let   tracWs            = null
+
+// ── 需求追踪矩阵 WebSocket ──
+// 任务开始时间戳，用于区分本次操作完成还是历史数据
+let _extractStartTime = 0
+let _mapStartTime = 0
+const { connect: _tracConnect, disconnect: disconnectTracWS } = useWebSocket((msg) => {
+  if (msg.type === 'trac_gen_progress') {
+    // 补充用例进度走同一个 WS 频道，用 supplementing 状态区分
+    if (supplementing.value) {
+      supplementPercent.value = msg.percent ?? supplementPercent.value
+      supplementStage.value   = msg.stage ?? supplementStage.value
+      if (msg.error) {
+        ElMessage.error(msg.stage || '补充用例生成失败')
+        supplementing.value = false
+        supplementingReqId.value = ''
+        disconnectTracWS()
+      }
+      return
+    }
+    tracPercent.value = msg.percent ?? tracPercent.value
+    tracStage.value   = msg.stage ?? tracStage.value
+    if (msg.error) {
+      ElMessage.error(msg.stage || '操作失败')
+      tracExtracting.value = false
+      tracMapping.value    = false
+      _stopTracPoll()
+      disconnectTracWS()
+    }
+  } else if (msg.type === 'trac_supplement_done') {
+    supplementPercent.value = 100
+    supplementStage.value = `已生成 ${msg.count} 条补充用例`
+    supplementing.value = false
+    supplementingReqId.value = ''
+    gapDialogVisible.value = false
+    ElMessage.success(`成功为需求 ${msg.req_id} 生成 ${msg.count} 条补充用例`)
+    aiCaseApi.getTraceability(tracTarget.value.id).then(res => {
+      _applyTracData(res)
+    }).catch(() => {})
+    aiCaseApi.getById(tracTarget.value.id).then(r => {
+      const idx = records.value.findIndex(x => x.id === r.id)
+      if (idx !== -1) records.value[idx] = r
+      if (current.value?.id === r.id) current.value = r
+    }).catch(() => {})
+    disconnectTracWS()
+  } else if (msg.type === 'trac_extract_done') {
+    _stopTracPoll()
+    // extracted_at 是服务端 UTC 时间字符串（无 Z 后缀），加 Z 让浏览器正确解析为 UTC
+    const extractedStr = msg.extracted_at ? msg.extracted_at.replace(/Z?$/, 'Z') : ''
+    const extractedTs  = extractedStr ? new Date(extractedStr).getTime() : Date.now()
+    if (extractedTs < _extractStartTime - 5000) return   // 明显早于本次操作，忽略旧消息
+    tracRequirements.value = msg.requirements || []
+    tracPercent.value = 100
+    tracStage.value   = `已提取 ${msg.count} 条需求，请点「重新映射」建立用例关联`
+    tracExtracting.value = false
+    if (!tracData.value?.ready) {
+      tracData.value = null
+    }
+    ElMessage.success(`已提取 ${msg.count} 条需求`)
+    disconnectTracWS()
+  } else if (msg.type === 'trac_map_done') {
+    _stopTracPoll()
+    const mappedStr = msg.mapped_at ? msg.mapped_at.replace(/Z?$/, 'Z') : ''
+    const mappedTs  = mappedStr ? new Date(mappedStr).getTime() : Date.now()
+    if (mappedTs < _mapStartTime - 5000) return   // 明显早于本次操作，忽略旧消息
+    tracPercent.value = 100
+    tracStage.value   = '映射完成，正在加载矩阵...'
+    tracMapping.value = false
+    aiCaseApi.getTraceability(tracTarget.value.id).then(res => {
+      _applyTracData(res)
+      ElMessage.success('追踪矩阵已生成')
+    }).catch(() => {})
+    disconnectTracWS()
+  }
+})
+// clientId 按 record_id + username 隔离，支持多用户并发不互相干扰
+const _tracClientId = () => {
+  const username = auth.username?.value || auth.username || 'anonymous'
+  return `trac_gen_${tracTarget.value?.id || 0}_${username}`
+}
+const connectTracWS = () => _tracConnect(_tracClientId())
 
 const tracStep = computed(() => {
   if (!tracRequirements.value.length) return 0
@@ -1267,63 +1398,17 @@ const tracRowStyle = ({ row }) => {
   return {}
 }
 
-function connectTracWS() {
-  if (tracWs && tracWs.readyState < 2) return
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-  tracWs = new WebSocket(`${proto}://${location.host}/ws?client_id=trac_gen`)
-  tracWs.onmessage = (e) => {
-    try {
-      const msg = JSON.parse(e.data)
-      // 心跳 ping → 回 pong
-      if (msg.type === 'ping') { tracWs?.readyState === 1 && tracWs.send(JSON.stringify({ type: 'pong' })); return }
-      if (msg.type === 'trac_gen_progress') {
-        tracPercent.value = msg.percent ?? tracPercent.value
-        tracStage.value   = msg.stage ?? tracStage.value
-        if (msg.error) {
-          ElMessage.error(msg.stage || '操作失败')
-          tracExtracting.value = false
-          tracMapping.value    = false
-          disconnectTracWS()
-        }
-      } else if (msg.type === 'trac_extract_done') {
-        // 提取完成
-        tracRequirements.value = msg.requirements || []
-        tracPercent.value = 100
-        tracStage.value   = `已提取 ${msg.count} 条需求，请点「重新映射」建立用例关联`
-        tracExtracting.value = false
-        // 若当前已有矩阵（重新提取场景），不清空矩阵，保留视图，只提示用户
-        if (!tracData.value?.ready) {
-          tracData.value = null   // 首次提取：进入映射步骤
-        }
-        ElMessage.success(`已提取 ${msg.count} 条需求`)
-        disconnectTracWS()
-      } else if (msg.type === 'trac_map_done') {
-        // 映射完成，拉取矩阵
-        tracPercent.value = 100
-        tracStage.value   = '映射完成，正在加载矩阵...'
-        tracMapping.value = false
-        aiCaseApi.getTraceability(tracTarget.value.id).then(res => {
-          _applyTracData(res)
-          ElMessage.success('追踪矩阵已生成')
-        }).catch(() => {})
-        disconnectTracWS()
-      }
-    } catch (_) {}
-  }
-  tracWs.onerror = () => {}
-  tracWs.onclose = () => {}
-}
-
-function disconnectTracWS() {
-  if (tracWs) { tracWs.close(); tracWs = null }
-}
-
 // 统一设置矩阵数据，同步 tracOrphanCases
 const _applyTracData = (res) => {
   tracData.value = res
   tracOrphanCases.value = res?.orphan_cases ? [...res.orphan_cases] : []
-  if (res?.ready) {
-    tracRequirements.value = res.matrix?.map(row => ({ id: row.req_id })) || []
+  // 后端始终返回 requirements 字段；映射完成时也可从 matrix 推断
+  if (res?.requirements?.length) {
+    tracRequirements.value = res.requirements
+  } else if (res?.ready && res.matrix?.length) {
+    tracRequirements.value = res.matrix.map(row => ({
+      id: row.req_id, title: row.title, module: row.module
+    }))
   }
 }
 
@@ -1340,10 +1425,8 @@ const openTraceability = async (r) => {
   tracLoading.value = true
   try {
     const res = await aiCaseApi.getTraceability(r.id)
+    // _applyTracData 统一恢复状态；不再用 placeholder 覆盖真实需求列表
     _applyTracData(res)
-    if (!res.ready && res.extracted_at) {
-      tracRequirements.value = [{ id: 'placeholder' }]
-    }
   } catch (e) {
     ElMessage.error('获取追踪数据失败: ' + (e.response?.data?.detail || e.message))
   } finally {
@@ -1353,52 +1436,64 @@ const openTraceability = async (r) => {
 
 const doExtractRequirements = async () => {
   if (!tracTarget.value) return
+  _stopTracPoll()
+  disconnectTracWS()
   tracExtracting.value = true
+  tracMapping.value    = false
   tracPercent.value = 10
   tracStage.value = '正在启动需求提取...'
+  _extractStartTime = Date.now()   // 记录本次提取开始时间
   connectTracWS()
   try {
     await aiCaseApi.extractRequirements(tracTarget.value.id)
-    // 接口立即返回，结果通过 WebSocket 推送
-    // 兜底：若 WebSocket 断线，120s 后轮询数据库检查结果
     _startTracPoll('extract')
   } catch (e) {
     ElMessage.error('需求提取失败: ' + (e.response?.data?.detail || e.message))
     tracExtracting.value = false
+    _stopTracPoll()
     disconnectTracWS()
   }
 }
 
 const doMapCases = async () => {
   if (!tracTarget.value) return
-  tracMapping.value = true
+  _stopTracPoll()
+  disconnectTracWS()
+  tracMapping.value    = true
+  tracExtracting.value = false
   tracPercent.value = 10
   tracStage.value = '正在启动用例映射...'
+  _mapStartTime = Date.now()       // 记录本次映射开始时间
   connectTracWS()
   try {
     await aiCaseApi.mapCasesToReqs(tracTarget.value.id)
-    // 接口立即返回，结果通过 WebSocket 推送
-    // 兜底：若 WebSocket 断线，120s 后轮询数据库检查结果
     _startTracPoll('map')
   } catch (e) {
     ElMessage.error('映射失败: ' + (e.response?.data?.detail || e.message))
     tracMapping.value = false
+    _stopTracPoll()
     disconnectTracWS()
   }
 }
 
 // ── 追踪任务轮询兜底 ─────────────────────────────────────────────────────────
 // WebSocket 断线时，定时拉接口检查任务是否已完成
-let _tracPollTimer = null
+let _tracPollTimer   = null   // setInterval 句柄
+let _tracPollTimeout = null   // setTimeout  句柄（首次延迟）
 
 function _startTracPoll(mode) {
-  if (_tracPollTimer) return
-  const FIRST_DELAY = 30000   // 首次轮询延迟30秒（给任务时间）
-  const INTERVAL    = 10000   // 之后每10秒查一次
-  let attempts = 0
-  const MAX_ATTEMPTS = 24     // 最多查4分钟
+  // 先清掉之前所有 timer，确保新的 mode 不会被旧 timer 干扰
+  _stopTracPoll()
+
+  const FIRST_DELAY  = 15000   // 首次延迟15秒（降低延迟，提升体验）
+  const INTERVAL     = 10000   // 之后每10秒查一次
+  let   attempts     = 0
+  const MAX_ATTEMPTS = 24      // 最多查4分钟
 
   const check = async () => {
+    // 操作已被 WS 处理完成（状态已归零），轮询不应再触发任何副作用
+    if (mode === 'extract' && !tracExtracting.value) { _stopTracPoll(); return }
+    if (mode === 'map'     && !tracMapping.value)    { _stopTracPoll(); return }
     if (!tracTarget.value) { _stopTracPoll(); return }
     attempts++
     if (attempts > MAX_ATTEMPTS) {
@@ -1411,35 +1506,43 @@ function _startTracPoll(mode) {
     try {
       const res = await aiCaseApi.getTraceability(tracTarget.value.id)
       if (mode === 'extract') {
-        // 有 requirements_data 说明提取完成
-        if (res.extracted_at) {
+        // extracted_at 是服务端 UTC 字符串，加 Z 正确解析，再与本次开始时间对比
+        const extractedStr = res.extracted_at ? res.extracted_at.replace(/Z?$/, 'Z') : ''
+        const extractedTs  = extractedStr ? new Date(extractedStr).getTime() : 0
+        if (res.extracted_at && extractedTs > _extractStartTime - 5000) {
           _stopTracPoll()
           tracExtracting.value = false
-          tracRequirements.value = res.matrix?.map(r => ({ id: r.req_id })) || [{ id: 'placeholder' }]
+          const reqs = res.requirements?.length
+            ? res.requirements
+            : res.matrix?.map(r => ({ id: r.req_id, title: r.title, module: r.module }))
+          tracRequirements.value = reqs?.length ? reqs : [{ id: 'placeholder' }]
           if (!tracData.value?.ready) tracData.value = null
-          ElMessage.success('需求提取完成（轮询兜底），请建立映射')
+          ElMessage.success('需求提取完成，请建立映射')
         }
       } else if (mode === 'map') {
-        // ready=true 说明映射完成
-        if (res.ready) {
+        const mappedStr = res.mapped_at ? res.mapped_at.replace(/Z?$/, 'Z') : ''
+        const mappedTs  = mappedStr ? new Date(mappedStr).getTime() : 0
+        if (res.ready && mappedTs > _mapStartTime - 5000) {
           _stopTracPoll()
           tracMapping.value = false
           _applyTracData(res)
-          ElMessage.success('映射完成（轮询兜底），追踪矩阵已生成')
+          ElMessage.success('映射完成，追踪矩阵已生成')
         }
       }
     } catch (_) {}
   }
 
-  // 首次延迟后再开始
-  setTimeout(() => {
+  // 存储 setTimeout 句柄，确保 _stopTracPoll 能清掉它
+  _tracPollTimeout = setTimeout(() => {
+    _tracPollTimeout = null
     check()
     _tracPollTimer = setInterval(check, INTERVAL)
   }, FIRST_DELAY)
 }
 
 function _stopTracPoll() {
-  if (_tracPollTimer) { clearInterval(_tracPollTimer); _tracPollTimer = null }
+  if (_tracPollTimeout) { clearTimeout(_tracPollTimeout);   _tracPollTimeout = null }
+  if (_tracPollTimer)   { clearInterval(_tracPollTimer);    _tracPollTimer   = null }
 }
 
 // ── 缺口分析 & 补充用例 ───────────────────────────────────────────────────────
@@ -1484,44 +1587,8 @@ const doSupplementCases = async () => {
   supplementPercent.value = 10
   supplementStage.value = '正在启动补充用例生成...'
   supplementingReqId.value = gapData.value.req_id
+  // 复用 tracWS 同一频道，onMessage 里已处理 trac_supplement_done
   connectTracWS()
-
-  // 监听补充完成事件（复用 tracWs，追加 trac_supplement_done 处理）
-  const originalOnMessage = tracWs.onmessage
-  tracWs.onmessage = (e) => {
-    try {
-      const msg = JSON.parse(e.data)
-      if (msg.type === 'trac_gen_progress') {
-        supplementPercent.value = msg.percent ?? supplementPercent.value
-        supplementStage.value   = msg.stage ?? supplementStage.value
-        if (msg.error) {
-          ElMessage.error(msg.stage || '补充用例生成失败')
-          supplementing.value = false
-          supplementingReqId.value = ''
-          disconnectTracWS()
-        }
-      } else if (msg.type === 'trac_supplement_done') {
-        supplementPercent.value = 100
-        supplementStage.value = `已生成 ${msg.count} 条补充用例`
-        supplementing.value = false
-        supplementingReqId.value = ''
-        gapDialogVisible.value = false
-        ElMessage.success(`成功为需求 ${msg.req_id} 生成 ${msg.count} 条补充用例`)
-        // 重新加载追踪矩阵（含新增用例），同时刷新主列表
-        aiCaseApi.getTraceability(tracTarget.value.id).then(res => {
-          _applyTracData(res)
-        }).catch(() => {})
-        // 同步刷新右侧用例预览（current）
-        aiCaseApi.getById(tracTarget.value.id).then(r => {
-          const idx = records.value.findIndex(x => x.id === r.id)
-          if (idx !== -1) records.value[idx] = r
-          if (current.value?.id === r.id) current.value = r
-        }).catch(() => {})
-        disconnectTracWS()
-      }
-    } catch (_) {}
-  }
-
   try {
     const missing = selectedDimensions.value.map(i => gapData.value.missing_dimensions[i])
     await aiCaseApi.supplementCases(tracTarget.value.id, {
@@ -1602,49 +1669,32 @@ const caseDetailVisible = ref(false)
 const detailCase = ref(null)
 
 // ---------- WebSocket（AI 生成进度） ----------
-let ws = null
-
-function connectGenWS() {
-  if (ws && ws.readyState < 2) return
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-  const host = location.host
-  ws = new WebSocket(`${proto}://${host}/ws?client_id=ai_gen`)
-  ws.onmessage = (e) => {
-    try {
-      const msg = JSON.parse(e.data)
-      // 心跳 ping → 回 pong
-      if (msg.type === 'ping') { ws?.readyState === 1 && ws.send(JSON.stringify({ type: 'pong' })); return }
-      if (msg.type === 'ai_gen_progress') {
-        genPercent.value = msg.percent ?? genPercent.value
-        genStage.value = msg.stage ?? genStage.value
-        // 生成失败时结束等待
-        if (msg.error) {
-          generating.value = false
-          ElMessage.error(msg.stage || '生成失败')
-          disconnectGenWS()
-        }
-      } else if (msg.type === 'ai_gen_done') {
-        // 后台生成完成，刷新列表并关闭对话框
-        genPercent.value = 100
-        genStage.value = `完成！共 ${msg.case_count} 条用例`
-        ElMessage.success(`生成成功！共 ${msg.case_count} 条用例`)
-        generating.value = false
-        genDialogVisible.value = false
-        fetchRecords().then(() => {
-          const found = records.value.find(r => r.id === msg.record_id)
-          if (found) current.value = found
-        })
-        disconnectGenWS()
-      }
-    } catch (_) {}
+const { connect: _genConnect, disconnect: disconnectGenWS } = useWebSocket((msg) => {
+  if (msg.type === 'ai_gen_progress') {
+    genPercent.value = msg.percent ?? genPercent.value
+    genStage.value = msg.stage ?? genStage.value
+    // 生成失败时结束等待
+    if (msg.error) {
+      generating.value = false
+      ElMessage.error(msg.stage || '生成失败')
+      disconnectGenWS()
+    }
+  } else if (msg.type === 'ai_gen_done') {
+    // 后台生成完成，刷新列表并关闭对话框
+    genPercent.value = 100
+    genStage.value = `完成！共 ${msg.case_count} 条用例`
+    ElMessage.success(`生成成功！共 ${msg.case_count} 条用例`)
+    generating.value = false
+    genDialogVisible.value = false
+    fetchRecords().then(() => {
+      const found = records.value.find(r => r.id === msg.record_id)
+      if (found) current.value = found
+    })
+    disconnectGenWS()
   }
-  ws.onerror = () => {}
-  ws.onclose = () => {}
-}
-
-function disconnectGenWS() {
-  if (ws) { ws.close(); ws = null }
-}
+})
+// clientId 固定为 'ai_gen'，与后端推送频道对应
+const connectGenWS = () => _genConnect('ai_gen')
 
 // ---------- 统计 ----------
 const stats = computed(() => {
@@ -1884,6 +1934,30 @@ const download = (id, format) => {
   window.open(url, '_blank')
 }
 
+const exportingExcel = ref(false)
+const downloadExcel = async (record) => {
+  exportingExcel.value = true
+  try {
+    const blob = await aiCaseApi.exportExcel(record.id)
+    const name = (record.task_name || `用例_${record.id}`).replace(/[/\\]/g, '_') + '.xlsx'
+    const url = URL.createObjectURL(new Blob([blob], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    }))
+    const a = document.createElement('a')
+    a.href = url
+    a.download = name
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    setTimeout(() => URL.revokeObjectURL(url), 10000)
+    ElMessage.success(`Excel 导出成功：${name}`)
+  } catch (e) {
+    ElMessage.error('Excel 导出失败：' + (e.response?.data?.detail || e.message))
+  } finally {
+    exportingExcel.value = false
+  }
+}
+
 // ---------- 用例详情 ----------
 const viewCase = (row) => {
   detailCase.value = row
@@ -2047,8 +2121,6 @@ const formatDate = (str) => {
 watch(() => wsStore.currentId, () => { fetchRecords() })
 onMounted(fetchRecords)
 onUnmounted(() => {
-  disconnectGenWS()
-  disconnectTracWS()
   if (_genPollTimer)  { clearInterval(_genPollTimer);  _genPollTimer  = null }
   if (_tracPollTimer) { clearInterval(_tracPollTimer); _tracPollTimer = null }
 })

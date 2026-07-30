@@ -3,24 +3,80 @@ WebUI 自动化测试路由
   - tasks / cases / execute / reports / agent / skills / llm
 """
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, BackgroundTasks
-from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import List, Optional
 from pathlib import Path
+import asyncio
 import json
-from datetime import datetime
+import base64
+import mimetypes
+import time
+from datetime import datetime, timezone, timedelta
+
+_TZ_CST = timezone(timedelta(hours=8))
+
+# ── 并发执行保护：同一 task_id 同一时间只允许一个执行任务 ────────────────────────
+_running_tasks: set = set()       # 正在执行中的 task_id 集合
+_running_tasks_lock = asyncio.Lock()  # 保护 set 的读写
+
+
+def _fmt_cst(dt) -> str:
+    """将 UTC naive datetime 格式化为 CST（UTC+8）可读字符串。"""
+    if not dt:
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(_TZ_CST).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _screenshot_data_uri(shot: str) -> str:
+    """把截图路径/URL 转成 base64 data URI，供独立 HTML/PDF 内嵌显示。
+
+    支持两种输入：
+    - Web 路径（/screenshots/xxx.png）→ 拼出本地磁盘路径后读取
+    - 磁盘绝对/相对路径            → 直接读取
+    返回 data:image/...;base64,... 字符串；失败时原样返回。
+    """
+    if not shot:
+        return shot
+    from pathlib import Path as _Path
+    from tools.config import settings as _settings
+
+    # 把 web 路径映射到本地磁盘
+    if shot.startswith("/screenshots/"):
+        filename = shot[len("/screenshots/"):]
+        disk_path = _Path(_settings.SCREENSHOT_DIR) / filename
+    elif shot.startswith("http://") or shot.startswith("https://"):
+        # 远程 URL 无法内嵌，直接返回原值
+        return shot
+    else:
+        disk_path = _Path(shot)
+
+    try:
+        if not disk_path.is_absolute():
+            # 相对路径以项目根目录为基准
+            disk_path = _Path(__file__).parent.parent.parent / disk_path
+        with open(disk_path, "rb") as fh:
+            raw = fh.read()
+        mime = mimetypes.guess_type(str(disk_path))[0] or "image/png"
+        b64  = base64.b64encode(raw).decode()
+        return f"data:{mime};base64,{b64}"
+    except Exception:
+        # 读取失败（文件不存在等）返回原值，页面会显示 broken image 但不崩溃
+        return shot
 from loguru import logger
 
 from api.schemas import (
-    TaskCreateRequest, TaskResponse,
+    TaskCreateRequest, TaskUpdateRequest, TaskResponse,
     CaseCreateRequest, CaseUpdateRequest, CaseResponse,
     ExecuteRequest, ReportResponse,
     CommandRequest, CommandResponse,
     HealthResponse, LLMConfigRequest, LLMTestRequest, PageParseRequest,
+    WebUIDiffCheckRequest, WebUIIncrementalUpdateRequest,
 )
 from tools.database import (
-    get_db, TestTask, TestCase, TestResult, TestReport, User,
+    get_db, TestTask, TestCase, TestResult, TestReport, User, TaskEnvVar,
 )
 from agent.core import uitest_agent
 from api.websocket_manager import ws_manager
@@ -47,13 +103,14 @@ async def create_task(request: TaskCreateRequest, db: AsyncSession = Depends(get
     db.add(task)
     await db.commit()
     await db.refresh(task)
-    await ws_manager.broadcast({"type": "task_created", "task": {
+    await ws_manager.broadcast_to_workspace({"type": "task_created", "task": {
         "id": task.id, "name": task.name, "url": task.url, "status": task.status,
-    }})
+    }}, request.workspace_id)
     return TaskResponse(
         id=task.id, name=task.name, url=task.url, status=task.status,
         browser=task.browser, environment=task.environment,
         created_at=task.created_at.isoformat(),
+        updated_at=task.updated_at.isoformat() if task.updated_at else None,
     )
 
 
@@ -69,7 +126,9 @@ async def list_tasks(skip: int = 0, limit: int = 100, workspace_id: int = None, 
         TaskResponse(
             id=t.id, name=t.name, url=t.url, status=t.status,
             browser=t.browser, environment=t.environment,
+            document_path=t.document_path,
             created_at=t.created_at.isoformat(),
+            updated_at=t.updated_at.isoformat() if t.updated_at else None,
         )
         for t in tasks
     ]
@@ -85,7 +144,9 @@ async def get_task(task_id: int, db: AsyncSession = Depends(get_db), current_use
     return TaskResponse(
         id=task.id, name=task.name, url=task.url, status=task.status,
         browser=task.browser, environment=task.environment,
+        document_path=task.document_path,
         created_at=task.created_at.isoformat(),
+        updated_at=task.updated_at.isoformat() if task.updated_at else None,
         page_elements=task.page_elements or [],
     )
 
@@ -103,6 +164,30 @@ async def delete_task(task_id: int, db: AsyncSession = Depends(get_db), current_
     await db.execute(delete(TestResult).where(TestResult.task_id == task_id))
     await db.commit()
     return {"message": "Task deleted successfully"}
+
+
+@router.put("/tasks/{task_id}", response_model=TaskResponse)
+async def update_task(task_id: int, request: TaskUpdateRequest, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    result = await db.execute(select(TestTask).where(TestTask.id == task_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    await check_access(db, task, current_user, "任务")
+
+    # 只更新传入了的字段
+    update_data = request.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(task, field, value)
+
+    await db.commit()
+    await db.refresh(task)
+    return TaskResponse(
+        id=task.id, name=task.name, url=task.url, status=task.status,
+        browser=task.browser, environment=task.environment,
+        document_path=task.document_path,
+        created_at=task.created_at.isoformat(),
+        updated_at=task.updated_at.isoformat() if task.updated_at else None,
+    )
 
 
 # ── 文档 / 页面解析 ───────────────────────────────────────────────────────────
@@ -137,7 +222,11 @@ async def upload_document(file: UploadFile = File(...)):
 
 
 @router.post("/parse/page")
-async def parse_page(request: PageParseRequest, db: AsyncSession = Depends(get_db)):
+async def parse_page(
+    request: PageParseRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     try:
         logger.info(f"Parsing page: {request.url}, browser: {request.browser}, task_id: {request.task_id}")
         elements = await uitest_agent.parse_page(request.url, request.browser)
@@ -145,6 +234,7 @@ async def parse_page(request: PageParseRequest, db: AsyncSession = Depends(get_d
             result = await db.execute(select(TestTask).where(TestTask.id == request.task_id))
             task = result.scalar_one_or_none()
             if task:
+                await check_access(db, task, current_user, "任务")
                 task.page_elements = elements
                 task.status = "parsed"
                 await db.commit()
@@ -157,7 +247,18 @@ async def parse_page(request: PageParseRequest, db: AsyncSession = Depends(get_d
 
 
 @router.post("/parse/document")
-async def parse_document(document_path: str):
+async def parse_document(
+    document_path: str,
+    current_user: User = Depends(get_current_user),
+):
+    # 安全校验：只允许访问 uploads 目录下的文件，防止路径遍历
+    from pathlib import Path as _Path
+    safe_root = _Path(settings.UPLOAD_DIR).resolve()
+    target = (_Path(document_path) if _Path(document_path).is_absolute()
+              else safe_root / document_path).resolve()
+    if not str(target).startswith(str(safe_root)):
+        from fastapi import HTTPException as _HTTP
+        raise _HTTP(status_code=400, detail="不允许访问该路径")
     try:
         document_data = await uitest_agent.parse_document(document_path)
         return document_data
@@ -181,6 +282,7 @@ async def set_page_elements(task_id: int, elements: List[dict], db: AsyncSession
             id=task.id, name=task.name, url=task.url, status=task.status,
             browser=task.browser, environment=task.environment,
             created_at=task.created_at.isoformat(),
+            updated_at=task.updated_at.isoformat() if task.updated_at else None,
             page_elements=task.page_elements,
         )
     except Exception as e:
@@ -221,13 +323,16 @@ async def get_stats(
     from tools.database import TestReport as TR
 
     if current_user.role != "admin" and workspace_id is None:
-        return {"task_count": 0, "case_count": 0, "passed": 0, "failed": 0}
+        return {"task_count": 0, "case_count": 0, "passed": 0, "failed": 0, "recorded_count": 0}
 
     if current_user.role == "admin" or workspace_id is None:
         task_count = (await db.execute(select(func.count(TestTask.id)))).scalar() or 0
         case_count = (await db.execute(select(func.count(TestCase.id)))).scalar() or 0
         passed = (await db.execute(select(func.sum(TR.passed)))).scalar() or 0
         failed = (await db.execute(select(func.sum(TR.failed)))).scalar() or 0
+        recorded_count = (await db.execute(
+            select(func.count(TestCase.id)).where(TestCase.module == "录制")
+        )).scalar() or 0
     else:
         task_ids_q = select(TestTask.id).where(TestTask.project_id == workspace_id)
         task_count = (await db.execute(
@@ -242,8 +347,20 @@ async def get_stats(
         failed = (await db.execute(
             select(func.sum(TR.failed)).where(TR.project_id == workspace_id)
         )).scalar() or 0
+        recorded_count = (await db.execute(
+            select(func.count(TestCase.id)).where(
+                TestCase.task_id.in_(task_ids_q),
+                TestCase.module == "录制"
+            )
+        )).scalar() or 0
 
-    return {"task_count": task_count, "case_count": case_count, "passed": int(passed), "failed": int(failed)}
+    return {
+        "task_count": task_count,
+        "case_count": case_count,
+        "passed": int(passed),
+        "failed": int(failed),
+        "recorded_count": int(recorded_count),
+    }
 
 
 @router.get("/tasks/{task_id}/cases", response_model=List[CaseResponse])
@@ -269,7 +386,12 @@ async def list_cases(task_id: int, db: AsyncSession = Depends(get_db), current_u
 
 
 @router.post("/cases", response_model=CaseResponse)
-async def create_case(request: CaseCreateRequest, db: AsyncSession = Depends(get_db)):
+async def create_case(request: CaseCreateRequest, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    # 通过关联任务校验工作空间访问权限（TestCase 通过 task_id 继承隔离）
+    task_result = await db.execute(select(TestTask).where(TestTask.id == request.task_id))
+    task = task_result.scalar_one_or_none()
+    if task:
+        await check_access(db, task, current_user, "任务")
     case = TestCase(
         task_id=request.task_id, name=request.name, module=request.module,
         priority=request.priority, preconditions=request.preconditions,
@@ -306,8 +428,10 @@ async def generate_cases(task_id: int, request: dict = None, db: AsyncSession = 
     if request is None:
         request = {}
     reparse_page: bool = request.get("reparse_page", False)
+    # 前端通过请求体传入 ws_client_id，精确推送给对应的 WebSocket 连接
+    ws_client_id: str = request.get("ws_client_id") or "cases_gen"
     try:
-        logger.info(f"Generating cases for task: {task_id}, reparse_page={reparse_page}")
+        logger.info(f"Generating cases for task: {task_id}, reparse_page={reparse_page}, ws_client_id={ws_client_id}")
         result = await db.execute(select(TestTask).where(TestTask.id == task_id))
         task = result.scalar_one_or_none()
         if not task:
@@ -318,7 +442,7 @@ async def generate_cases(task_id: int, request: dict = None, db: AsyncSession = 
             try:
                 await ws_manager.broadcast(
                     {"type": "cases_gen_progress", "percent": 5, "stage": "正在重新抓取页面元素..."},
-                    client_id="cases_gen",
+                    client_id=ws_client_id,
                 )
                 elements = await uitest_agent.parse_page(task.url, task.browser or "chromium")
                 if elements:
@@ -331,7 +455,7 @@ async def generate_cases(task_id: int, request: dict = None, db: AsyncSession = 
                 logger.warning(f"页面重新抓取失败，使用旧元素: {e}")
                 await ws_manager.broadcast(
                     {"type": "cases_gen_progress", "percent": 5, "stage": "页面抓取失败，使用已有元素继续生成..."},
-                    client_id="cases_gen",
+                    client_id=ws_client_id,
                 )
 
         if not task.page_elements:
@@ -354,10 +478,10 @@ async def generate_cases(task_id: int, request: dict = None, db: AsyncSession = 
             else:
                 logger.warning(f"Document not found, skipping: {task.document_path}")
 
-        async def _progress(pct: int, stage: str):
+        async def _progress(pct: int, stage: str, case_count: int = 0):
             await ws_manager.broadcast(
-                {"type": "cases_gen_progress", "percent": pct, "stage": stage},
-                client_id="cases_gen",
+                {"type": "cases_gen_progress", "percent": pct, "stage": stage, "case_count": case_count},
+                client_id=ws_client_id,
             )
 
         cases = await uitest_agent.generate_cases(task_id=task_id, progress_cb=_progress)
@@ -377,6 +501,7 @@ async def generate_cases(task_id: int, request: dict = None, db: AsyncSession = 
                 priority=case.get("priority", "P1"),
                 preconditions=case.get("preconditions", ""),
                 steps=case.get("steps", ""),
+                steps_json=case.get("steps_json") or [],
                 expected_results=case.get("expected_results", ""),
                 element_selector=case.get("element_selector", ""),
                 enabled=True,
@@ -400,8 +525,11 @@ async def generate_cases(task_id: int, request: dict = None, db: AsyncSession = 
 
 
 @router.post("/cases/optimize/{task_id}")
-async def optimize_cases(task_id: int, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def optimize_cases(task_id: int, request: dict = None, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     """分析已有用例覆盖缺口，追加补充用例。"""
+    if request is None:
+        request = {}
+    ws_client_id: str = (request.get("ws_client_id") if isinstance(request, dict) else None) or "cases_gen"
     try:
         from skills.case_generator import case_generator as cg
         result = await db.execute(select(TestTask).where(TestTask.id == task_id))
@@ -429,10 +557,10 @@ async def optimize_cases(task_id: int, db: AsyncSession = Depends(get_db), curre
                 except Exception as _e:
                     logger.debug(f"文档解析失败（优化流程忽略）: {_e}")
 
-        async def _progress(pct: int, stage: str):
+        async def _progress(pct: int, stage: str, case_count: int = 0):
             await ws_manager.broadcast(
-                {"type": "cases_opt_progress", "percent": pct, "stage": stage},
-                client_id="cases_opt",
+                {"type": "cases_opt_progress", "percent": pct, "stage": stage, "case_count": case_count},
+                client_id=ws_client_id,
             )
 
         new_cases = await cg.optimize_cases(
@@ -444,6 +572,7 @@ async def optimize_cases(task_id: int, db: AsyncSession = Depends(get_db), curre
                 task_id=task_id, name=case.get("name", "补充用例"),
                 module=case.get("module", "通用"), priority=case.get("priority", "P1"),
                 preconditions=case.get("preconditions", ""), steps=case.get("steps", ""),
+                steps_json=case.get("steps_json") or [],
                 expected_results=case.get("expected_results", ""),
                 element_selector=case.get("element_selector", ""), enabled=True,
             ))
@@ -457,7 +586,8 @@ async def optimize_cases(task_id: int, db: AsyncSession = Depends(get_db), curre
 
 
 @router.get("/cases/coverage/{task_id}")
-async def get_coverage(task_id: int, db: AsyncSession = Depends(get_db)):
+async def get_coverage(task_id: int, db: AsyncSession = Depends(get_db),
+                       current_user: User = Depends(get_current_user)):
     """返回当前任务的用例覆盖度指标。"""
     try:
         from skills.case_generator import case_generator as cg
@@ -465,6 +595,7 @@ async def get_coverage(task_id: int, db: AsyncSession = Depends(get_db)):
         task = result.scalar_one_or_none()
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
+        await check_access(db, task, current_user, "任务")
         result = await db.execute(select(TestCase).where(TestCase.task_id == task_id))
         db_cases = result.scalars().all()
         cases = [
@@ -483,20 +614,17 @@ async def get_coverage(task_id: int, db: AsyncSession = Depends(get_db)):
 
 # ── WebUI 文档变更检测 & 增量更新 ─────────────────────────────────────────────
 
-class WebUIDiffCheckRequest(BaseModel):
-    new_content: Optional[str] = None
-    new_document_path: Optional[str] = None
-
-
 @router.post("/cases/doc-diff-check/{task_id}")
 async def webui_doc_diff_check(
     task_id: int, request: WebUIDiffCheckRequest, db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     from skills.case_generator import case_generator as cg
     result = await db.execute(select(TestTask).where(TestTask.id == task_id))
     task = result.scalar_one_or_none()
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
+    await check_access(db, task, current_user, "任务")
     if not request.new_content and not request.new_document_path:
         raise HTTPException(status_code=400, detail="请提供新版文档路径或文本内容")
     if request.new_document_path:
@@ -525,16 +653,10 @@ async def webui_doc_diff_check(
     return {"has_change": True, "new_doc_hash": new_hash, "old_doc_hash": old_hash, "diff": diff_result}
 
 
-class WebUIIncrementalUpdateRequest(BaseModel):
-    new_content: Optional[str] = None
-    new_document_path: Optional[str] = None
-    diff: Optional[dict] = None
-    reparse_page: bool = False
-
-
 @router.post("/cases/incremental-update/{task_id}")
 async def webui_incremental_update(
     task_id: int, request: WebUIIncrementalUpdateRequest, db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     from sqlalchemy import delete as sql_delete
     from skills.case_generator import case_generator as cg
@@ -542,6 +664,7 @@ async def webui_incremental_update(
     task = result.scalar_one_or_none()
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
+    await check_access(db, task, current_user, "任务")
     if not request.new_content and not request.new_document_path:
         raise HTTPException(status_code=400, detail="请提供新版文档路径或文本内容")
     if request.new_document_path:
@@ -561,7 +684,7 @@ async def webui_incremental_update(
         try:
             await ws_manager.broadcast(
                 {"type": "cases_gen_progress", "percent": 5, "stage": "重新抓取页面元素..."},
-                client_id="cases_gen",
+                client_id=request.ws_client_id or "cases_gen",
             )
             elements = await uitest_agent.parse_page(task.url, task.browser or "chromium")
             task.page_elements = elements
@@ -586,11 +709,12 @@ async def webui_incremental_update(
          "element_selector": getattr(c, "element_selector", "") or ""}
         for c in case_result.scalars().all()
     ]
+    _ws_cid = request.ws_client_id or "cases_gen"
 
-    async def _progress(pct: int, stage: str):
+    async def _progress(pct: int, stage: str, case_count: int = 0):
         await ws_manager.broadcast(
-            {"type": "cases_gen_progress", "percent": pct, "stage": stage},
-            client_id="cases_gen",
+            {"type": "cases_gen_progress", "percent": pct, "stage": stage, "case_count": case_count},
+            client_id=_ws_cid,
         )
 
     try:
@@ -625,11 +749,16 @@ async def webui_incremental_update(
 
 
 @router.put("/cases/{case_id}", response_model=CaseResponse)
-async def update_case(case_id: int, request: CaseUpdateRequest, db: AsyncSession = Depends(get_db)):
+async def update_case(case_id: int, request: CaseUpdateRequest, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     result = await db.execute(select(TestCase).where(TestCase.id == case_id))
     case = result.scalar_one_or_none()
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
+    # 通过关联任务校验工作空间访问权限
+    task_result = await db.execute(select(TestTask).where(TestTask.id == case.task_id))
+    task = task_result.scalar_one_or_none()
+    if task:
+        await check_access(db, task, current_user, "任务")
     for key, value in request.model_dump(exclude_unset=True).items():
         setattr(case, key, value)
     await db.commit()
@@ -643,14 +772,232 @@ async def update_case(case_id: int, request: CaseUpdateRequest, db: AsyncSession
 
 
 @router.delete("/cases/{case_id}")
-async def delete_case(case_id: int, db: AsyncSession = Depends(get_db)):
+async def delete_case(case_id: int, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     from sqlalchemy import delete
     result = await db.execute(select(TestCase).where(TestCase.id == case_id))
-    if not result.scalar_one_or_none():
+    case = result.scalar_one_or_none()
+    if not case:
         raise HTTPException(status_code=404, detail="Case not found")
+    # 通过关联任务校验工作空间访问权限
+    task_result = await db.execute(select(TestTask).where(TestTask.id == case.task_id))
+    task = task_result.scalar_one_or_none()
+    if task:
+        await check_access(db, task, current_user, "任务")
     await db.execute(delete(TestCase).where(TestCase.id == case_id))
     await db.commit()
     return {"message": "Case deleted"}
+
+
+# ── 用例自我修正 & 覆盖率补全 ─────────────────────────────────────────────────
+@router.post("/cases/self-correct/{task_id}")
+async def self_correct_cases(
+    task_id: int,
+    request: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    用例自我修正：分析执行失败的用例，AI 自动修正 selector/步骤后返回。
+    请求体：{"failed_cases": [...], "ws_client_id": "..."}
+    """
+    task_result = await db.execute(select(TestTask).where(TestTask.id == task_id))
+    task = task_result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    await check_access(db, task, current_user, "任务")
+    failed_cases = request.get("failed_cases", [])
+    if not failed_cases:
+        raise HTTPException(status_code=400, detail="请提供需要修正的失败用例列表")
+    ws_client_id = request.get("ws_client_id") or "cases_correct"
+
+    from skills.case_generator import CaseGenerator
+    cg = CaseGenerator()
+    page_elements = task.page_elements or []
+
+    async def _progress(pct: int, stage: str, case_count: int = 0):
+        await ws_manager.broadcast(
+            {"type": "cases_correct_progress", "percent": pct, "stage": stage, "case_count": case_count},
+            client_id=ws_client_id,
+        )
+
+    corrected = await cg.self_correct_cases(
+        failed_cases=failed_cases,
+        page_elements=page_elements,
+        url=task.url,
+        progress_cb=_progress,
+    )
+    stats = {
+        "total": len(corrected),
+        "high": sum(1 for c in corrected if c.get("confidence") == "high"),
+        "medium": sum(1 for c in corrected if c.get("confidence") == "medium"),
+        "low": sum(1 for c in corrected if c.get("confidence") == "low"),
+    }
+    return {"corrected": corrected, "stats": stats}
+
+
+@router.post("/cases/fill-gaps/{task_id}")
+async def fill_coverage_gaps(
+    task_id: int,
+    request: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """覆盖率补全：分析元素覆盖缺口，生成补充用例。"""
+    task_result = await db.execute(select(TestTask).where(TestTask.id == task_id))
+    task = task_result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    await check_access(db, task, current_user, "任务")
+    existing_cases = request.get("existing_cases", [])
+    execution_results = request.get("execution_results", [])
+    ws_client_id = request.get("ws_client_id") or "cases_gap"
+
+    from skills.case_generator import CaseGenerator
+    cg = CaseGenerator()
+    page_elements = task.page_elements or []
+
+    async def _progress(pct: int, stage: str, case_count: int = 0):
+        await ws_manager.broadcast(
+            {"type": "cases_gap_progress", "percent": pct, "stage": stage, "case_count": case_count},
+            client_id=ws_client_id,
+        )
+
+    new_cases = await cg.fill_coverage_gaps(
+        existing_cases=existing_cases,
+        execution_results=execution_results,
+        page_elements=page_elements,
+        url=task.url,
+        document_data=task.document_path,
+        progress_cb=_progress,
+    )
+    return {"new_cases": new_cases, "gap_count": len(new_cases)}
+
+
+@router.post("/cases/auto-fix/{task_id}")
+async def auto_fix_cases(
+    task_id: int,
+    request: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """一键自动修正+补全：先修正失败用例，再分析覆盖缺口生成补充用例。"""
+    task_result = await db.execute(select(TestTask).where(TestTask.id == task_id))
+    task = task_result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    await check_access(db, task, current_user, "任务")
+    failed_cases = request.get("failed_cases", [])
+    existing_cases = request.get("existing_cases", [])
+    execution_results = request.get("execution_results", [])
+    ws_client_id = request.get("ws_client_id") or "auto_fix"
+
+    from skills.case_generator import CaseGenerator
+    cg = CaseGenerator()
+    page_elements = task.page_elements or []
+
+    async def _progress(pct: int, stage: str, case_count: int = 0):
+        await ws_manager.broadcast(
+            {"type": "cases_auto_fix_progress", "percent": pct, "stage": stage, "case_count": case_count},
+            client_id=ws_client_id,
+        )
+
+    corrected = []
+    if failed_cases:
+        corrected = await cg.self_correct_cases(
+            failed_cases=failed_cases,
+            page_elements=page_elements,
+            url=task.url,
+            progress_cb=lambda p, s, c=0: _progress(p // 2, s, c),
+        )
+
+    new_cases = []
+    if existing_cases:
+        new_cases = await cg.fill_coverage_gaps(
+            existing_cases=existing_cases,
+            execution_results=execution_results,
+            page_elements=page_elements,
+            url=task.url,
+            document_data=task.document_path,
+            progress_cb=lambda p, s, c=0: _progress(50 + p // 2, s, c),
+        )
+
+    await _progress(100, f"修正完成：{len(corrected)} 条修正 + {len(new_cases)} 条补充", len(corrected) + len(new_cases))
+    return {
+        "corrected": corrected,
+        "new_cases": new_cases,
+        "stats": {"corrected_count": len(corrected), "gap_count": len(new_cases)},
+    }
+
+
+@router.get("/cases/latest-failed/{task_id}")
+async def get_latest_failed_cases(
+    task_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """获取指定任务最近一次执行的失败用例列表（用于「修正失败用例」功能）。
+    同时返回全部执行结果（含 case_id + status）供表格高亮显示。"""
+    from sqlalchemy import desc
+    task_result = await db.execute(select(TestTask).where(TestTask.id == task_id))
+    task = task_result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    await check_access(db, task, current_user, "任务")
+
+    report_result = await db.execute(
+        select(TestReport)
+        .where(TestReport.task_id == task_id)
+        .order_by(desc(TestReport.created_at))
+        .limit(1)
+    )
+    report = report_result.scalar_one_or_none()
+    if not report:
+        return {"failed_cases": [], "report_id": None, "summary": None, "execution_results": []}
+
+    summary = report.summary or {}
+    failed_cases = summary.get("failed_cases", [])
+
+    # 查询该报告关联的 TestResult 记录（按时间范围匹配最近一次执行）
+    from tools.database import TestResult as TR
+    execution_results = []
+    if report.created_at:
+        # 取最近一次执行前后10秒内的结果
+        from datetime import timedelta
+        window_start = report.created_at - timedelta(seconds=30)
+        results_result = await db.execute(
+            select(TR)
+            .where(TR.task_id == task_id, TR.start_time >= window_start)
+            .order_by(TR.start_time)
+        )
+        trs = results_result.scalars().all()
+        execution_results = [
+            {
+                "case_id": tr.case_id,
+                "case_name": "",
+                "status": tr.status,
+                "error_message": tr.error_message,
+                "duration": tr.duration,
+            }
+            for tr in trs
+        ]
+
+    # 如果没有 TestResult（旧数据），回退使用 report.details 匹配
+    if not execution_results and report.details:
+        execution_results = report.details
+
+    return {
+        "failed_cases": failed_cases,
+        "report_id": report.id,
+        "execution_results": execution_results,
+        "summary": {
+            "total": report.total_cases,
+            "passed": report.passed,
+            "failed": report.failed,
+            "pass_rate": report.pass_rate,
+            "created_at": _fmt_cst(report.created_at),
+            "finished_at": _fmt_cst(report.finished_at) if report.finished_at else _fmt_cst(report.created_at),
+        },
+    }
 
 
 # ── 执行 & 报告 ───────────────────────────────────────────────────────────────
@@ -658,67 +1005,145 @@ async def delete_case(case_id: int, db: AsyncSession = Depends(get_db)):
 async def _run_execution_bg(
     report_id: int, task_id: int, task_name: str,
     task_url: str, case_dicts: list, case_ids, browser: str,
+    workspace_id: int = None,
 ):
     """后台执行测试，通过 WebSocket 推送进度，完成后写回数据库。"""
     from tools.database import async_session_maker, TestResult as TR
+    total_cases = len(case_dicts)
     try:
-        uitest_agent._get_state(task_id).cases = case_dicts
-        results = await uitest_agent.execute_cases(
-            case_ids=case_ids, browser_type=browser, url=task_url, task_id=task_id,
+        # ── 通知前端开始执行 ──────────────────────────────────────────────────────
+        await ws_manager.broadcast_to_workspace({
+            "type": "execution_started",
+            "report_id": report_id,
+            "total_cases": total_cases,
+        }, workspace_id)
+
+        # ── 直接调用 execute_batch，不经过 uitest_agent 的全局 state.cases ──
+        # 避免并发执行同一 task_id 时 state.cases 被互相覆盖的竞态问题
+        from skills.test_executor import test_executor as _executor
+
+        async def _progress_cb(progress_data):
+            await ws_manager.broadcast_to_workspace(
+                {"type": "case_complete", **progress_data}, workspace_id
+            )
+
+        results = await _executor.execute_batch(
+            cases=case_dicts,
+            url=task_url,
+            browser_type=browser,
+            screenshots_dir="./screenshots",
+            progress_callback=_progress_cb,
+            task_id=task_id,
         )
-        for r in results:
-            sp = r.get("screenshot_path")
-            if sp and not sp.startswith("http"):
-                r["screenshot_path"] = f"/screenshots/{Path(sp).name}"
-        passed  = sum(1 for r in results if r.get("status") == "passed")
-        failed  = sum(1 for r in results if r.get("status") == "failed")
-        skipped = sum(1 for r in results if r.get("status") == "skipped")
-        pass_rate = (passed / len(results) * 100) if results else 0
+
+        passed  = sum(1 for r in results if r.get("status") == "passed" and r.get("case_id") is not None)
+        failed  = sum(1 for r in results if r.get("status") == "failed" and r.get("case_id") is not None)
+        skipped = sum(1 for r in results if r.get("status") == "skipped" and r.get("case_id") is not None)
+        # 过滤掉预检/连通性测试结果用于统计
+        real_results = [r for r in results if r.get("case_id") is not None]
+        pass_rate = (passed / len(real_results) * 100) if real_results else 0
+
+        def _safe_parse_steps(logs_val):
+            """安全解析 logs → steps 列表，防止非标准数据导致崩溃。"""
+            if logs_val is None:
+                return []
+            if isinstance(logs_val, list):
+                return logs_val
+            if isinstance(logs_val, str) and logs_val.strip():
+                try:
+                    return json.loads(logs_val)
+                except (json.JSONDecodeError, TypeError, ValueError) as e:
+                    logger.warning(f"Failed to parse steps JSON: {e}")
+                    return []
+            return []
+
         details = [
             {"id": idx, "case_name": r.get("case_name", "Unknown"),
-             "status": r.get("status", "unknown"), "duration": round(r.get("duration", 0), 2),
+             "status": r.get("status", "unknown"), "duration": round(r.get("duration", 0) or 0, 2),
              "error_message": r.get("error_message"), "screenshot": r.get("screenshot_path"),
-             "start_time": r.get("start_time"), "end_time": r.get("end_time")}
+             "start_time": r.get("start_time"), "end_time": r.get("end_time"),
+             "steps": _safe_parse_steps(r.get("logs"))}
             for idx, r in enumerate(results, 1)
         ]
         summary = {
-            "total": len(results), "passed": passed, "failed": failed, "skipped": skipped,
+            "total": len(real_results), "passed": passed, "failed": failed, "skipped": skipped,
             "pass_rate": round(pass_rate, 2),
-            "total_duration": round(sum(r.get("duration", 0) for r in results), 2),
+            "total_duration": round(sum(r.get("duration", 0) for r in real_results), 2),
             "failed_cases": [
                 {"case_name": r.get("case_name"), "error": r.get("error_message", ""),
                  "duration": r.get("duration", 0)}
                 for r in results if r.get("status") == "failed"
             ],
+            "executed_at": datetime.utcnow().isoformat(),
         }
         async with async_session_maker() as db:
-            res = await db.execute(select(TestReport).where(TestReport.id == report_id))
-            report = res.scalar_one_or_none()
-            if report:
-                report.summary  = summary
-                report.details  = details
-                report.pass_rate = round(pass_rate, 2)
-                report.passed   = passed
-                report.failed   = failed
-                report.skipped  = skipped
-                for r in results:
-                    db.add(TR(
-                        task_id=task_id, case_id=r.get("case_id"), status=r.get("status"),
-                        start_time=datetime.fromisoformat(r["start_time"]) if r.get("start_time") else None,
-                        end_time=datetime.fromisoformat(r["end_time"]) if r.get("end_time") else None,
-                        duration=r.get("duration", 0), error_message=r.get("error_message"),
-                        screenshot_path=r.get("screenshot_path"), logs=r.get("logs"),
-                    ))
-                try:
-                    report_data = await uitest_agent.generate_report(task_name)
-                    report.report_path = report_data.get("html_path") or report_data.get("report_path")
-                except Exception as e:
-                    logger.error(f"Failed to generate report file: {e}")
-                await db.commit()
-        await ws_manager.broadcast_all({"type": "execution_saved", "report_id": report_id, "summary": summary})
+            try:
+                res = await db.execute(select(TestReport).where(TestReport.id == report_id))
+                report = res.scalar_one_or_none()
+                if report:
+                    report.summary    = summary
+                    report.details    = details
+                    report.pass_rate  = round(pass_rate, 2)
+                    report.total_cases = len(real_results)
+                    report.passed     = passed
+                    report.failed     = failed
+                    report.skipped    = skipped
+                    report.finished_at = datetime.utcnow()  # 执行完成时间
+                    for r in results:
+                        if not r.get("case_id"):
+                            continue
+                        db.add(TR(
+                            task_id=task_id, case_id=r.get("case_id"), status=r.get("status"),
+                            start_time=datetime.fromisoformat(r["start_time"]) if r.get("start_time") else None,
+                            end_time=datetime.fromisoformat(r["end_time"]) if r.get("end_time") else None,
+                            duration=r.get("duration", 0), error_message=r.get("error_message"),
+                            screenshot_path=r.get("screenshot_path"), logs=r.get("logs"),
+                        ))
+                    try:
+                        report_data = await uitest_agent.generate_report(task_name)
+                        report.report_path = report_data.get("html_path") or report_data.get("report_path")
+                    except Exception as e:
+                        logger.error(f"Failed to generate report file: {e}")
+                    await db.commit()
+                    logger.info(f"[Execution] Report {report_id} saved: {len(real_results)} results, {passed}/{failed}/{skipped} p/f/s")
+                else:
+                    logger.error(f"[Execution] Report {report_id} not found in DB!")
+            except Exception as db_err:
+                logger.error(f"[Execution] DB commit failed for report {report_id}: {db_err}", exc_info=True)
+                await db.rollback()
+                raise
+        # 执行完成事件（前端重置进度条、停止计时器）
+        await ws_manager.broadcast_to_workspace({
+            "type": "execution_completed",
+            "report_id": report_id,
+        }, workspace_id)
+        # 保存完成事件（含汇总数据）
+        await ws_manager.broadcast_to_workspace({
+            "type": "execution_saved",
+            "report_id": report_id,
+            "summary": summary
+        }, workspace_id)
     except Exception as e:
         logger.error(f"Background execution failed: {e}", exc_info=True)
-        await ws_manager.broadcast_all({"type": "execution_error", "report_id": report_id, "error": str(e)})
+        try:
+            async with async_session_maker() as _ses:
+                _r = await _ses.execute(select(TestReport).where(TestReport.id == report_id))
+                _rep = _r.scalar_one_or_none()
+                if _rep:
+                    _rep.summary = {"status": "error", "error": str(e), "total": len(case_dicts), "passed": 0, "failed": 0, "pass_rate": 0}
+                    _rep.pass_rate = 0
+                    await _ses.commit()
+        except Exception:
+            pass
+        await ws_manager.broadcast_to_workspace({
+            "type": "execution_error",
+            "report_id": report_id,
+            "error": str(e)
+        }, workspace_id)
+    finally:
+        # 无论成功/失败，释放执行锁
+        async with _running_tasks_lock:
+            _running_tasks.discard(task_id)
 
 
 @router.post("/execute")
@@ -726,41 +1151,62 @@ async def execute_cases(
     request: ExecuteRequest, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    result = await db.execute(select(TestCase).where(TestCase.task_id == request.task_id))
-    cases = result.scalars().all()
-    if request.case_ids:
-        cases = [c for c in cases if c.id in request.case_ids]
-    cases = [c for c in cases if not getattr(c, "deprecated", False)]
-    case_dicts = [
-        {"id": c.id, "name": c.name, "module": c.module, "priority": c.priority,
-         "preconditions": c.preconditions, "steps": c.steps,
-         "expected_results": c.expected_results, "element_selector": getattr(c, "element_selector", "")}
-        for c in cases
-    ]
-    task_result = await db.execute(select(TestTask).where(TestTask.id == request.task_id))
-    task = task_result.scalar_one_or_none()
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-    await check_access(db, task, current_user, "任务")
-    task_url  = task.url  if task else ""
-    task_name = task.name if task else f"Task {request.task_id}"
-    report = TestReport(
-        task_id=request.task_id, name=f"{task_name} - 测试报告",
-        summary={}, details=[], pass_rate=0, total_cases=len(case_dicts),
-        passed=0, failed=0, skipped=0,
-        created_by=current_user.username,
-        project_id=task.project_id,
-    )
-    db.add(report)
-    await db.commit()
-    await db.refresh(report)
-    background_tasks.add_task(
-        _run_execution_bg,
-        report_id=report.id, task_id=request.task_id, task_name=task_name,
-        task_url=task_url, case_dicts=case_dicts, case_ids=request.case_ids, browser=request.browser,
-    )
-    return {"report_id": report.id, "status": "running", "total": len(case_dicts),
-            "message": f"开始执行 {len(case_dicts)} 个用例，请通过 WebSocket 接收进度"}
+    # ── 防止同一 task 重复并发执行 ────────────────────────────────────────────
+    async with _running_tasks_lock:
+        if request.task_id in _running_tasks:
+            raise HTTPException(status_code=409,
+                                detail="该任务正在执行中，请等待完成后再触发")
+        _running_tasks.add(request.task_id)
+
+    try:
+        result = await db.execute(select(TestCase).where(TestCase.task_id == request.task_id))
+        cases = result.scalars().all()
+        if request.case_ids:
+            cases = [c for c in cases if c.id in request.case_ids]
+        cases = [c for c in cases if not getattr(c, "deprecated", False)]
+        case_dicts = [
+            {"id": c.id, "name": c.name, "module": c.module, "priority": c.priority,
+             "preconditions": c.preconditions, "steps": c.steps,
+             "expected_results": c.expected_results,
+             "element_selector": getattr(c, "element_selector", ""),
+             "steps_json": getattr(c, "steps_json", None)}
+            for c in cases
+        ]
+        task_result = await db.execute(select(TestTask).where(TestTask.id == request.task_id))
+        task = task_result.scalar_one_or_none()
+        if not task:
+            async with _running_tasks_lock:
+                _running_tasks.discard(request.task_id)
+            raise HTTPException(status_code=404, detail="Task not found")
+        await check_access(db, task, current_user, "任务")
+        task_url  = task.url  if task else ""
+        task_name = task.name if task else f"Task {request.task_id}"
+        report = TestReport(
+            task_id=request.task_id, name=f"{task_name} - 测试报告",
+            summary={}, details=[], pass_rate=0, total_cases=len(case_dicts),
+            passed=0, failed=0, skipped=0,
+            created_by=current_user.username,
+            project_id=task.project_id,
+        )
+        db.add(report)
+        await db.commit()
+        await db.refresh(report)
+        background_tasks.add_task(
+            _run_execution_bg,
+            report_id=report.id, task_id=request.task_id, task_name=task_name,
+            task_url=task_url, case_dicts=case_dicts, case_ids=request.case_ids, browser=request.browser,
+            workspace_id=task.project_id,
+        )
+        return {"report_id": report.id, "status": "running", "total": len(case_dicts),
+                "message": f"开始执行 {len(case_dicts)} 个用例，请通过 WebSocket 接收进度"}
+    except HTTPException:
+        async with _running_tasks_lock:
+            _running_tasks.discard(request.task_id)
+        raise
+    except Exception:
+        async with _running_tasks_lock:
+            _running_tasks.discard(request.task_id)
+        raise
 
 
 @router.get("/reports", response_model=List[ReportResponse])
@@ -779,7 +1225,9 @@ async def list_reports(workspace_id: int = None, db: AsyncSession = Depends(get_
             total_cases=r.total_cases or 0, passed=r.passed or 0,
             failed=r.failed or 0, skipped=r.skipped or 0, pass_rate=r.pass_rate or 0,
             details=json.loads(r.details) if isinstance(r.details, str) else (r.details or []),
-            created_at=r.created_at.isoformat() if r.created_at else "",
+            created_at=_fmt_cst(r.created_at),
+            finished_at=_fmt_cst(r.finished_at) if r.finished_at else _fmt_cst(r.created_at),
+            browser=r.browser or "chromium",
         )
         for r in reports
     ]
@@ -799,29 +1247,49 @@ async def get_report_by_id(report_id: int, db: AsyncSession = Depends(get_db), c
         total_cases=report.total_cases or 0, passed=report.passed or 0,
         failed=report.failed or 0, skipped=report.skipped or 0, pass_rate=report.pass_rate or 0,
         details=json.loads(report.details) if isinstance(report.details, str) else (report.details or []),
-        created_at=report.created_at.isoformat() if report.created_at else "",
+        created_at=_fmt_cst(report.created_at),
+        finished_at=_fmt_cst(report.finished_at) if report.finished_at else _fmt_cst(report.created_at),
+        browser=report.browser or "chromium",
     )
 
 
 @router.get("/reports/{report_id}/export")
-async def export_report(report_id: int, db: AsyncSession = Depends(get_db)):
+async def export_report(report_id: int, db: AsyncSession = Depends(get_db),
+                        current_user: User = Depends(get_current_user)):
     from fastapi.responses import HTMLResponse
     from urllib.parse import quote
     result = await db.execute(select(TestReport).where(TestReport.id == report_id))
     report = result.scalar_one_or_none()
     if not report:
         raise HTTPException(status_code=404, detail="Report not found")
+    await check_access(db, report, current_user, "报告")
     summary  = json.loads(report.summary) if isinstance(report.summary, str) else (report.summary  or {})
     details  = json.loads(report.details)  if isinstance(report.details, str)  else (report.details  or [])
     task_name  = report.name or f"报告 {report_id}"
-    created_at = report.created_at.strftime("%Y-%m-%d %H:%M:%S") if report.created_at else ""
+    created_at = _fmt_cst(report.created_at)
+    # 统计数字以 summary JSON 为准
+    s_total    = summary.get("total") or len(details)
+    s_passed   = summary.get("passed", 0)
+    s_failed   = summary.get("failed", 0)
+    s_skipped  = summary.get("skipped", 0)
+    s_rate     = round(summary.get("pass_rate", 0), 1)
+    s_duration = round(summary.get("total_duration", 0), 2)
+    s_pr_color = "green" if s_rate >= 80 else "red"
     details_rows = ""
     for detail in details:
         status_map = {"passed": ("success", "通过"), "failed": ("danger", "失败"), "skipped": ("warning", "跳过")}
         cls, label = status_map.get(detail.get("status", ""), ("secondary", detail.get("status", "-")))
         err = (detail.get("error_message") or "-")[:120]
         shot = detail.get("screenshot", "")
-        shot_cell = f'<td><a href="{shot}" target="_blank" style="color:#409eff;">查看</a></td>' if shot else "<td>-</td>"
+        if shot:
+            data_uri = _screenshot_data_uri(shot)
+            shot_cell = (
+                f'<td><a href="{data_uri}" target="_blank" style="display:inline-block">'
+                f'<img src="{data_uri}" style="max-width:120px;max-height:80px;border-radius:4px;'
+                f'border:1px solid #e8e8e8;cursor:pointer" title="点击查看原图" /></a></td>'
+            )
+        else:
+            shot_cell = "<td style='color:#ccc'>-</td>"
         details_rows += f"""
         <tr>
             <td>{detail.get('id','')}</td><td>{detail.get('case_name','-')}</td>
@@ -854,12 +1322,12 @@ th{{background:#fafafa;font-weight:600;color:#555}}
 <div class="container">
   <div class="header"><h1>{task_name}</h1><p class="meta">生成时间：{created_at}</p></div>
   <div class="cards">
-    <div class="card"><div class="num blue">{summary.get('total',0)}</div><div class="lbl">总用例数</div></div>
-    <div class="card"><div class="num green">{summary.get('passed',0)}</div><div class="lbl">通过</div></div>
-    <div class="card"><div class="num red">{summary.get('failed',0)}</div><div class="lbl">失败</div></div>
-    <div class="card"><div class="num orange">{summary.get('skipped',0)}</div><div class="lbl">跳过</div></div>
-    <div class="card"><div class="num green">{summary.get('pass_rate',0)}%</div><div class="lbl">通过率</div></div>
-    <div class="card"><div class="num">{summary.get('total_duration',0)}s</div><div class="lbl">总耗时</div></div>
+    <div class="card"><div class="num blue">{s_total}</div><div class="lbl">总用例数</div></div>
+    <div class="card"><div class="num green">{s_passed}</div><div class="lbl">通过</div></div>
+    <div class="card"><div class="num red">{s_failed}</div><div class="lbl">失败</div></div>
+    <div class="card"><div class="num orange">{s_skipped}</div><div class="lbl">跳过</div></div>
+    <div class="card"><div class="num {s_pr_color}">{s_rate}%</div><div class="lbl">通过率</div></div>
+    <div class="card"><div class="num">{s_duration}s</div><div class="lbl">总耗时</div></div>
   </div>
   <div class="section"><h2>用例执行详情</h2>
     <table><thead><tr><th>序号</th><th>用例名称</th><th>状态</th><th>耗时</th><th>错误信息</th><th>截图</th></tr></thead>
@@ -870,53 +1338,293 @@ th{{background:#fafafa;font-weight:600;color:#555}}
     return HTMLResponse(content=html, headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}"})
 
 
-@router.get("/reports/{report_id}/pdf")
-async def export_report_pdf(report_id: int, db: AsyncSession = Depends(get_db)):
-    """将测试报告导出为 PDF 文件（复用 Playwright Chromium 渲染）。"""
-    from fastapi.responses import Response
-    from urllib.parse import quote
-    from tools.pdf_exporter import html_to_pdf
-
+@router.get("/reports/{report_id}/progress")
+async def get_report_progress(report_id: int, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """获取报告执行进度（用于页面切换后恢复进度条状态）"""
     result = await db.execute(select(TestReport).where(TestReport.id == report_id))
     report = result.scalar_one_or_none()
     if not report:
         raise HTTPException(status_code=404, detail="Report not found")
+    await check_access(db, report, current_user, "报告")
 
-    task_name = report.name or f"报告_{report_id}"
+    # 检查是否仍在执行中：summary 为空且创建时间在 30 分钟内视为 running
+    is_running = False
+    if report.summary is None or report.summary == {}:
+        import datetime as _dt
+        age = (_dt.datetime.utcnow() - report.created_at.replace(tzinfo=None)).total_seconds()
+        if age < 1800:  # 30 分钟内
+            is_running = True
 
-    # 优先使用已落盘的 HTML 文件；若文件丢失则动态构建 HTML 字符串
-    html_path = report.report_path or ""
-    if html_path:
-        p = Path(html_path)
-        if not p.is_absolute():
-            p = Path(__file__).parent.parent.parent / html_path
-        if not p.exists():
-            html_path = ""
+    return {
+        "report_id": report.id,
+        "is_running": is_running,
+        "total_cases": report.total_cases or 0,
+        "passed": report.passed or 0,
+        "failed": report.failed or 0,
+        "details": report.details or [],
+    }
+
+
+@router.get("/reports/{report_id}/pdf")
+async def export_report_pdf(report_id: int, db: AsyncSession = Depends(get_db),
+                            current_user: User = Depends(get_current_user)):
+    """将 UI 自动化测试报告导出为 PDF（永远从 DB 现场重建，数据最新最准确）。"""
+    from fastapi.responses import Response
+    from urllib.parse import quote
+    from tools.pdf_exporter import html_to_pdf
+
+    # ── 1. 查报告 ──────────────────────────────────────────────────────────────
+    result = await db.execute(select(TestReport).where(TestReport.id == report_id))
+    report = result.scalar_one_or_none()
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+    await check_access(db, report, current_user, "报告")
+
+    # ── 2. 查关联任务（补充 URL / 浏览器 / 环境等字段）──────────────────────
+    task_result = await db.execute(select(TestTask).where(TestTask.id == report.task_id))
+    task = task_result.scalar_one_or_none()
+
+    # ── 3. 基本元数据 ──────────────────────────────────────────────────────────
+    task_name  = report.name or f"报告_{report_id}"
+    now        = datetime.now(_TZ_CST).strftime("%Y-%m-%d %H:%M:%S")
+    created_at = _fmt_cst(report.created_at)   # 报告创建时间（CST）
+    task_url   = (task.url   if task else "") or ""
+    browser    = (task.browser if task else "") or "chromium"
+    env        = (task.environment if task else "") or "test"
+    executor   = report.created_by or "—"
+
+    # ── 4. 统计数据：优先取 summary JSON（执行结束后写入的正本）──────────────
+    summary        = json.loads(report.summary) if isinstance(report.summary, str) else (report.summary or {})
+    details        = json.loads(report.details) if isinstance(report.details, str) else (report.details or [])
+    total          = summary.get("total") or report.total_cases or len(details)
+    passed         = summary.get("passed", 0) if summary.get("passed") is not None else (report.passed or 0)
+    failed         = summary.get("failed", 0) if summary.get("failed") is not None else (report.failed or 0)
+    skipped        = summary.get("skipped", 0) if summary.get("skipped") is not None else (report.skipped or 0)
+    pass_rate      = round(summary.get("pass_rate") if summary.get("pass_rate") is not None else (report.pass_rate or 0), 1)
+    total_duration = round(summary.get("total_duration") or 0, 2)
+    failed_cases   = summary.get("failed_cases") or []
+
+    # ── 5. 从 details 推算真实执行时间段（start_time 最小值 → end_time 最大值）──
+    def _parse_iso(s):
+        if not s:
+            return None
+        try:
+            dt = datetime.fromisoformat(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(_TZ_CST)
+        except Exception:
+            return None
+
+    start_times = [_parse_iso(d.get("start_time")) for d in details]
+    end_times   = [_parse_iso(d.get("end_time"))   for d in details]
+    start_times = [t for t in start_times if t]
+    end_times   = [t for t in end_times   if t]
+    exec_start  = min(start_times).strftime("%Y-%m-%d %H:%M:%S") if start_times else created_at
+    exec_end    = max(end_times).strftime("%Y-%m-%d %H:%M:%S")   if end_times   else "—"
+
+    # ── 6. 颜色 & 样式辅助 ────────────────────────────────────────────────────
+    pr_color   = "#52c41a" if pass_rate >= 80 else ("#fa8c16" if pass_rate >= 60 else "#ff4d4f")
+    pr_bg      = "#f6ffed" if pass_rate >= 80 else ("#fffbe6" if pass_rate >= 60 else "#fff1f0")
+
+    # ── 7. 构建用例详情行 ──────────────────────────────────────────────────────
+    rows = ""
+    for d in details:
+        st  = d.get("status", "")
+        lbl = {"passed": "✓ 通过", "failed": "✗ 失败", "skipped": "⊘ 跳过"}.get(st, st)
+        st_color  = {"passed": "#389e0d", "failed": "#cf1322", "skipped": "#ad6800"}.get(st, "#666")
+        st_bg     = {"passed": "#f6ffed", "failed": "#fff1f0", "skipped": "#fffbe6"}.get(st, "#fafafa")
+        err       = (d.get("error_message") or "—")[:400]
+        dur       = d.get("duration", 0)
+        # 时间列
+        d_start   = _parse_iso(d.get("start_time"))
+        d_end     = _parse_iso(d.get("end_time"))
+        time_str  = d_start.strftime("%H:%M:%S") if d_start else "—"
+        # 截图列
+        shot = d.get("screenshot", "")
+        if shot:
+            data_uri = _screenshot_data_uri(shot)
+            shot_td = (
+                f"<td style='text-align:center;padding:4px 8px'>"
+                f"<a href='{data_uri}' target='_blank'>"
+                f"<img src='{data_uri}' style='max-width:96px;max-height:64px;"
+                f"border-radius:4px;border:1px solid #e8e8e8;display:block;margin:0 auto'/>"
+                f"</a></td>"
+            )
+        else:
+            shot_td = "<td style='color:#ccc;text-align:center'>—</td>"
+
+        rows += (
+            f"<tr>"
+            f"<td style='color:#aaa;text-align:center;width:36px'>{d.get('id','')}</td>"
+            f"<td style='font-weight:500;min-width:120px'>{d.get('case_name','-')}</td>"
+            f"<td style='width:64px'><span style='padding:2px 10px;border-radius:10px;font-size:11px;"
+            f"font-weight:600;background:{st_bg};color:{st_color}'>{lbl}</span></td>"
+            f"<td style='width:56px;text-align:right;color:#666'>{dur} s</td>"
+            f"<td style='width:72px;color:#888;font-size:11px'>{time_str}</td>"
+            f"<td style='font-size:11px;color:#888;word-break:break-all'>{err}</td>"
+            f"{shot_td}"
+            f"</tr>"
+        )
+
+    # ── 8. 失败用例摘要块 ──────────────────────────────────────────────────────
+    failed_block = ""
+    if failed_cases:
+        failed_items = "".join(
+            f"<li style='margin:5px 0;color:#cf1322'>"
+            f"<b>{fc.get('case_name','—')}</b>"
+            f"<span style='color:#888;font-size:11px;margin-left:8px'>{str(fc.get('error',''))[:200]}</span>"
+            f"</li>"
+            for fc in failed_cases[:20]
+        )
+        failed_block = f"""
+<div class="section">
+  <div class="sec-hdr"><span class="sec-icon">⚠️</span>失败用例摘要</div>
+  <ul style="list-style:none;padding:0;margin:0">{failed_items}</ul>
+</div>"""
+
+    # ── 9. 拼 HTML ─────────────────────────────────────────────────────────────
+    empty_row = f'<tr><td colspan="7" style="text-align:center;color:#aaa;padding:32px">暂无执行数据</td></tr>'
+    html_str = f"""<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><title>{task_name}</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+      color:#1a1a1a;font-size:13px;line-height:1.65;background:#fff}}
+
+/* ── 封面 ── */
+.cover{{background:linear-gradient(140deg,#0f2544 0%,#1a3d6e 55%,#0d5c8f 100%);color:#fff;padding:52px 56px 44px}}
+.cover-badge{{font-size:10px;letter-spacing:3px;opacity:.45;margin-bottom:14px;text-transform:uppercase}}
+.cover h1{{font-size:26px;font-weight:700;margin-bottom:4px;line-height:1.3}}
+.cover-sub{{font-size:13px;opacity:.55;margin-bottom:28px}}
+.cover-stats{{display:flex;gap:0;margin:0 -1px}}
+.cs{{flex:1;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);
+     padding:14px 12px;text-align:center;margin:0 1px;border-radius:6px}}
+.cs .n{{font-size:26px;font-weight:700;line-height:1}}
+.cs .l{{font-size:10px;opacity:.55;margin-top:4px}}
+.cover-meta{{font-size:11px;opacity:.38;margin-top:20px;line-height:1.8}}
+
+/* ── 正文 ── */
+.body{{padding:32px 48px 40px}}
+.section{{margin-bottom:28px}}
+.sec-hdr{{display:flex;align-items:center;gap:8px;font-size:15px;font-weight:700;color:#0f2544;
+          padding-bottom:10px;border-bottom:2px solid #e8edf2;margin-bottom:16px}}
+.sec-icon{{font-size:16px}}
+
+/* ── 信息卡 ── */
+.info-grid{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}
+.info-item{{background:#f7f9fc;border:1px solid #e4eaf0;border-radius:6px;padding:10px 14px}}
+.info-label{{font-size:11px;color:#8a9ab0;margin-bottom:3px}}
+.info-value{{font-size:13px;color:#1a2a3a;font-weight:500;word-break:break-all}}
+
+/* ── 通过率大数字 ── */
+.rate-row{{display:flex;align-items:center;gap:24px;margin-bottom:20px}}
+.rate-circle{{width:90px;height:90px;border-radius:50%;display:flex;flex-direction:column;
+              align-items:center;justify-content:center;border:5px solid {pr_color};flex-shrink:0}}
+.rate-pct{{font-size:22px;font-weight:700;color:{pr_color};line-height:1}}
+.rate-lbl{{font-size:10px;color:#8a9ab0;margin-top:2px}}
+.stat-bars{{flex:1;display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:10px}}
+.sb{{background:#f7f9fc;border:1px solid #e4eaf0;border-radius:6px;padding:12px;text-align:center}}
+.sb .n{{font-size:22px;font-weight:700;line-height:1;margin-bottom:4px}}
+.sb .l{{font-size:10px;color:#8a9ab0}}
+
+/* ── 表格 ── */
+table{{width:100%;border-collapse:collapse}}
+th,td{{padding:8px 10px;border:1px solid #e8edf2;text-align:left;font-size:12px;vertical-align:middle}}
+th{{background:#f0f4f8;font-weight:600;color:#445566;white-space:nowrap}}
+tr:nth-child(even) td{{background:#fafbfd}}
+tr:hover td{{background:#f0f7ff}}
+
+/* ── 页脚 ── */
+.footer{{text-align:center;color:#b0bcc8;font-size:10px;padding:20px 0 8px;
+         border-top:1px solid #eaeff4;margin-top:8px}}
+
+@media print{{
+  body{{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+  .cover{{page-break-after:always}}
+}}
+</style></head><body>
+
+<!-- ══ 封面 ══════════════════════════════════════════════════════════════ -->
+<div class="cover">
+  <div class="cover-badge">UI Automation Report</div>
+  <h1>{task_name}</h1>
+  <div class="cover-sub">UI 自动化测试报告</div>
+  <div class="cover-stats">
+    <div class="cs"><div class="n">{total}</div><div class="l">总用例</div></div>
+    <div class="cs"><div class="n" style="color:#73d13d">{passed}</div><div class="l">通过</div></div>
+    <div class="cs"><div class="n" style="color:#ff7875">{failed}</div><div class="l">失败</div></div>
+    <div class="cs"><div class="n" style="color:#ffc53d">{skipped}</div><div class="l">跳过</div></div>
+    <div class="cs"><div class="n" style="color:{'#73d13d' if pass_rate>=80 else ('#ffc53d' if pass_rate>=60 else '#ff7875')}">{pass_rate}%</div><div class="l">通过率</div></div>
+    <div class="cs"><div class="n">{total_duration}s</div><div class="l">总耗时</div></div>
+  </div>
+  <div class="cover-meta">
+    执行开始：{exec_start} &nbsp;|&nbsp; 执行结束：{exec_end}<br>
+    目标地址：{task_url or '—'} &nbsp;|&nbsp; 浏览器：{browser} &nbsp;|&nbsp; 环境：{env}<br>
+    执行人：{executor} &nbsp;|&nbsp; 导出时间：{now}（北京时间）
+  </div>
+</div>
+
+<!-- ══ 正文 ══════════════════════════════════════════════════════════════ -->
+<div class="body">
+
+  <!-- 执行信息 -->
+  <div class="section">
+    <div class="sec-hdr"><span class="sec-icon">📋</span>执行信息</div>
+    <div class="info-grid">
+      <div class="info-item"><div class="info-label">目标地址</div><div class="info-value">{task_url or '—'}</div></div>
+      <div class="info-item"><div class="info-label">浏览器 / 环境</div><div class="info-value">{browser} / {env}</div></div>
+      <div class="info-item"><div class="info-label">执行开始</div><div class="info-value">{exec_start}</div></div>
+      <div class="info-item"><div class="info-label">执行结束</div><div class="info-value">{exec_end}</div></div>
+      <div class="info-item"><div class="info-label">报告生成</div><div class="info-value">{created_at}</div></div>
+      <div class="info-item"><div class="info-label">执行人</div><div class="info-value">{executor}</div></div>
+    </div>
+  </div>
+
+  <!-- 执行统计 -->
+  <div class="section">
+    <div class="sec-hdr"><span class="sec-icon">📊</span>执行统计</div>
+    <div class="rate-row">
+      <div class="rate-circle">
+        <div class="rate-pct">{pass_rate}%</div>
+        <div class="rate-lbl">通过率</div>
+      </div>
+      <div class="stat-bars">
+        <div class="sb"><div class="n" style="color:#1677ff">{total}</div><div class="l">总用例数</div></div>
+        <div class="sb"><div class="n" style="color:#52c41a">{passed}</div><div class="l">通过</div></div>
+        <div class="sb"><div class="n" style="color:#ff4d4f">{failed}</div><div class="l">失败</div></div>
+        <div class="sb"><div class="n" style="color:#faad14">{skipped}</div><div class="l">跳过</div></div>
+      </div>
+    </div>
+  </div>
+
+  {failed_block}
+
+  <!-- 用例详情 -->
+  <div class="section">
+    <div class="sec-hdr"><span class="sec-icon">🔍</span>用例执行详情</div>
+    <table>
+      <thead>
+        <tr>
+          <th style="width:36px">#</th>
+          <th>用例名称</th>
+          <th style="width:64px">结果</th>
+          <th style="width:52px">耗时</th>
+          <th style="width:68px">开始时间</th>
+          <th>错误信息</th>
+          <th style="width:106px">截图</th>
+        </tr>
+      </thead>
+      <tbody>{rows if rows else empty_row}</tbody>
+    </table>
+  </div>
+
+</div>
+<div class="footer">本报告由 AI 测试平台自动生成 &nbsp;·&nbsp; 导出时间：{now}（北京时间）</div>
+</body></html>"""
 
     try:
-        if html_path:
-            pdf_bytes = await html_to_pdf(html_path=str(p))
-        else:
-            # report_path 不存在时，从 export_report 接口复用同样的 HTML 构建逻辑
-            summary = json.loads(report.summary) if isinstance(report.summary, str) else (report.summary or {})
-            details = json.loads(report.details) if isinstance(report.details, str) else (report.details or [])
-            created_at = report.created_at.strftime("%Y-%m-%d %H:%M:%S") if report.created_at else ""
-            details_rows = ""
-            for detail in details:
-                status_map = {"passed": ("success", "通过"), "failed": ("danger", "失败"), "skipped": ("warning", "跳过")}
-                cls, label = status_map.get(detail.get("status", ""), ("secondary", detail.get("status", "-")))
-                err = (detail.get("error_message") or "-")[:120]
-                details_rows += f"<tr><td>{detail.get('id','')}</td><td>{detail.get('case_name','-')}</td><td><span class='badge bg-{cls}'>{label}</span></td><td>{detail.get('duration',0)}s</td><td>{err}</td></tr>"
-            html_str = f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>{task_name}</title>
-<style>body{{font-family:-apple-system,sans-serif;padding:24px;color:#333}}
-table{{width:100%;border-collapse:collapse}}th,td{{padding:8px 12px;border:1px solid #e8e8e8;font-size:13px}}
-th{{background:#fafafa}}.badge{{padding:2px 8px;border-radius:4px;font-size:12px}}
-.bg-success{{background:#d9f7be;color:#52c41a}}.bg-danger{{background:#fff1f0;color:#ff4d4f}}
-.bg-warning{{background:#fffbe6;color:#fa8c16}}</style></head>
-<body><h2>{task_name}</h2><p>生成时间：{created_at} &nbsp;|&nbsp; 通过率：{summary.get('pass_rate',0)}%</p>
-<table><thead><tr><th>序号</th><th>用例名称</th><th>状态</th><th>耗时</th><th>错误信息</th></tr></thead>
-<tbody>{details_rows}</tbody></table></body></html>"""
-            pdf_bytes = await html_to_pdf(html_str=html_str)
+        pdf_bytes = await html_to_pdf(html_str=html_str)
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -974,7 +1682,9 @@ async def get_report(task_id: int, db: AsyncSession = Depends(get_db), current_u
         total_cases=report.total_cases or 0, passed=report.passed or 0,
         failed=report.failed or 0, skipped=report.skipped or 0, pass_rate=report.pass_rate or 0,
         details=json.loads(report.details) if isinstance(report.details, str) else (report.details or []),
-        created_at=report.created_at.isoformat() if report.created_at else "",
+        created_at=_fmt_cst(report.created_at),
+        finished_at=_fmt_cst(report.finished_at) if report.finished_at else _fmt_cst(report.created_at),
+        browser=report.browser or "chromium",
     )
 
 
@@ -1156,22 +1866,49 @@ async def test_llm_connection(request: LLMTestRequest):
     test_api_key = request.api_key or settings.AI_API_KEY
     if not test_api_key:
         return {"success": False, "error": "API key is required"}
-    last_err = "连接失败"
-    async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
-        for endpoint, headers, body in [
+
+    # 根据 API URL 判断是否 Anthropic，优先用匹配的端点格式
+    is_anthropic = "anthropic.com" in test_api_url
+    if is_anthropic:
+        candidates = [
+            (f"{test_api_url}/v1/messages",
+             {"x-api-key": test_api_key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"},
+             {"model": test_model, "max_tokens": 10, "messages": [{"role": "user", "content": "reply: ok"}]}),
+            (f"{test_api_url}/v1/chat/completions",
+             {"Authorization": f"Bearer {test_api_key}", "Content-Type": "application/json"},
+             {"model": test_model, "messages": [{"role": "user", "content": "reply: ok"}], "max_tokens": 10}),
+        ]
+    else:
+        candidates = [
             (f"{test_api_url}/v1/chat/completions",
              {"Authorization": f"Bearer {test_api_key}", "Content-Type": "application/json"},
              {"model": test_model, "messages": [{"role": "user", "content": "reply: ok"}], "max_tokens": 10}),
             (f"{test_api_url}/v1/messages",
              {"x-api-key": test_api_key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"},
              {"model": test_model, "max_tokens": 10, "messages": [{"role": "user", "content": "reply: ok"}]}),
-        ]:
+        ]
+
+    last_err = "连接失败"
+    # 每个端点最多等 15 秒，两个端点合计不超过 30 秒，前端 60s 超时足够
+    async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
+        for endpoint, headers, body in candidates:
             try:
                 resp = await client.post(endpoint, headers=headers, json=body)
-            except Exception:
+            except Exception as e:
+                last_err = f"请求异常: {e}"
                 continue
             if resp.status_code not in (200, 201):
-                last_err = resp.text[:300]
+                ct = resp.headers.get("content-type", "")
+                if "html" in ct or resp.text.lstrip().startswith("<"):
+                    status_hints = {
+                        403: "403 Forbidden —— 服务器拒绝访问，可能原因：① 当前服务器 IP 被 Anthropic 地区限制，需使用中转代理；② API Key 已失效",
+                        401: "401 Unauthorized —— API Key 无效或已过期，请检查 Key 是否正确",
+                        429: "429 Too Many Requests —— 请求频率超限或账户余额不足",
+                        404: "404 Not Found —— API 地址不正确，请确认 URL 格式",
+                    }
+                    last_err = status_hints.get(resp.status_code, f"HTTP {resp.status_code} 错误，服务器返回了 HTML 页面")
+                else:
+                    last_err = f"HTTP {resp.status_code}: {resp.text[:200]}"
                 continue
             ct = resp.headers.get("content-type", "")
             if "html" in ct or resp.text.lstrip().startswith("<"):
@@ -1190,3 +1927,376 @@ async def test_llm_connection(request: LLMTestRequest):
                 return {"success": True, "model": test_model, "message": f"连接成功，模型回复: {reply[:50]}"}
             last_err = f"响应格式未知: {str(data)[:200]}"
     return {"success": False, "error": last_err}
+
+
+# ── 任务级环境变量（TaskEnvVar） ──────────────────────────────────────────────
+
+@router.get("/tasks/{task_id}/env-vars")
+async def list_env_vars(task_id: int, db: AsyncSession = Depends(get_db),
+                        current_user: User = Depends(get_current_user)):
+    task_result = await db.execute(select(TestTask).where(TestTask.id == task_id))
+    task = task_result.scalar_one_or_none()
+    if task:
+        await check_access(db, task, current_user, "任务")
+    result = await db.execute(select(TaskEnvVar).where(TaskEnvVar.task_id == task_id))
+    rows = result.scalars().all()
+    return [
+        {"id": r.id, "key": r.key,
+         "value": "***" if r.is_secret else r.value,
+         "is_secret": r.is_secret}
+        for r in rows
+    ]
+
+
+@router.post("/tasks/{task_id}/env-vars")
+async def upsert_env_var(task_id: int, body: dict,
+                         db: AsyncSession = Depends(get_db),
+                         current_user: User = Depends(get_current_user)):
+    """新增或更新单个变量（key 相同则覆盖）。"""
+    task_result = await db.execute(select(TestTask).where(TestTask.id == task_id))
+    task = task_result.scalar_one_or_none()
+    if task:
+        await check_access(db, task, current_user, "任务")
+    key       = body.get("key", "").strip()
+    value     = body.get("value", "")
+    is_secret = bool(body.get("is_secret", False))
+    if not key:
+        raise HTTPException(status_code=400, detail="key 不能为空")
+    result = await db.execute(
+        select(TaskEnvVar).where(TaskEnvVar.task_id == task_id, TaskEnvVar.key == key)
+    )
+    var = result.scalar_one_or_none()
+    if var:
+        var.value     = value
+        var.is_secret = is_secret
+    else:
+        var = TaskEnvVar(task_id=task_id, key=key, value=value, is_secret=is_secret)
+        db.add(var)
+    await db.commit()
+    await db.refresh(var)
+    return {"id": var.id, "key": var.key, "is_secret": var.is_secret}
+
+
+@router.delete("/tasks/{task_id}/env-vars/{var_id}")
+async def delete_env_var(task_id: int, var_id: int,
+                         db: AsyncSession = Depends(get_db),
+                         current_user: User = Depends(get_current_user)):
+    from sqlalchemy import delete as sql_delete
+    task_result = await db.execute(select(TestTask).where(TestTask.id == task_id))
+    task = task_result.scalar_one_or_none()
+    if task:
+        await check_access(db, task, current_user, "任务")
+    await db.execute(
+        sql_delete(TaskEnvVar).where(TaskEnvVar.id == var_id, TaskEnvVar.task_id == task_id)
+    )
+    await db.commit()
+    return {"message": "deleted"}
+
+
+@router.delete("/env-vars/{var_id}")
+async def delete_env_var_by_id(var_id: int,
+                                db: AsyncSession = Depends(get_db),
+                                current_user: User = Depends(get_current_user)):
+    """按 var_id 直接删除环境变量（前端简化调用路径）。"""
+    from sqlalchemy import delete as sql_delete
+    # 通过 TaskEnvVar.task_id 追溯 task 并校验工作空间权限
+    var_result = await db.execute(select(TaskEnvVar).where(TaskEnvVar.id == var_id))
+    env_var = var_result.scalar_one_or_none()
+    if env_var:
+        task_result = await db.execute(select(TestTask).where(TestTask.id == env_var.task_id))
+        task = task_result.scalar_one_or_none()
+        if task:
+            await check_access(db, task, current_user, "任务")
+    await db.execute(sql_delete(TaskEnvVar).where(TaskEnvVar.id == var_id))
+    await db.commit()
+    return {"message": "deleted"}
+
+
+# ── 录制端点 ──────────────────────────────────────────────────────────────────
+# 每个 task_id 同时只允许一个录制 session，防止多 session 互相收到对方步骤事件
+_active_recording_tasks: set = set()
+_active_recording_lock = asyncio.Lock()
+
+
+@router.post("/recording/start")
+async def recording_start(body: dict,
+                           db: AsyncSession = Depends(get_db),
+                           current_user: User = Depends(get_current_user)):
+    """启动有头浏览器开始录制，返回 session_id。"""
+    from skills.recorder import start_recording
+    from api.websocket_manager import ws_manager as _ws
+
+    task_id      = int(body.get("task_id", 0))
+    url          = body.get("url", "")
+    browser_type = body.get("browser_type", "chromium")
+    if not url:
+        raise HTTPException(status_code=400, detail="url 不能为空")
+
+    if task_id:
+        task_result = await db.execute(select(TestTask).where(TestTask.id == task_id))
+        task = task_result.scalar_one_or_none()
+        if task:
+            await check_access(db, task, current_user, "任务")
+
+    # 同一任务只允许一个录制 session
+    async with _active_recording_lock:
+        if task_id and task_id in _active_recording_tasks:
+            raise HTTPException(status_code=409,
+                                detail="该任务已有录制会话正在进行，请先停止再重新录制")
+        if task_id:
+            _active_recording_tasks.add(task_id)
+
+    async def _push(msg: dict):
+        await _ws.broadcast(msg, client_id=f"rec_{task_id}")
+
+    try:
+        session_id = await start_recording(task_id, url, browser_type, _push)
+        return {"session_id": session_id, "status": "recording"}
+    except Exception as e:
+        # 启动失败，释放录制锁
+        async with _active_recording_lock:
+            _active_recording_tasks.discard(task_id)
+        import traceback
+        full_tb = traceback.format_exc()
+        logger.error(f"[Recording] 录制启动失败: {type(e).__name__}: {e}\n{full_tb}")
+        raise HTTPException(status_code=500, detail=f"录制启动失败: {type(e).__name__}: {e}")
+
+
+@router.post("/recording/stop")
+async def recording_stop(body: dict,
+                          current_user: User = Depends(get_current_user)):
+    """停止录制，返回 ActionStep 列表。"""
+    from skills.recorder import stop_recording, _sessions
+    session_id = body.get("session_id", "")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id 不能为空")
+    # 停止前先记录 task_id，用于释放锁
+    task_id_to_release = None
+    if session_id in _sessions:
+        task_id_to_release = _sessions[session_id].task_id
+    try:
+        result = await stop_recording(session_id)
+        return {
+            "session_id": session_id,
+            "steps": result["steps"],
+            "count": len(result["steps"]),
+            "page_elements": result.get("page_elements", [])
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    finally:
+        # 无论成功/失败，释放录制锁
+        if task_id_to_release:
+            async with _active_recording_lock:
+                _active_recording_tasks.discard(task_id_to_release)
+
+
+@router.get("/recording/status/{session_id}")
+async def recording_status(session_id: str,
+                            current_user: User = Depends(get_current_user)):
+    """查询录制会话状态（前端轮询或 WS 断线后恢复用）。"""
+    from skills.recorder import get_session_status
+    return get_session_status(session_id)
+
+
+@router.post("/recording/save")
+async def recording_save(body: dict,
+                          db: AsyncSession = Depends(get_db),
+                          current_user: User = Depends(get_current_user)):
+    """将录制结果（ActionStep[]）保存为新用例。
+
+    前端传 task_id + steps；后端自动在该任务下新建一条用例，
+    steps 同时写入 steps_json（结构化执行引擎用）和 steps（可读文本）。
+    录制步骤会经过智能补全：断言、wait、预期结果自动生成。
+    """
+    from tools.action_schema import steps_to_description
+    from skills.recorder import enrich_recorded_steps, generate_case_name, generate_expected_results
+    task_id = int(body.get("task_id", 0))
+    steps   = body.get("steps", [])
+    page_title = body.get("page_title", "")
+    name    = body.get("name", "")
+
+    if not task_id:
+        raise HTTPException(status_code=400, detail="task_id 不能为空")
+    if not steps:
+        raise HTTPException(status_code=400, detail="steps 不能为空")
+
+    task_result = await db.execute(select(TestTask).where(TestTask.id == task_id))
+    task = task_result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    await check_access(db, task, current_user, "任务")
+
+    # ── 智能补全：断言 + wait + 预期结果 + 名称 ──
+    enriched_steps = enrich_recorded_steps(steps, page_title)
+    if not name:
+        name = generate_case_name(enriched_steps, page_title)
+    expected = generate_expected_results(enriched_steps)
+
+    # 将 ActionStep 列表转换为可读文本，存入 steps 字段（兼容旧版报告显示）
+    steps_text = steps_to_description(enriched_steps)
+
+    case = TestCase(
+        task_id=task_id,
+        name=name,
+        module="录制",
+        priority="P1",
+        steps=steps_text,
+        steps_json=enriched_steps,
+        expected_results=expected,
+        enabled=True,
+        created_by=current_user.username,
+        project_id=task.project_id,
+    )
+    db.add(case)
+    await db.commit()
+    await db.refresh(case)
+    return {"case_id": case.id, "steps_count": len(enriched_steps), "message": f"录制步骤已保存为用例「{name}」"}
+
+
+# ── 多浏览器并行执行 ──────────────────────────────────────────────────────────
+
+@router.post("/execute/multi-browser")
+async def execute_multi_browser(
+    body: dict, background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """多浏览器并行执行：每个浏览器独立生成一条 TestReport。"""
+    from skills.parallel_runner import run_multi_browser_bg
+
+    task_id  = int(body.get("task_id", 0))
+    browsers = body.get("browsers", ["chromium"])
+    case_ids = body.get("case_ids") or None
+
+    result = await db.execute(select(TestTask).where(TestTask.id == task_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    await check_access(db, task, current_user, "任务")
+
+    # 查用例
+    stmt = select(TestCase).where(TestCase.task_id == task_id,
+                                   TestCase.deprecated == False)
+    if case_ids:
+        stmt = stmt.where(TestCase.id.in_(case_ids))
+    cases_result = await db.execute(stmt)
+    cases = cases_result.scalars().all()
+    if not cases:
+        raise HTTPException(status_code=400, detail="没有可执行的用例")
+
+    case_dicts = [
+        {"id": c.id, "name": c.name, "module": c.module,
+         "steps_json": c.steps_json or [], "steps": c.steps or "",
+         "expected_results": c.expected_results or "",
+         "element_selector": getattr(c, "element_selector", "") or ""}
+        for c in cases
+    ]
+
+    # 读取环境变量
+    env_result = await db.execute(
+        select(TaskEnvVar).where(TaskEnvVar.task_id == task_id)
+    )
+    env_vars = {r.key: r.value for r in env_result.scalars().all()}
+
+    # 为每个浏览器预建一条 TestReport（状态 running）
+    report_ids = {}
+    for browser in browsers:
+        report = TestReport(
+            task_id=task_id,
+            name=f"{task.name} [{browser}] - 测试报告",
+            summary={}, details=[], pass_rate=0,
+            total_cases=len(case_dicts),
+            passed=0, failed=0, skipped=0,
+            browser=browser,
+            created_by=current_user.username,
+            project_id=task.project_id,
+        )
+        db.add(report)
+        await db.commit()
+        await db.refresh(report)
+        report_ids[browser] = report.id
+
+    background_tasks.add_task(
+        run_multi_browser_bg,
+        task_id=task_id,
+        task_url=task.url,
+        task_name=task.name,
+        case_dicts=case_dicts,
+        browsers=browsers,
+        env_vars=env_vars,
+        report_ids=report_ids,
+        workspace_id=task.project_id,
+    )
+
+    return {
+        "status": "running",
+        "browsers": browsers,
+        "report_ids": report_ids,
+        "total_cases": len(case_dicts),
+        "message": f"已启动 {len(browsers)} 个浏览器并行执行 {len(case_dicts)} 条用例",
+    }
+
+
+# ── pytest 脚本导出 ───────────────────────────────────────────────────────────
+
+@router.post("/tasks/{task_id}/export/pytest")
+async def export_pytest(task_id: int, body: dict = None,
+                        db: AsyncSession = Depends(get_db),
+                        current_user: User = Depends(get_current_user)):
+    """生成 pytest + Playwright 脚本，直接作为文件流返回（zip 包）。"""
+    from skills.pytest_exporter import export_task_from_db
+    from fastapi.responses import FileResponse
+    from urllib.parse import quote
+    import zipfile, io
+
+    include_secrets = bool((body or {}).get("include_secrets", False))
+    result = await db.execute(select(TestTask).where(TestTask.id == task_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    await check_access(db, task, current_user, "任务")
+    try:
+        script_path = await export_task_from_db(task_id, db, include_secrets)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"生成脚本失败: {e}")
+
+    # 将 .py 文件打包成 zip 流返回（前端 responseType: 'blob' 直接下载）
+    py_path = Path(script_path)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.write(py_path, py_path.name)
+    buf.seek(0)
+
+    from fastapi.responses import StreamingResponse
+    safe_name = quote(f"pytest_task_{task_id}.zip", safe="")
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{safe_name}"},
+    )
+
+
+@router.get("/tasks/{task_id}/export/download")
+async def download_pytest_script(task_id: int,
+                                  db: AsyncSession = Depends(get_db),
+                                  current_user: User = Depends(get_current_user)):
+    """下载最近一次导出的 pytest 脚本文件。"""
+    from fastapi.responses import FileResponse
+    from urllib.parse import quote
+    result = await db.execute(select(TestTask).where(TestTask.id == task_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    await check_access(db, task, current_user, "任务")
+    script_path = Path(f"reports/pytest_exports/pytest_{task_id}.py")
+    if not script_path.exists():
+        raise HTTPException(status_code=404, detail="脚本文件不存在，请先调用 /export/pytest 生成")
+    safe_name = quote(f"{task.name}_pytest.py".replace("/", "_"), safe="")
+    return FileResponse(
+        path=str(script_path),
+        media_type="text/x-python",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{safe_name}"},
+    )

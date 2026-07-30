@@ -314,7 +314,7 @@ const testConnection = async () => {
       model: form.modelId || currentStatus.model,
       api_key: form.apiKey || undefined,
       api_url: form.apiUrl || currentStatus.apiUrl
-    })
+    }, { timeout: 60000 })
     testResult.value = res
     if (!res.success) ElMessage.error('连接失败: ' + res.error)
   } catch (err) {

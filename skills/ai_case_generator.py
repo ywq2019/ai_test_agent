@@ -14,17 +14,17 @@ from loguru import logger
 
 # ── 全局 LLM 并发限制 ────────────────────────────────────────────────────────
 # 限制整个系统同时进行的 LLM 调用总数，防止多用户并发时超出代理 QPS 导致 502 风暴
-# 值 = 代理能稳定承受的最大并发数，可通过环境变量 LLM_CONCURRENCY 调整
-import os as _os
-_LLM_CONCURRENCY = int(_os.environ.get("LLM_CONCURRENCY", "6"))
+# 值 = 代理能稳定承受的最大并发数，可通过 .env LLM_CONCURRENCY 调整
+from tools.config import settings as _settings
+_LLM_CONCURRENCY = _settings.LLM_CONCURRENCY
 _GLOBAL_LLM_SEM  = asyncio.Semaphore(_LLM_CONCURRENCY)
 # Semaphore 等待超时（秒）：超过此时长说明系统过载，直接返回友好错误而非无限挂起
-_LLM_SEM_TIMEOUT = int(_os.environ.get("LLM_SEM_TIMEOUT", "60"))
+_LLM_SEM_TIMEOUT = _settings.LLM_SEM_TIMEOUT
 
 # ── 后台生成任务并发计数 ──────────────────────────────────────────────────────
 # 限制同时进行的 AI 生成任务数（每个任务内部会占用多个 LLM 调用槽位）
 # 超出上限时接口直接返回 429，避免任务无限堆积
-_MAX_ACTIVE_GENERATE = int(_os.environ.get("MAX_ACTIVE_GENERATE", "3"))
+_MAX_ACTIVE_GENERATE = _settings.MAX_ACTIVE_GENERATE
 _active_generate_count = 0
 _active_generate_lock  = asyncio.Lock()
 

@@ -3,7 +3,7 @@
 """
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, Float, JSON, ForeignKey
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, Float, JSON, ForeignKey, Index
 from datetime import datetime
 from tools.config import settings
 
@@ -58,9 +58,24 @@ class TestCase(Base):
     steps = Column(Text)
     expected_results = Column(Text)
     element_selector = Column(String(512), nullable=True, default="")
-    enabled = Column(Boolean, default=True)       # 用户手动启用/禁用（禁用不执行但用例有效）
-    deprecated = Column(Boolean, default=False)   # 需求变更废弃（不参与执行和覆盖率统计）
+    enabled = Column(Boolean, default=True)
+    deprecated = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    # ── 方案C：结构化执行字段 ─────────────────────────────────────────────────
+    # 录制/AI生成的结构化步骤列表，格式见 tools/action_schema.py ActionStep
+    steps_json = Column(JSON, nullable=True)
+    # 浏览器矩阵执行结果快照：{chromium: {status, duration}, firefox: {...}, ...}
+    browser_matrix = Column(JSON, nullable=True)
+
+    # ── 权限与隔离 ──
+    created_by = Column(String(100), nullable=True, index=True)
+    project_id = Column(Integer, nullable=True, index=True)
+
+    # 执行时常同时过滤 task_id + deprecated，加复合索引提速
+    __table_args__ = (
+        Index("ix_test_cases_task_deprecated", "task_id", "deprecated"),
+    )
 
 
 class TestResult(Base):
@@ -76,8 +91,13 @@ class TestResult(Base):
     duration = Column(Float, default=0)
     error_message = Column(Text, nullable=True)
     screenshot_path = Column(String(512), nullable=True)
-    logs = Column(Text, nullable=True)
+    logs = Column(JSON, nullable=True, default=None)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    # 报告聚合时常联合查询 (task_id, case_id)
+    __table_args__ = (
+        Index("ix_test_results_task_case", "task_id", "case_id"),
+    )
 
 
 class TestReport(Base):
@@ -95,8 +115,31 @@ class TestReport(Base):
     skipped = Column(Integer, default=0)
     report_path = Column(String(512), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    finished_at = Column(DateTime, nullable=True, comment="执行完成时间")
     created_by = Column(String(100), nullable=True, index=True)
     project_id = Column(Integer, nullable=True, index=True)
+
+    # ── 方案C：多浏览器报告字段 ───────────────────────────────────────────────
+    browser     = Column(String(50), default="chromium")     # 本报告对应的浏览器
+    script_path = Column(String(512), nullable=True)          # 导出的 pytest 脚本路径
+
+
+class TaskEnvVar(Base):
+    """WebUI 任务级环境变量，供结构化步骤中 {{key}} 变量替换使用。
+    按 task_id 隔离，is_secret=True 的变量前端显示 ***，不回显明文。
+    """
+    __tablename__ = "task_env_vars"
+
+    id        = Column(Integer, primary_key=True, index=True)
+    task_id   = Column(Integer, nullable=False, index=True)
+    key       = Column(String(100), nullable=False)
+    value     = Column(Text, nullable=False, default="")
+    is_secret = Column(Boolean, default=False)   # 密码/token 等敏感值
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_task_env_vars_task", "task_id"),
+    )
 
 
 class AICaseFile(Base):
@@ -134,6 +177,11 @@ class AICaseFile(Base):
     # 用例-需求映射：{mapped_at, mappings: [{case_id, req_refs:[...]}]}
     traceability_data = Column(JSON, nullable=True)
 
+    # 列表查询常同时按 record_status + gen_status 过滤
+    __table_args__ = (
+        Index("ix_ai_case_files_status", "record_status", "gen_status"),
+    )
+
 
 class User(Base):
     __tablename__ = "users"
@@ -169,6 +217,11 @@ class ProjectMember(Base):
     username   = Column(String(100), nullable=False, index=True)
     role       = Column(String(20), default="member")   # owner / member
     joined_at  = Column(DateTime, default=datetime.utcnow)
+
+    # 复合唯一索引：check_access 每次请求都按 (project_id, username) 查询，必须有
+    __table_args__ = (
+        Index("ix_project_members_project_user", "project_id", "username", unique=True),
+    )
 
 
 class ApiProject(Base):
@@ -248,6 +301,7 @@ class ApiTestReport(Base):
     summary = Column(JSON, nullable=True)
     details = Column(JSON, nullable=True)
     analysis = Column(Text, nullable=True)
+    created_by = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -312,7 +366,48 @@ class TestPlanReport(Base):
     details = Column(JSON, nullable=True)
     var_snapshot = Column(JSON, nullable=True)  # 执行完毕时的共享变量快照
     analysis = Column(Text, nullable=True)
+    created_by = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class PentestTask(Base):
+    """渗透测试任务：一次扫描的配置与执行状态，按工作空间隔离。"""
+    __tablename__ = "pentest_tasks"
+
+    id           = Column(Integer, primary_key=True, index=True)
+    name         = Column(String(255), nullable=False)
+    workspace_id = Column(Integer, nullable=True, index=True)   # 所属工作空间
+    project_id   = Column(Integer, nullable=True, index=True)   # 关联接口项目（借用认证/BaseURL）
+    created_by   = Column(String(100), nullable=True, index=True)
+    executed_by  = Column(String(100), nullable=True)            # 最近一次触发扫描的用户
+    status       = Column(String(20), default="pending")        # pending/running/done/failed
+    scan_modules = Column(JSON, nullable=True)                  # ["unauth","idor","sensitive","sqli"]
+    case_ids     = Column(JSON, nullable=True)                  # 指定扫描的用例 id 列表，空=全部
+    concurrency  = Column(Integer, default=3)                   # 最大并发请求数
+    # 汇总：执行完毕后写入
+    total_checks = Column(Integer, default=0)
+    high_count   = Column(Integer, default=0)
+    medium_count = Column(Integer, default=0)
+    low_count    = Column(Integer, default=0)
+    info_count   = Column(Integer, default=0)
+    created_at   = Column(DateTime, default=datetime.utcnow)
+    finished_at  = Column(DateTime, nullable=True)
+
+
+class PentestFinding(Base):
+    """渗透测试发现的单条漏洞记录。"""
+    __tablename__ = "pentest_findings"
+
+    id               = Column(Integer, primary_key=True, index=True)
+    task_id          = Column(Integer, nullable=False, index=True)  # → PentestTask.id
+    vuln_type        = Column(String(50), nullable=False)           # unauth/idor/sensitive/sqli
+    severity         = Column(String(10), default="medium")         # high/medium/low/info
+    endpoint         = Column(String(512), default="")              # METHOD /path
+    payload          = Column(Text, nullable=True)                  # 发送的 payload（若有）
+    evidence         = Column(Text, nullable=True)                  # 响应摘要（截断200字）
+    request_detail   = Column(JSON, nullable=True)                  # {method, url, headers, body}
+    suggestion       = Column(Text, nullable=True)                  # AI 生成的修复建议
+    created_at       = Column(DateTime, default=datetime.utcnow)
 
 
 class DocumentChunk(Base):
@@ -392,6 +487,9 @@ async def init_database():
         "ALTER TABLE test_plans ADD COLUMN webhook_token VARCHAR(128)",
         # 报告隔离
         "ALTER TABLE test_reports ADD COLUMN created_by VARCHAR(100)",
+        # 接口测试报告 / 测试计划报告执行者字段
+        "ALTER TABLE api_test_reports ADD COLUMN created_by VARCHAR(100)",
+        "ALTER TABLE test_plan_reports ADD COLUMN created_by VARCHAR(100)",
         # 工作空间 project_id（各业务表）
         "ALTER TABLE test_tasks    ADD COLUMN project_id INTEGER",
         "ALTER TABLE test_reports  ADD COLUMN project_id INTEGER",
@@ -399,6 +497,17 @@ async def init_database():
         "ALTER TABLE api_projects  ADD COLUMN workspace_id INTEGER",
         "ALTER TABLE test_plans    ADD COLUMN workspace_id INTEGER",
         "ALTER TABLE global_variables ADD COLUMN workspace_id INTEGER",
+        # test_cases 权限与隔离
+        "ALTER TABLE test_cases   ADD COLUMN created_by VARCHAR(100)",
+        "ALTER TABLE test_cases   ADD COLUMN project_id INTEGER",
+        # 渗透测试：executed_by 记录最近一次触发扫描的用户（兼容旧库）
+        "ALTER TABLE pentest_tasks ADD COLUMN executed_by VARCHAR(100)",
+        # 方案C WebUI：结构化步骤和多浏览器报告字段（兼容旧库）
+        "ALTER TABLE test_cases   ADD COLUMN steps_json JSON",
+        "ALTER TABLE test_cases   ADD COLUMN browser_matrix JSON",
+        "ALTER TABLE test_reports ADD COLUMN browser VARCHAR(50) DEFAULT 'chromium'",
+        "ALTER TABLE test_reports ADD COLUMN script_path VARCHAR(512)",
+        "ALTER TABLE test_reports ADD COLUMN finished_at DATETIME",
     ]:
         try:
             async with engine.begin() as conn:
@@ -407,7 +516,7 @@ async def init_database():
             pass  # 列已存在则忽略
 
     # 数据迁移：将 created_by = NULL 的历史数据归属到 admin
-    for table in ["test_tasks", "ai_case_files", "api_projects", "test_plans", "test_reports"]:
+    for table in ["test_tasks", "test_cases", "ai_case_files", "api_projects", "test_plans", "test_reports"]:
         try:
             async with engine.begin() as conn:
                 result = await conn.execute(
@@ -444,6 +553,7 @@ async def init_database():
         # 2. 旧数据（project_id / workspace_id = NULL）归入默认空间
         for table, col in [
             ("test_tasks",    "project_id"),
+            ("test_cases",    "project_id"),
             ("ai_case_files", "project_id"),
             ("test_reports",  "project_id"),
             ("api_projects",  "workspace_id"),
@@ -476,6 +586,20 @@ async def init_database():
 
     except Exception as e:
         _log.warning(f"[init_db] 默认工作空间初始化异常（可忽略）: {e}")
+
+    # ── 性能索引 ────────────────────────────────────────────────────────────
+    _indexes_sql = [
+        "CREATE INDEX IF NOT EXISTS ix_test_results_task_start ON test_results (task_id, start_time)",
+        "CREATE INDEX IF NOT EXISTS ix_test_reports_task_created ON test_reports (task_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS ix_test_cases_task_module ON test_cases (task_id, module)",
+        "CREATE INDEX IF NOT EXISTS ix_test_results_task_created ON test_results (task_id, created_at)",
+    ]
+    for _index_sql in _indexes_sql:
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text(_index_sql))
+        except Exception:
+            pass
 
 
 async def get_db():

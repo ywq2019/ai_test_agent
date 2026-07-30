@@ -39,6 +39,17 @@ def set_global_var(name: str, value: str, source_project: str = "") -> None:
     logger.info(f"[gvar] 写入全局变量: {name} = {str(value)[:80]}  来源: {source_project}")
 
 
+def evict_global_var(name: str) -> None:
+    """从内存缓存中移除一个全局变量（删除时调用，同时清除脏标记）。"""
+    _gvar_cache.pop(name, None)
+    _gvar_dirty.discard(name)
+
+
+def confirm_global_var(name: str) -> None:
+    """变量已成功持久化到数据库后调用，清除脏标记（写入/更新时调用）。"""
+    _gvar_dirty.discard(name)
+
+
 # 内存缓存，服务启动时由 load_global_vars_sync() 初始化
 _gvar_cache: Dict[str, str] = {}
 _gvar_dirty: set = set()   # 记录哪些变量需要持久化
@@ -163,7 +174,7 @@ def _exec_custom_fn(fn_name: str, raw_args: str, custom_scripts: List[Dict]) -> 
     args = [a.strip() for a in raw_args.split(',') if a.strip()] if raw_args.strip() else []
     code = script.get('code', '')
 
-    # 允许的模块白名单
+    # 允许的模块白名单（严格限制，禁止 __import__ 和 os 防止 RCE）
     safe_globals: Dict[str, Any] = {
         '__builtins__': {
             'str': str, 'int': int, 'float': float, 'bool': bool, 'bytes': bytes,
@@ -173,7 +184,7 @@ def _exec_custom_fn(fn_name: str, raw_args: str, custom_scripts: List[Dict]) -> 
             'zip': zip, 'map': map, 'filter': filter, 'any': any, 'all': all,
             'isinstance': isinstance, 'type': type, 'repr': repr, 'print': print,
             'True': True, 'False': False, 'None': None,
-            '__import__': __import__,   # 允许 import
+            # 注意：__import__ 和 os 不在此列表中，防止用户脚本执行任意系统命令
         },
         'args': args,
         'time': time,
@@ -182,13 +193,12 @@ def _exec_custom_fn(fn_name: str, raw_args: str, custom_scripts: List[Dict]) -> 
         'base64': _b64_module,
         'json': json,
         'uuid': _uuid_module,
-        'os': os,
         're': re,
+        # os 和 __import__ 已移除，如需扩展功能请在此显式添加具体安全函数
     }
-    # 补充常用标准库，避免脚本里 import 时找不到
+    # 补充常用标准库（直接注入模块引用，不依赖 __import__）
     import urllib.parse as _urllib_parse
-    import urllib as _urllib
-    safe_globals['urllib'] = _urllib
+    safe_globals['urllib'] = type('urllib', (), {'parse': _urllib_parse})()
     safe_globals['urllib.parse'] = _urllib_parse
     try:
         import requests as _req

@@ -65,7 +65,7 @@ class UITestAgent:
 
     async def send_progress(self, data: Dict[str, Any]):
         if self._websocket_manager:
-            await self._websocket_manager.broadcast_all(data)
+            await self._websocket_manager.broadcast_to_workspace(data, data.get("workspace_id", 0))
 
     # ── 核心流程 ──────────────────────────────────────────────────────────
 
@@ -76,6 +76,7 @@ class UITestAgent:
         document_path: Optional[str] = None,
         browser: str = "chromium",
         environment: str = "test",
+        workspace_id: int = None,
     ) -> Dict[str, Any]:
         logger.info(f"Creating task: {name}")
 
@@ -93,9 +94,10 @@ class UITestAgent:
             "environment":   environment,
             "status":        "created",
             "created_at":    datetime.utcnow().isoformat(),
+            "workspace_id":  workspace_id or 0,
         }
 
-        await self.send_progress({"type": "task_created", "task": task})
+        await self.send_progress({"type": "task_created", "task": task, "workspace_id": workspace_id or 0})
         return task
 
     async def parse_page(

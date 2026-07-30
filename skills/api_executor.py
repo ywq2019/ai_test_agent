@@ -27,6 +27,10 @@ def _parse_hosts_map(hosts_text: str) -> dict:
     return result
 
 
+# 公共别名，供路由层调用（避免直接访问下划线私有函数）
+parse_hosts_map = _parse_hosts_map
+
+
 try:
     import httpx as _httpx
 
@@ -67,6 +71,10 @@ def _make_transport(hosts_map: dict, verify: bool = False):
         return _HostsTransport(hosts_map, verify=verify)
     import httpx
     return httpx.AsyncHTTPTransport(verify=verify)
+
+
+# 公共别名，供路由层调用
+make_transport = _make_transport
 
 
 class ApiExecutor:

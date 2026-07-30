@@ -66,7 +66,7 @@ def generate_cases(
     Returns:
         包含测试用例的字典
     """
-    from skills.case_generator.scripts.run import execute
+    from skills.case_generator_skill.scripts.run import execute
     return asyncio.run(execute(page_elements, url, document_data))
 
 
@@ -89,7 +89,7 @@ def execute_tests(
     Returns:
         包含测试结果的字典
     """
-    from skills.test_executor.scripts.run import execute
+    from skills.test_executor_skill.scripts.run import execute
     return asyncio.run(execute(cases, url, browser_type, headless))
 
 
@@ -112,7 +112,7 @@ def generate_report(
     Returns:
         包含报告路径的字典
     """
-    from skills.report_generator.scripts.run import execute
+    from skills.report_generator_skill.scripts.run import execute
     return asyncio.run(execute(task_id, task_name, results, metadata))
 
 

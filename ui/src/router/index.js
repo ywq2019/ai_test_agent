@@ -61,6 +61,11 @@ const routes = [
     path: '/workspaces',
     name: 'Workspaces',
     component: () => import('../views/Workspaces.vue')
+  },
+  {
+    path: '/pentest',
+    name: 'Pentest',
+    component: () => import('../views/Pentest.vue')
   }
 ]
 

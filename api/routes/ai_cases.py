@@ -3,7 +3,6 @@ AI 文档驱动用例生成路由
   - /ai-cases/*  含 CRUD、diff-check、incremental-update、optimize、coverage
 """
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Request
-from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import List, Dict, Any, Optional
@@ -14,46 +13,20 @@ from loguru import logger
 
 from tools.database import get_db, AICaseFile, User
 from api.websocket_manager import ws_manager
+from api.schemas import (
+    AICaseGenerateRequest, AICaseFileResponse,
+    DiffCheckRequest, IncrementalUpdateRequest,
+)
 
 router = APIRouter()
 
+# ── 需求追踪并发控制：(record_id, username) 粒度，支持多用户并发 ─────────────
+import asyncio as _trac_asyncio
+_trac_running: dict[tuple, str] = {}   # (record_id, username) → 'extract' | 'map'
+_trac_lock = _trac_asyncio.Lock()
+
 
 # ── 公共响应构建 ──────────────────────────────────────────────────────────────
-
-class AICaseGenerateRequest(BaseModel):
-    task_name: str
-    document_path: Optional[str] = None
-    content: Optional[str] = None
-    formats: List[str] = ["md", "xmind"]
-    workspace_id: Optional[int] = None
-
-
-class AICaseFileResponse(BaseModel):
-    id: int
-    task_name: str
-    case_count: int
-    has_md: bool
-    has_xmind: bool
-    modules: List[Dict[str, Any]] = []
-    created_at: str = ""
-    doc_hash: Optional[str] = None
-    parent_id: Optional[int] = None
-    diff_summary: Optional[str] = None
-    record_status: str = "active"
-    gen_status: str = "done"
-    gen_progress: int = 0
-
-
-class DiffCheckRequest(BaseModel):
-    new_content: Optional[str] = None
-    new_document_path: Optional[str] = None
-
-
-class IncrementalUpdateRequest(BaseModel):
-    new_content: Optional[str] = None
-    new_document_path: Optional[str] = None
-    diff: Optional[Dict[str, Any]] = None
-
 
 import re as _re_step
 _step_prefix = _re_step.compile(r'^\s*\d+\.\s*')
@@ -178,6 +151,9 @@ async def generate_ai_cases(
     from skills.ai_case_generator import acquire_generate_slot, get_active_generate_count, _MAX_ACTIVE_GENERATE
     if not body.document_path and not body.content:
         raise HTTPException(status_code=400, detail="请提供文档路径或需求文本内容")
+    # 校验工作空间成员身份
+    if body.workspace_id:
+        await check_workspace_member(db, body.workspace_id, current_user, "生成AI用例")
     # 并发任务上限检查
     if not await acquire_generate_slot():
         raise HTTPException(
@@ -222,7 +198,8 @@ async def get_ai_case(record_id: int, db: AsyncSession = Depends(get_db), curren
 
 
 @router.get("/ai-cases/{record_id}/download")
-async def download_ai_case(record_id: int, format: str = "md", db: AsyncSession = Depends(get_db)):
+async def download_ai_case(record_id: int, format: str = "md", db: AsyncSession = Depends(get_db),
+                          current_user: User = Depends(get_current_user)):
     from fastapi.responses import FileResponse
     from urllib.parse import quote
     from datetime import datetime
@@ -230,6 +207,7 @@ async def download_ai_case(record_id: int, format: str = "md", db: AsyncSession 
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail="记录不存在")
+    await check_access(db, record, current_user, "AI用例")
     if format == "md":
         file_path, media_type, ext = record.md_path, "text/markdown", ".md"
     elif format == "xmind":
@@ -269,6 +247,254 @@ async def download_ai_case(record_id: int, format: str = "md", db: AsyncSession 
     encoded = quote(record.task_name.replace("/", "_") + ext, safe="")
     return FileResponse(path=str(p), media_type=media_type,
                         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded}"})
+
+
+@router.get("/ai-cases/{record_id}/export-excel")
+async def export_ai_case_excel(
+    record_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """将 AI 用例导出为 Excel，含完整用例字段 + 测试结果下拉列 + 备注列。"""
+    from fastapi.responses import Response
+    from urllib.parse import quote
+    import io, openpyxl
+    from openpyxl.styles import (
+        Font, PatternFill, Alignment, Border, Side, GradientFill
+    )
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.datavalidation import DataValidation
+
+    result = await db.execute(select(AICaseFile).where(AICaseFile.id == record_id))
+    record = result.scalar_one_or_none()
+    if not record:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    await check_access(db, record, current_user, "AI用例")
+
+    cases_data = record.cases_data or {}
+    modules = cases_data.get("modules", [])
+
+    # ── 收集所有有效用例（排除废弃）────────────────────────────────────────────
+    rows = []
+    for mod in modules:
+        mod_name = mod.get("name", "通用")
+        for case in mod.get("cases", []):
+            if case.get("status") == "deprecated":
+                continue
+            steps = case.get("steps", [])
+            steps_text = "\n".join(
+                f"{i+1}. {s}" for i, s in enumerate(steps)
+            ) if isinstance(steps, list) else str(steps)
+            rows.append({
+                "用例编号":   case.get("id", ""),
+                "所属模块":   mod_name,
+                "用例名称":   case.get("name", ""),
+                "优先级":     case.get("priority", "P1"),
+                "用例类型":   case.get("type", "功能测试"),
+                "测试方法":   case.get("test_method", ""),
+                "前置条件":   case.get("preconditions", ""),
+                "测试步骤":   steps_text,
+                "预期结果":   case.get("expected", ""),
+                "测试结果":   "",   # 下拉列：Pass / Fail / NT / Block / NA
+                "备注":       "",
+            })
+
+    # ── 创建工作簿 ──────────────────────────────────────────────────────────────
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "测试用例"
+
+    HEADERS = ["用例编号", "所属模块", "用例名称", "优先级", "用例类型",
+               "测试方法", "前置条件", "测试步骤", "预期结果", "测试结果", "备注"]
+
+    # ── 颜色和样式定义（颜色统一用 FFRRGGBB，避免 openpyxl 补 00 导致透明）────
+    from openpyxl.styles import Color as _Color
+    HEADER_BG   = "FF1D4ED8"   # 深蓝
+    HEADER_FONT = Font(name="微软雅黑", bold=True, color=_Color(rgb="FFFFFFFF"), size=11)
+    CELL_FONT   = Font(name="微软雅黑", size=10)
+    ALT_BG      = PatternFill("solid", fgColor=_Color(rgb="FFEEF2FF"))   # 隔行浅蓝
+    RESULT_BG   = PatternFill("solid", fgColor=_Color(rgb="FFFFF9E6"))   # 测试结果列淡黄
+    NOTE_BG     = PatternFill("solid", fgColor=_Color(rgb="FFF0FDF4"))   # 备注列淡绿
+
+    # 优先级色标（ARGB）
+    PRIORITY_COLOR = {
+        "P0": ("FFFF4D4F", "FFFFFFFF"),  # 红底白字
+        "P1": ("FFFA8C16", "FFFFFFFF"),  # 橙底白字
+        "P2": ("FF52C41A", "FFFFFFFF"),  # 绿底白字
+    }
+
+    thin = Side(style="thin", color="FFC7D2FE")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    wrap   = Alignment(horizontal="left",   vertical="center", wrap_text=True)
+
+    # ── 写表头 ──────────────────────────────────────────────────────────────────
+    ws.append(HEADERS)
+    for col_idx, header in enumerate(HEADERS, 1):
+        cell = ws.cell(row=1, column=col_idx)
+        cell.value = header
+        cell.font = HEADER_FONT
+        cell.fill = PatternFill("solid", fgColor=_Color(rgb=HEADER_BG))
+        cell.alignment = center
+        cell.border = border
+    ws.row_dimensions[1].height = 28
+
+    # ── 写数据行（从第2行开始）───────────────────────────────────────────────
+    for row_idx, data in enumerate(rows, 2):
+        is_alt = (row_idx % 2 == 0)
+        for col_idx, key in enumerate(HEADERS, 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            cell.value = data[key]
+            cell.font = CELL_FONT
+            cell.border = border
+
+            # 优先级列特殊着色
+            if key == "优先级":
+                pval = data[key]
+                if pval in PRIORITY_COLOR:
+                    bg, fg = PRIORITY_COLOR[pval]
+                    cell.fill = PatternFill("solid", fgColor=_Color(rgb=bg))
+                    cell.font = Font(name="微软雅黑", bold=True, color=_Color(rgb=fg), size=10)
+                cell.alignment = center
+            elif key == "测试结果":
+                cell.fill = RESULT_BG
+                cell.alignment = center
+            elif key == "备注":
+                cell.fill = NOTE_BG
+                cell.alignment = wrap
+            elif key in ("用例编号", "所属模块", "用例类型", "测试方法"):
+                cell.alignment = center
+                if is_alt:
+                    cell.fill = ALT_BG
+            else:
+                cell.alignment = wrap
+                if is_alt:
+                    cell.fill = ALT_BG
+
+        # 自动行高：按步骤行数估算
+        step_lines = data["测试步骤"].count("\n") + 1
+        ws.row_dimensions[row_idx].height = max(20, min(step_lines * 16, 120))
+
+    # ── 测试结果列下拉验证（Pass / Fail / NT / NA / Block 五项）─────────────────
+    result_col_letter = get_column_letter(HEADERS.index("测试结果") + 1)
+    data_end_row = max(len(rows) + 1, 2)
+    result_range = f"{result_col_letter}2:{result_col_letter}{data_end_row}"
+    dv = DataValidation(
+        type="list",
+        formula1='"Pass,Fail,NT,NA,Block"',
+        allow_blank=True,
+        showDropDown=False,
+        showErrorMessage=True,
+        errorTitle="输入无效",
+        error="请从下拉列表中选择：Pass / Fail / NT / NA / Block",
+    )
+    dv.sqref = result_range
+    ws.add_data_validation(dv)
+
+    # ── 测试结果单元格按值条件格式着色 ────────────────────────────────────────
+    # 颜色统一用 FFRRGGBB，深背景+白字，醒目易读
+    from openpyxl.formatting.rule import CellIsRule
+    from openpyxl.styles import PatternFill as _PF, Font as _Ft, Color as _Color
+
+    RESULT_STYLES = {
+        "Pass":  {"bg": "FFFFFFFF", "fg": "FF389E0D"},   # 白底绿字
+        "Fail":  {"bg": "FFFFFFFF", "fg": "FFF5222D"},   # 白底红字
+        "NT":    {"bg": "FFFFFFFF", "fg": "FFD48806"},   # 白底黄字
+        "NA":    {"bg": "FFFFFFFF", "fg": "FF8C8C8C"},   # 白底灰字
+        "Block": {"bg": "FFFFFFFF", "fg": "FFD46B08"},   # 白底橙字
+    }
+    for val, style in RESULT_STYLES.items():
+        fill = _PF("solid", fgColor=_Color(rgb=style["bg"]))
+        font = _Ft(name="微软雅黑", bold=True, color=_Color(rgb=style["fg"]), size=13)
+        rule = CellIsRule(
+            operator="equal",
+            formula=[f'"{val}"'],
+            fill=fill,
+            font=font,
+        )
+        ws.conditional_formatting.add(result_range, rule)
+
+    # ── 自动筛选（AutoFilter）覆盖全部列 ──────────────────────────────────────
+    last_col_letter = get_column_letter(len(HEADERS))
+    ws.auto_filter.ref = f"A1:{last_col_letter}1"
+
+    # ── 冻结首行 ────────────────────────────────────────────────────────────────
+    ws.freeze_panes = "A2"
+
+    # ── 列宽 ────────────────────────────────────────────────────────────────────
+    COL_WIDTHS = {
+        "用例编号": 12, "所属模块": 14, "用例名称": 30, "优先级": 8,
+        "用例类型": 12, "测试方法": 14, "前置条件": 22, "测试步骤": 45,
+        "预期结果": 35, "测试结果": 12, "备注": 20,
+    }
+    for col_idx, header in enumerate(HEADERS, 1):
+        ws.column_dimensions[get_column_letter(col_idx)].width = COL_WIDTHS.get(header, 14)
+
+    # ── 说明 Sheet：测试结果颜色图例（静态着色，让用户一眼看清颜色对应关系）────
+    ws_legend = wb.create_sheet(title="测试结果说明")
+    legend_items = [
+        ("Pass",  "FFFFFFFF", "FF389E0D", "通过"),
+        ("Fail",  "FFFFFFFF", "FFF5222D", "失败"),
+        ("NT",    "FFFFFFFF", "FFD48806", "未测试"),
+        ("NA",    "FFFFFFFF", "FF8C8C8C", "不适用"),
+        ("Block", "FFFFFFFF", "FFD46B08", "阻塞"),
+    ]
+    # 标题行
+    ws_legend.merge_cells("A1:C1")
+    title_cell = ws_legend["A1"]
+    title_cell.value = "测试结果颜色说明"
+    title_cell.font = Font(name="微软雅黑", bold=True, size=13, color=_Color(rgb="FFFFFFFF"))
+    title_cell.fill = PatternFill("solid", fgColor=_Color(rgb="FF1D4ED8"))
+    title_cell.alignment = Alignment(horizontal="center", vertical="center")
+    ws_legend.row_dimensions[1].height = 30
+
+    # 列头
+    for ci, h in enumerate(["结果值", "含义", "颜色预览"], 1):
+        c = ws_legend.cell(row=2, column=ci)
+        c.value = h
+        c.font = Font(name="微软雅黑", bold=True, size=10, color=_Color(rgb="FF333333"))
+        c.fill = PatternFill("solid", fgColor=_Color(rgb="FFE8EFFE"))
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        c.border = border
+    ws_legend.row_dimensions[2].height = 22
+
+    for ri, (val, bg, fg, meaning) in enumerate(legend_items, 3):
+        # 结果值（带背景色）
+        c_val = ws_legend.cell(row=ri, column=1, value=val)
+        c_val.font = Font(name="微软雅黑", bold=True, size=13, color=_Color(rgb=fg))
+        c_val.fill = PatternFill("solid", fgColor=_Color(rgb=bg))
+        c_val.alignment = Alignment(horizontal="center", vertical="center")
+        c_val.border = border
+
+        # 含义
+        c_mean = ws_legend.cell(row=ri, column=2, value=meaning)
+        c_mean.font = Font(name="微软雅黑", size=10)
+        c_mean.alignment = Alignment(horizontal="center", vertical="center")
+        c_mean.border = border
+
+        # 颜色预览（整格填色）
+        c_preview = ws_legend.cell(row=ri, column=3, value="")
+        c_preview.fill = PatternFill("solid", fgColor=_Color(rgb=bg))
+        c_preview.border = border
+
+        ws_legend.row_dimensions[ri].height = 28
+
+    ws_legend.column_dimensions["A"].width = 12
+    ws_legend.column_dimensions["B"].width = 12
+    ws_legend.column_dimensions["C"].width = 18
+
+    # ── 输出字节流 ──────────────────────────────────────────────────────────────
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    filename = quote(record.task_name.replace("/", "_") + ".xlsx", safe="")
+    return Response(
+        content=buf.read(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
+    )
 
 
 # ── 覆盖度分析 ────────────────────────────────────────────────────────────────
@@ -727,7 +953,7 @@ async def incremental_update_ai_case(
 
 # ── 需求追踪：提取需求条目（后台任务） ────────────────────────────────────────
 
-async def _do_extract_requirements_bg(record_id: int) -> None:
+async def _do_extract_requirements_bg(record_id: int, username: str) -> None:
     """后台提取需求条目，完成后通过 WebSocket 推送结果。"""
     from datetime import datetime as _dt
     from tools.database import async_session_maker
@@ -735,64 +961,121 @@ async def _do_extract_requirements_bg(record_id: int) -> None:
     from skills.prompt_loader import get_system, render_user
     import json as _json
 
+    ws_client = f"trac_gen_{record_id}_{username}"   # 每个用户独立推送频道
+
     async def _push(pct: int, stage: str, **kwargs):
         await ws_manager.broadcast(
-            {"type": "trac_gen_progress", "percent": pct, "stage": stage, **kwargs},
-            client_id="trac_gen",
+            {"type": "trac_gen_progress", "task_type": "extract",
+             "percent": pct, "stage": stage, **kwargs},
+            client_id=ws_client,
         )
 
-    async with async_session_maker() as db:
-        result = await db.execute(select(AICaseFile).where(AICaseFile.id == record_id))
-        record = result.scalar_one_or_none()
-        if not record:
-            await _push(0, "记录不存在", error=True)
-            return
+    async with _trac_lock:
+        _trac_running[(record_id, username)] = 'extract'
 
-        doc_content = record.doc_content or ""
-        if not doc_content.strip():
-            await _push(0, "该记录未保存需求文档内容，无法提取需求", error=True)
-            return
+    try:
+        async with async_session_maker() as db:
+            result = await db.execute(select(AICaseFile).where(AICaseFile.id == record_id))
+            record = result.scalar_one_or_none()
+            if not record:
+                await _push(0, "记录不存在", error=True)
+                return
 
-        modules = (record.cases_data or {}).get("modules", [])
-        modules_hint = "\n".join(f"  - {m.get('name','')}" for m in modules) or "  （无）"
+            doc_content = record.doc_content or ""
+            if not doc_content.strip():
+                await _push(0, "该记录未保存需求文档内容，无法提取需求", error=True)
+                return
 
-        await _push(20, "正在调用 AI 提取需求条目，请稍候...")
-        try:
-            system_prompt = get_system("ai_case_gen.yaml", "extract_requirements")
-            user_prompt = render_user("ai_case_gen.yaml", "extract_requirements",
-                                      modules_hint=modules_hint,
-                                      content=doc_content[:30000])
-            raw = await ai_case_generator._run_claude_subprocess(system_prompt, user_prompt, timeout_secs=180)
-            data = _json.loads(raw)
-            requirements = data.get("requirements", [])
-        except _json.JSONDecodeError as e:
-            logger.error(f"需求提取返回非法 JSON: record_id={record_id}, err={e}")
-            await _push(0, "AI 返回格式异常，请稍后重试", error=True)
-            return
-        except Exception as e:
-            logger.exception("需求提取失败: record_id={}", record_id)
-            await _push(0, f"需求提取失败: {e}", error=True)
-            return
+            modules = (record.cases_data or {}).get("modules", [])
+            modules_hint = "\n".join(f"  - {m.get('name','')}" for m in modules) or "  （无）"
 
-        if not requirements:
-            await _push(0, "AI 未能从文档中提取到需求条目，请检查文档内容", error=True)
-            return
+            all_cases_flat = []
+            for mod in modules:
+                for case in mod.get("cases", []):
+                    if case.get("status") != "deprecated":
+                        all_cases_flat.append(case.get("name", ""))
+            cases_hint = "\n".join(f"  - {n}" for n in all_cases_flat[:80]) or "  （无）"
 
-        extracted_at = _dt.utcnow().isoformat()
-        record.requirements_data = {"extracted_at": extracted_at, "requirements": requirements}
-        record.traceability_data = None
-        from sqlalchemy.orm.attributes import flag_modified
-        flag_modified(record, "requirements_data")
-        flag_modified(record, "traceability_data")
-        await db.commit()
+            await _push(20, "正在调用 AI 提取需求条目，请稍候...")
 
-        logger.info(f"需求提取完成: record_id={record_id}，共 {len(requirements)} 条需求")
-        await ws_manager.broadcast(
-            {"type": "trac_extract_done", "record_id": record_id,
-             "count": len(requirements), "extracted_at": extracted_at,
-             "requirements": requirements},
-            client_id="trac_gen",
-        )
+            # 提取是单次 AI 调用，用心跳推进度条（20→88，每2s +2），避免进度卡死
+            import asyncio as _asyncio
+            _stop_heartbeat = _asyncio.Event()
+            async def _heartbeat():
+                pct = 22
+                stages = [
+                    "正在理解需求文档结构...",
+                    "正在识别功能模块边界...",
+                    "正在提取可测试的需求条目...",
+                    "正在归类需求优先级...",
+                    "正在生成需求 ID 和描述...",
+                    "即将完成，请稍候...",
+                ]
+                idx = 0
+                while not _stop_heartbeat.is_set() and pct < 88:
+                    await _asyncio.sleep(2)
+                    if _stop_heartbeat.is_set():
+                        break
+                    pct = min(pct + 3, 88)
+                    stage = stages[min(idx, len(stages) - 1)]
+                    idx += 1
+                    await _push(pct, stage)
+            heartbeat_task = _asyncio.create_task(_heartbeat())
+
+            try:
+                system_prompt = get_system("ai_case_gen.yaml", "extract_requirements")
+                user_prompt = render_user("ai_case_gen.yaml", "extract_requirements",
+                                          modules_hint=modules_hint,
+                                          cases_hint=cases_hint,
+                                          content=doc_content[:30000])
+                raw = await ai_case_generator._run_claude_subprocess(system_prompt, user_prompt, timeout_secs=180)
+                data = _json.loads(raw)
+                requirements = data.get("requirements", [])
+            except _json.JSONDecodeError as e:
+                _stop_heartbeat.set()
+                heartbeat_task.cancel()
+                logger.error(f"需求提取返回非法 JSON: record_id={record_id}, err={e}")
+                await _push(0, "AI 返回格式异常，请稍后重试", error=True)
+                return
+            except Exception as e:
+                _stop_heartbeat.set()
+                heartbeat_task.cancel()
+                logger.exception("需求提取失败: record_id={}", record_id)
+                await _push(0, f"需求提取失败: {e}", error=True)
+                return
+            finally:
+                _stop_heartbeat.set()
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except _asyncio.CancelledError:
+                    pass
+
+            if not requirements:
+                await _push(0, "AI 未能从文档中提取到需求条目，请检查文档内容", error=True)
+                return
+
+            await _push(95, f"提取完成，共 {len(requirements)} 条需求，正在保存...")
+            extracted_at = _dt.utcnow().isoformat() + "Z"
+            record.requirements_data = {"extracted_at": extracted_at, "requirements": requirements}
+            record.traceability_data = None
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(record, "requirements_data")
+            flag_modified(record, "traceability_data")
+            await db.commit()
+
+            logger.info(f"需求提取完成: record_id={record_id}，共 {len(requirements)} 条需求")
+            await ws_manager.broadcast(
+                {"type": "trac_extract_done", "record_id": record_id,
+                 "count": len(requirements), "extracted_at": extracted_at,
+                 "requirements": requirements},
+                client_id=ws_client,
+            )
+
+    finally:
+        async with _trac_lock:
+            if _trac_running.get((record_id, username)) == 'extract':
+                _trac_running.pop((record_id, username), None)
 
 
 @router.post("/ai-cases/{record_id}/extract-requirements")
@@ -815,13 +1098,15 @@ async def extract_requirements(
             status_code=400,
             detail="该记录未保存需求文档内容，无法提取需求（旧记录请重新生成用例后再使用此功能）"
         )
-    background_tasks.add_task(_do_extract_requirements_bg, record_id)
+    async with _trac_lock:
+        _trac_running[(record_id, current_user.username)] = 'extract'
+    background_tasks.add_task(_do_extract_requirements_bg, record_id, current_user.username)
     return {"record_id": record_id, "status": "extracting", "message": "需求提取任务已启动，请通过 WebSocket 接收进度"}
 
 
 # ── 需求追踪：用例-需求映射（后台任务） ──────────────────────────────────────
 
-async def _do_map_cases_bg(record_id: int) -> None:
+async def _do_map_cases_bg(record_id: int, username: str) -> None:
     """后台执行用例-需求映射，完成后通过 WebSocket 推送结果。"""
     from datetime import datetime as _dt
     from tools.database import async_session_maker
@@ -829,104 +1114,160 @@ async def _do_map_cases_bg(record_id: int) -> None:
     from skills.prompt_loader import get_system, render_user
     import json as _json
 
+    ws_client = f"trac_gen_{record_id}_{username}"   # 每个用户独立推送频道
+
     async def _push(pct: int, stage: str, **kwargs):
         await ws_manager.broadcast(
-            {"type": "trac_gen_progress", "percent": pct, "stage": stage, **kwargs},
-            client_id="trac_gen",
+            {"type": "trac_gen_progress", "task_type": "map",
+             "percent": pct, "stage": stage, **kwargs},
+            client_id=ws_client,
         )
 
-    async with async_session_maker() as db:
-        result = await db.execute(select(AICaseFile).where(AICaseFile.id == record_id))
-        record = result.scalar_one_or_none()
-        if not record:
-            await _push(0, "记录不存在", error=True)
-            return
+    async with _trac_lock:
+        _trac_running[(record_id, username)] = 'map'
 
-        requirements = (record.requirements_data or {}).get("requirements", [])
-        if not requirements:
-            await _push(0, "请先提取需求条目", error=True)
-            return
+    try:
+        async with async_session_maker() as db:
+            result = await db.execute(select(AICaseFile).where(AICaseFile.id == record_id))
+            record = result.scalar_one_or_none()
+            if not record:
+                await _push(0, "记录不存在", error=True)
+                return
 
-        modules = (record.cases_data or {}).get("modules", [])
-        all_cases = []
-        for mod in modules:
-            for case in mod.get("cases", []):
-                if case.get("status") != "deprecated":
-                    all_cases.append({"case_id": case.get("id", ""), "name": case.get("name", "")})
+            requirements = (record.requirements_data or {}).get("requirements", [])
+            if not requirements:
+                await _push(0, "请先提取需求条目", error=True)
+                return
 
-        if not all_cases:
-            await _push(0, "该记录暂无有效用例", error=True)
-            return
+            modules = (record.cases_data or {}).get("modules", [])
+            all_cases = []
+            for mod in modules:
+                for case in mod.get("cases", []):
+                    if case.get("status") != "deprecated":
+                        steps = case.get("steps", [])
+                        steps_text = " → ".join(steps[:3]) if isinstance(steps, list) else str(steps)[:100]
+                        expected = case.get("expected", case.get("expected_results", ""))
+                        if isinstance(expected, list):
+                            expected = "；".join(expected[:2])
+                        all_cases.append({
+                            "case_id": case.get("id", ""),
+                            "name": case.get("name", ""),
+                            "steps_summary": steps_text[:120],
+                            "expected_summary": str(expected)[:80],
+                        })
 
-        requirements_text = "\n".join(
-            f"  {r['id']} | {r['module']} | {r['title']} | {r.get('description','')}"
-            for r in requirements
-        )
+            if not all_cases:
+                await _push(0, "该记录暂无有效用例", error=True)
+                return
 
-        BATCH = 50
-        total_batches = (len(all_cases) + BATCH - 1) // BATCH
-        all_mappings: list = []
+            requirements_text = "\n".join(
+                f"  {r['id']} | {r['module']} | {r['title']} | {r.get('description','')} | 关键词：{','.join(r.get('keywords', []))}"
+                for r in requirements
+            )
 
-        # 建立 name → case_id 的反查索引，用于修正 AI 返回的错误 case_id
-        name_to_id = {c["name"]: c["case_id"] for c in all_cases}
-        # 也建立 case_id → case_id 的索引（正确情况直接命中）
-        valid_ids = {c["case_id"] for c in all_cases}
-
-        for i in range(0, len(all_cases), BATCH):
-            batch_num = i // BATCH + 1
-            pct = 20 + int(batch_num / total_batches * 70)
-            await _push(pct, f"正在映射用例 {batch_num}/{total_batches} 批...")
-
-            batch = all_cases[i:i + BATCH]
-            # 用序号作为传给 AI 的临时 ID，避免 AI 自创或误解原始 ID
-            idx_to_id = {str(idx): c["case_id"] for idx, c in enumerate(batch)}
-            cases_text = "\n".join(f"  {idx} | {c['name']}" for idx, c in enumerate(batch))
+            BATCH = 15
+            total_batches = (len(all_cases) + BATCH - 1) // BATCH
+            name_to_id = {c["name"]: c["case_id"] for c in all_cases}
+            valid_ids = {c["case_id"] for c in all_cases}
             system_prompt = get_system("ai_case_gen.yaml", "map_cases_to_requirements")
-            user_prompt = render_user("ai_case_gen.yaml", "map_cases_to_requirements",
-                                      requirements_text=requirements_text,
-                                      cases_text=cases_text)
-            try:
-                raw = await ai_case_generator._run_claude_subprocess(system_prompt, user_prompt, timeout_secs=180)
-                data = _json.loads(raw)
-                batch_mappings = data.get("mappings", [])
 
-                # 把 AI 返回的序号 case_id 转换回真实的 case_id
-                fixed_mappings = []
-                for m in batch_mappings:
-                    ai_id = str(m.get("case_id", ""))
-                    real_id = idx_to_id.get(ai_id)          # 序号命中
-                    if not real_id:
-                        real_id = ai_id if ai_id in valid_ids else None  # 直接命中真实 ID
-                    if not real_id:
-                        real_id = name_to_id.get(ai_id)     # 以名字作为 ID 命中
-                    if real_id:
-                        fixed_mappings.append({"case_id": real_id, "req_refs": m.get("req_refs", [])})
-                    else:
-                        logger.debug(f"映射批次 {batch_num}: 无法匹配 case_id={ai_id!r}，跳过")
+            async def _map_batch(batch_num: int, batch: list, idx_to_id: dict):
+                cases_text = "\n".join(
+                    f"  {idx} | {c['name']} | {c['steps_summary']} | {c['expected_summary']}"
+                    for idx, c in enumerate(batch)
+                )
+                user_prompt = render_user("ai_case_gen.yaml", "map_cases_to_requirements",
+                                          requirements_text=requirements_text,
+                                          cases_text=cases_text)
+                try:
+                    raw = await ai_case_generator._run_claude_subprocess(
+                        system_prompt, user_prompt, timeout_secs=240)
+                    data = _json.loads(raw)
+                    batch_mappings = data.get("mappings", [])
+                    fixed = []
+                    for m in batch_mappings:
+                        ai_id = str(m.get("case_id", ""))
+                        real_id = (idx_to_id.get(ai_id)
+                                   or (ai_id if ai_id in valid_ids else None)
+                                   or name_to_id.get(ai_id))
+                        if not real_id:
+                            logger.debug(f"映射批次 {batch_num}: 无法匹配 case_id={ai_id!r}，跳过")
+                            continue
+                        raw_refs = m.get("req_refs", [])
+                        req_refs = []
+                        for ref in raw_refs:
+                            if isinstance(ref, dict):
+                                rid = ref.get("req_id", "")
+                                conf = ref.get("confidence", "medium")
+                                if conf != "low" and rid:
+                                    req_refs.append(rid)
+                            elif isinstance(ref, str) and ref:
+                                req_refs.append(ref)
+                        fixed.append({"case_id": real_id, "req_refs": req_refs})
+                    non_empty = sum(1 for m in fixed if m.get("req_refs"))
+                    logger.info(f"映射批次 {batch_num}: AI返回 {len(batch_mappings)} 条，"
+                                f"有效 {len(fixed)} 条，有关联 {non_empty} 条")
+                    return fixed
+                except Exception as e:
+                    logger.warning(f"映射批次 {batch_num} 失败（忽略）: {e}")
+                    return []
 
-                non_empty = [m for m in fixed_mappings if m.get("req_refs")]
-                logger.info(f"映射批次 {batch_num}: AI返回 {len(batch_mappings)} 条，修正后有效 {len(fixed_mappings)} 条，有关联 {len(non_empty)} 条")
-                all_mappings.extend(fixed_mappings)
-            except Exception as e:
-                logger.warning(f"映射批次 {batch_num} 失败（忽略）: {e}")
+            import asyncio as _asyncio
+            batches = [
+                (i // BATCH + 1,
+                 all_cases[i:i + BATCH],
+                 {str(idx): c["case_id"] for idx, c in enumerate(all_cases[i:i + BATCH])})
+                for i in range(0, len(all_cases), BATCH)
+            ]
+            await _push(20, f"开始并行映射，共 {total_batches} 批（{len(all_cases)} 条用例）...")
 
-        if not all_mappings:
-            await _push(0, "映射失败，请稍后重试", error=True)
-            return
+            # 用 asyncio.as_completed 逐批收集结果，每完成一批实时推进度
+            completed_batches = 0
+            all_mappings: list = []
+            tasks = {
+                _asyncio.ensure_future(_map_batch(bn, b, idx)): bn
+                for bn, b, idx in batches
+            }
+            for fut in _asyncio.as_completed(list(tasks.keys())):
+                batch_result = await fut
+                all_mappings.extend(batch_result)
+                completed_batches += 1
+                pct = 20 + int(completed_batches / total_batches * 72)
+                has_refs = sum(1 for m in batch_result if m.get("req_refs"))
+                await _push(
+                    pct,
+                    f"已完成 {completed_batches}/{total_batches} 批，"
+                    f"本批 {len(batch_result)} 条用例，{has_refs} 条有关联需求"
+                )
+                await _push(
+                    pct,
+                    f"已完成 {completed_batches}/{total_batches} 批，"
+                    f"本批 {len(batch_result)} 条用例，{has_refs} 条有关联需求"
+                )
 
-        mapped_at = _dt.utcnow().isoformat()
-        record.traceability_data = {"mapped_at": mapped_at, "mappings": all_mappings}
-        from sqlalchemy.orm.attributes import flag_modified
-        flag_modified(record, "traceability_data")
-        await db.commit()
+            if not all_mappings:
+                await _push(0, "映射失败，请稍后重试", error=True)
+                return
 
-        logger.info(f"用例-需求映射完成: record_id={record_id}，{len(all_mappings)} 条用例已映射")
-        await ws_manager.broadcast(
-            {"type": "trac_map_done", "record_id": record_id,
-             "case_count": len(all_mappings), "req_count": len(requirements),
-             "mapped_at": mapped_at},
-            client_id="trac_gen",
-        )
+            await _push(95, f"全部 {total_batches} 批完成，正在保存映射结果...")
+            mapped_at = _dt.utcnow().isoformat() + "Z"
+            record.traceability_data = {"mapped_at": mapped_at, "mappings": all_mappings}
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(record, "traceability_data")
+            await db.commit()
+
+            logger.info(f"用例-需求映射完成: record_id={record_id}，{len(all_mappings)} 条用例已映射")
+            await ws_manager.broadcast(
+                {"type": "trac_map_done", "record_id": record_id,
+                 "case_count": len(all_mappings), "req_count": len(requirements),
+                 "mapped_at": mapped_at},
+                client_id=ws_client,
+            )
+
+    finally:
+        async with _trac_lock:
+            if _trac_running.get((record_id, username)) == 'map':
+                _trac_running.pop((record_id, username), None)
 
 
 @router.post("/ai-cases/{record_id}/map-cases-to-reqs")
@@ -946,7 +1287,9 @@ async def map_cases_to_requirements(
     await check_access(db, record, current_user, "AI用例")
     if not (record.requirements_data or {}).get("requirements"):
         raise HTTPException(status_code=400, detail="请先调用「提取需求」接口，生成需求列表后再进行映射")
-    background_tasks.add_task(_do_map_cases_bg, record_id)
+    async with _trac_lock:
+        _trac_running[(record_id, current_user.username)] = 'map'
+    background_tasks.add_task(_do_map_cases_bg, record_id, current_user.username)
     return {"record_id": record_id, "status": "mapping", "message": "映射任务已启动，请通过 WebSocket 接收进度"}
 
 
@@ -969,9 +1312,23 @@ async def get_traceability(record_id: int, db: AsyncSession = Depends(get_db), c
     if not requirements:
         return {
             "ready":        False,
-            "message":      "请先提取需求条目",
             "extracted_at": None,
             "mapped_at":    None,
+            "requirements": [],
+            "message":      "请先提取需求条目",
+        }
+
+    # 有需求但尚未映射：返回需求列表让前端正确恢复状态，ready=False
+    if not traceability_data.get("mapped_at"):
+        return {
+            "ready":        False,
+            "extracted_at": requirements_data.get("extracted_at"),
+            "mapped_at":    None,
+            "requirements": requirements,
+            "matrix":       [],
+            "orphan_cases": [],
+            "summary":      {"total": len(requirements), "covered": 0,
+                             "insufficient": 0, "uncovered": len(requirements), "coverage_rate": 0},
         }
 
     # case_id → req_refs 索引
@@ -1033,9 +1390,12 @@ async def get_traceability(record_id: int, db: AsyncSession = Depends(get_db), c
     ]
 
     return {
-        "ready":        True,
+        # ready 仅当映射真正执行过（mapped_at 有值）才为 True
+        # 避免前端轮询在提取完成后误判"映射完成"
+        "ready":        bool(traceability_data.get("mapped_at")),
         "extracted_at": requirements_data.get("extracted_at"),
         "mapped_at":    traceability_data.get("mapped_at"),
+        "requirements": requirements,
         "summary": {
             "total":         total,
             "covered":       covered,
@@ -1124,7 +1484,7 @@ async def analyze_coverage_gap(record_id: int, data: dict, db: AsyncSession = De
 
 # ── 需求追踪：生成补充用例（后台任务） ───────────────────────────────────────
 
-async def _do_supplement_cases_bg(record_id: int, req_id: str, missing_dimensions: list) -> None:
+async def _do_supplement_cases_bg(record_id: int, req_id: str, missing_dimensions: list, username: str = "") -> None:
     """后台生成补充用例，完成后通过 WebSocket 推送。"""
     from tools.database import async_session_maker
     from skills.ai_case_generator import ai_case_generator
@@ -1132,11 +1492,14 @@ async def _do_supplement_cases_bg(record_id: int, req_id: str, missing_dimension
     from sqlalchemy.orm.attributes import flag_modified
     import json as _json
     import re as _re
+    import asyncio as _asyncio
+
+    ws_client = f"trac_gen_{record_id}_{username}" if username else "trac_gen"
 
     async def _push(pct: int, stage: str, **kwargs):
         await ws_manager.broadcast(
             {"type": "trac_gen_progress", "percent": pct, "stage": stage, **kwargs},
-            client_id="trac_gen",
+            client_id=ws_client,
         )
 
     async with async_session_maker() as db:
@@ -1188,7 +1551,28 @@ async def _do_supplement_cases_bg(record_id: int, req_id: str, missing_dimension
             if not doc_context:
                 doc_context = doc_content[:2000]
 
-        await _push(30, f"正在为需求 {req_id} 生成补充用例...")
+        await _push(30, f"正在为需求「{req.get('title', req_id)}」生成补充用例...")
+
+        # AI 单次调用，加心跳避免进度卡死
+        _stop_heartbeat = _asyncio.Event()
+        async def _heartbeat():
+            pct = 33
+            stages = [
+                "正在分析需求覆盖缺口...",
+                "正在构建测试场景...",
+                "正在生成测试步骤...",
+                "正在完善预期结果...",
+                "即将完成，请稍候...",
+            ]
+            idx = 0
+            while not _stop_heartbeat.is_set() and pct < 88:
+                await _asyncio.sleep(2)
+                if _stop_heartbeat.is_set():
+                    break
+                pct = min(pct + 4, 88)
+                await _push(pct, stages[min(idx, len(stages) - 1)])
+                idx += 1
+        heartbeat_task = _asyncio.create_task(_heartbeat())
 
         system_prompt = get_system("ai_case_gen.yaml", "generate_supplement_cases")
         user_prompt = render_user("ai_case_gen.yaml", "generate_supplement_cases",
@@ -1211,6 +1595,13 @@ async def _do_supplement_cases_bg(record_id: int, req_id: str, missing_dimension
             logger.exception("补充用例生成失败: record_id={}, req_id={}", record_id, req_id)
             await _push(0, f"生成失败: {e}", error=True)
             return
+        finally:
+            _stop_heartbeat.set()
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except _asyncio.CancelledError:
+                pass
 
         if not new_cases_raw:
             await _push(0, "AI 未能生成补充用例，请稍后重试", error=True)
@@ -1270,10 +1661,11 @@ async def _do_supplement_cases_bg(record_id: int, req_id: str, missing_dimension
         await db.commit()
         logger.info(f"补充用例生成完成: record_id={record_id}, req_id={req_id}, 新增 {len(added_cases)} 条")
 
+        await _push(95, f"已生成 {len(added_cases)} 条补充用例，正在保存...")
         await ws_manager.broadcast(
             {"type": "trac_supplement_done", "record_id": record_id,
              "req_id": req_id, "added": added_cases, "count": len(added_cases)},
-            client_id="trac_gen",
+            client_id=ws_client,
         )
 
 
@@ -1302,6 +1694,6 @@ async def supplement_cases(
     if not req_id:
         raise HTTPException(status_code=400, detail="请提供 req_id")
 
-    background_tasks.add_task(_do_supplement_cases_bg, record_id, req_id, missing_dimensions)
+    background_tasks.add_task(_do_supplement_cases_bg, record_id, req_id, missing_dimensions, current_user.username)
     return {"record_id": record_id, "req_id": req_id, "status": "generating",
             "message": "补充用例生成任务已启动，请通过 WebSocket 接收进度"}

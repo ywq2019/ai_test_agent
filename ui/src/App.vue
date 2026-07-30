@@ -5,32 +5,43 @@
 
     <!-- 主布局 -->
     <el-container v-else class="layout-container">
-      <el-aside width="200px" class="layout-aside">
+      <el-aside width="220px" class="layout-aside">
+        <!-- Logo -->
         <div class="logo">
-          <el-icon><Monitor /></el-icon>
-          <span>AI测试工具平台</span>
+          <div class="logo-icon-wrap">
+            <el-icon size="18"><Monitor /></el-icon>
+          </div>
+          <div class="logo-text">
+            <span class="logo-title">AI 测试平台</span>
+          </div>
         </div>
+
         <el-menu
           :default-active="$route.path"
           router
           class="layout-menu"
-          background-color="#304156"
+          background-color="transparent"
           text-color="#bfcbd9"
           active-text-color="#409eff"
         >
-          <el-menu-item index="/ai-cases">
-            <el-icon><MagicStick /></el-icon>
-            <span>AI用例生成</span>
+          <!-- 首页独立置顶 -->
+          <el-menu-item index="/">
+            <el-icon><House /></el-icon>
+            <span>首页</span>
           </el-menu-item>
-          <el-sub-menu index="webui-group">
-            <template #title>
-              <el-icon><Monitor /></el-icon>
-              <span>WebUI 自动化</span>
-            </template>
-            <el-menu-item index="/">
-              <el-icon><House /></el-icon>
-              <span>首页</span>
+
+          <!-- AI 能力 -->
+          <el-menu-item-group>
+            <template #title><span class="menu-group-label">AI 能力</span></template>
+            <el-menu-item index="/ai-cases">
+              <el-icon><MagicStick /></el-icon>
+              <span>AI 用例生成</span>
             </el-menu-item>
+          </el-menu-item-group>
+
+          <!-- WebUI 自动化 -->
+          <el-menu-item-group>
+            <template #title><span class="menu-group-label">WebUI 自动化</span></template>
             <el-menu-item index="/tasks">
               <el-icon><FolderOpened /></el-icon>
               <span>任务管理</span>
@@ -47,12 +58,11 @@
               <el-icon><DataAnalysis /></el-icon>
               <span>报告查看</span>
             </el-menu-item>
-          </el-sub-menu>
-          <el-sub-menu index="api-group">
-            <template #title>
-              <el-icon><Connection /></el-icon>
-              <span>接口自动化</span>
-            </template>
+          </el-menu-item-group>
+
+          <!-- 接口自动化 -->
+          <el-menu-item-group>
+            <template #title><span class="menu-group-label">接口自动化</span></template>
             <el-menu-item index="/api-test">
               <el-icon><Tickets /></el-icon>
               <span>接口测试</span>
@@ -61,20 +71,28 @@
               <el-icon><Memo /></el-icon>
               <span>测试计划</span>
             </el-menu-item>
-          </el-sub-menu>
-          <el-divider />
-          <el-menu-item index="/workspaces">
-            <el-icon><Folder /></el-icon>
-            <span>工作空间</span>
-          </el-menu-item>
-          <el-menu-item index="/skills">
-            <el-icon><Box /></el-icon>
-            <span>技能管理</span>
-          </el-menu-item>
-          <el-menu-item index="/llm">
-            <el-icon><Cpu /></el-icon>
-            <span>大模型配置</span>
-          </el-menu-item>
+            <el-menu-item index="/pentest">
+              <el-icon><Warning /></el-icon>
+              <span>渗透测试</span>
+            </el-menu-item>
+          </el-menu-item-group>
+
+          <!-- 系统设置 -->
+          <el-menu-item-group>
+            <template #title><span class="menu-group-label">系统设置</span></template>
+            <el-menu-item index="/workspaces">
+              <el-icon><Folder /></el-icon>
+              <span>工作空间</span>
+            </el-menu-item>
+            <el-menu-item index="/skills">
+              <el-icon><Box /></el-icon>
+              <span>技能管理</span>
+            </el-menu-item>
+            <el-menu-item index="/llm">
+              <el-icon><Cpu /></el-icon>
+              <span>大模型配置</span>
+            </el-menu-item>
+          </el-menu-item-group>
         </el-menu>
       </el-aside>
 
@@ -103,9 +121,36 @@
             <el-tooltip content="刷新页面数据" placement="bottom">
               <el-button circle text :icon="RefreshRight" @click="refreshPage" style="margin-right:8px" />
             </el-tooltip>
-            <el-badge :value="notificationCount" :hidden="notificationCount === 0">
-              <el-icon size="20"><Bell /></el-icon>
-            </el-badge>
+            <el-popover
+              trigger="click"
+              :width="320"
+              :visible="notifyVisible"
+              placement="bottom-end"
+            >
+              <template #reference>
+                <el-badge :value="notificationCount" :hidden="notificationCount === 0" style="cursor:pointer">
+                  <el-icon size="20" @click="notifyVisible = !notifyVisible"><Bell /></el-icon>
+                </el-badge>
+              </template>
+              <div style="max-height:260px;overflow-y:auto">
+                <template v-if="notifications.length">
+                  <div
+                    v-for="(n, i) in notifications"
+                    :key="i"
+                    style="padding:8px 0;border-bottom:1px solid #f0f0f0;font-size:13px;display:flex;align-items:flex-start;gap:8px"
+                  >
+                    <el-tag :type="n.tag" size="small" style="flex-shrink:0;margin-top:1px">{{ n.label }}</el-tag>
+                    <span style="color:#303133;line-height:1.5">{{ n.text }}</span>
+                  </div>
+                </template>
+                <div v-else style="text-align:center;color:#c0c4cc;padding:20px 0;font-size:13px">
+                  暂无通知
+                </div>
+              </div>
+              <div style="text-align:right;padding-top:8px;border-top:1px solid #f0f0f0" v-if="notifications.length">
+                <el-button size="small" text @click="clearNotifications">清空</el-button>
+              </div>
+            </el-popover>
             <el-divider direction="vertical" style="margin:0 12px;height:16px" />
             <span style="font-size:13px;color:#606266;margin-right:8px">{{ auth.username }}</span>
             <el-button v-if="auth.role === 'admin'" size="small" text @click="openUserMgr" style="margin-right:4px">用户管理</el-button>
@@ -190,12 +235,12 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useTaskStore } from './stores/task'
 import { useAuthStore } from './stores/auth'
 import { useWorkspaceStore } from './stores/workspace'
-import { RefreshRight, Plus } from '@element-plus/icons-vue'
+import { RefreshRight, Plus, Warning } from '@element-plus/icons-vue'
 import { ElMessageBox, ElMessage } from 'element-plus'
 import { userApi } from './api'
 
@@ -208,6 +253,20 @@ const wsStore = useWorkspaceStore()
 const wsConnected = ref(false)
 const wsDialogVisible = ref(false)
 const notificationCount = ref(0)
+const notifyVisible = ref(false)
+const notifications = ref([])
+
+const pushNotify = (label, tag, text) => {
+  notifications.value.unshift({ label, tag, text })
+  if (notifications.value.length > 50) notifications.value.pop()
+  notificationCount.value++
+}
+
+const clearNotifications = () => {
+  notifications.value = []
+  notificationCount.value = 0
+  notifyVisible.value = false
+}
 
 const refreshPage = () => {
   router.go(0)
@@ -291,7 +350,8 @@ const pageTitle = computed(() => {
     '/test-plan': '测试计划',
     '/skills': '技能管理',
     '/llm': '大模型配置',
-    '/workspaces': '工作空间管理'
+    '/workspaces': '工作空间管理',
+    '/pentest': '渗透测试'
   }
   return titles[route.path] || 'AI测试工具平台'
 })
@@ -299,12 +359,17 @@ const pageTitle = computed(() => {
 let ws = null
 
 const connectWebSocket = () => {
-  const wsUrl = `ws://${window.location.hostname}:8000/ws?client_id=ui`
+  // 使用相对路径协议和当前 host（不硬编码 8000 端口），
+  // 避免开发模式 vite proxy 和生产模式端口不一致的问题
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+  const wsUrl = `${proto}://${window.location.host}/ws?client_id=app_global`
   ws = new WebSocket(wsUrl)
 
   ws.onopen = () => {
     wsConnected.value = true
     console.log('WebSocket connected')
+    // 连接成功后立即发送工作空间订阅
+    sendWsSubscribe()
   }
 
   ws.onmessage = (event) => {
@@ -327,21 +392,60 @@ const connectWebSocket = () => {
   }
 }
 
+const sendWsSubscribe = () => {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({
+      type: 'subscribe_workspace',
+      workspace_id: wsStore.currentId || 0,
+    }))
+  }
+}
+
+// 工作空间切换时重新订阅
+watch(() => wsStore.currentId, () => {
+  sendWsSubscribe()
+})
+
 const handleWebSocketMessage = (data) => {
   switch (data.type) {
     case 'task_created':
       taskStore.addTask(data.task)
-      notificationCount.value++
+      pushNotify('任务', 'primary', `新任务「${data.task?.name || '未知'}」已创建`)
       break
     case 'execution_progress':
       taskStore.updateExecutionProgress(data)
       break
     case 'cases_generated':
       taskStore.setCases(data.cases || [])
+      pushNotify('用例', 'success', `${data.cases?.length || data.case_count || 0} 条 AI 用例已生成`)
       break
     case 'report_generated':
       taskStore.setReportPath(data.report_path)
-      notificationCount.value++
+      pushNotify('报告', 'warning', `测试报告已生成，点击查看`)
+      break
+    case 'plan_done':
+      pushNotify('计划', 'success', `测试计划「${data.plan_name || data.plan_id || ''}」执行完成，${data.passed || 0}/${data.total || 0} 通过`)
+      break
+    case 'plan_step_done':
+      // 计划步骤完成 → 仅在全部步骤完成后再通知（由 plan_done 统一处理）
+      break
+    case 'document_parsed':
+      pushNotify('解析', 'info', `文档解析完成（${data.page_count || 0} 页）`)
+      break
+    case 'page_parsed':
+      pushNotify('解析', 'info', `页面元素解析完成（${data.element_count || 0} 个元素）`)
+      break
+    case 'pentest_started':
+      pushNotify('渗透', 'warning', `渗透扫描「${data.task_name || data.task_id}」已启动`)
+      break
+    case 'pentest_done':
+      pushNotify('渗透', 'success', `渗透扫描完成，发现 ${data.high_count || 0} 高危 / ${data.medium_count || 0} 中危漏洞`)
+      break
+    case 'pentest_error':
+      pushNotify('渗透', 'danger', `渗透扫描失败: ${data.error || '未知错误'}`)
+      break
+    case 'pentest_cancelled':
+      pushNotify('渗透', 'info', `渗透扫描已取消`)
       break
   }
 }
@@ -377,87 +481,167 @@ onUnmounted(() => {
 
 #app {
   height: 100vh;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif;
 }
 
 .layout-container {
   height: 100%;
 }
 
+/* ── 侧边栏 ── */
 .layout-aside {
-  background-color: #304156;
-  color: #fff;
+  background: linear-gradient(180deg, #1a2332 0%, #243447 100%);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 2px 0 8px rgba(0,0,0,0.18);
 }
 
+/* Logo 区 */
 .logo {
-  height: 60px;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  padding: 0 18px;
+  gap: 10px;
+  border-bottom: 1px solid rgba(255,255,255,0.07);
+  flex-shrink: 0;
+}
+
+.logo-icon-wrap {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #409eff 0%, #36cfc9 100%);
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  font-size: 18px;
-  font-weight: bold;
   color: #fff;
-  border-bottom: 1px solid #3d4a5c;
+  flex-shrink: 0;
 }
 
+.logo-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.logo-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: #fff;
+  letter-spacing: 0.3px;
+  line-height: 1.2;
+}
+
+.logo-sub {
+  font-size: 10px;
+  color: rgba(255,255,255,0.35);
+  letter-spacing: 0.2px;
+  line-height: 1;
+}
+
+/* 菜单 */
 .layout-menu {
-  border-right: none;
-  background-color: #304156;
+  border-right: none !important;
+  background: transparent !important;
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 8px 0 16px;
 }
 
-.layout-menu .el-menu-item {
-  color: #bfcbd9;
+/* 滚动条美化 */
+.layout-menu::-webkit-scrollbar { width: 3px; }
+.layout-menu::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
+
+/* 分组标题 */
+.menu-group-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: rgba(255,255,255,0.28);
+  padding-left: 4px;
 }
 
-.layout-menu .el-menu-item:hover,
-.layout-menu .el-menu-item.is-active {
-  background-color: #263445;
-  color: #409eff;
+.layout-menu :deep(.el-menu-item-group__title) {
+  padding: 14px 18px 4px !important;
+  line-height: 1 !important;
 }
 
-/* 子菜单标题行 */
-.layout-menu :deep(.el-sub-menu__title) {
-  color: #bfcbd9 !important;
-  background-color: #304156 !important;
+/* 菜单项 */
+.layout-menu :deep(.el-menu-item) {
+  height: 40px !important;
+  line-height: 40px !important;
+  margin: 1px 10px !important;
+  border-radius: 7px !important;
+  padding: 0 12px !important;
+  color: rgba(191, 203, 217, 0.85) !important;
+  transition: all 0.18s ease !important;
+  font-size: 13.5px !important;
 }
-.layout-menu :deep(.el-sub-menu__title:hover) {
-  background-color: #263445 !important;
+
+.layout-menu :deep(.el-menu-item:hover) {
+  background: rgba(255,255,255,0.07) !important;
+  color: #fff !important;
+}
+
+.layout-menu :deep(.el-menu-item.is-active) {
+  background: linear-gradient(90deg, rgba(64,158,255,0.18) 0%, rgba(64,158,255,0.06) 100%) !important;
   color: #409eff !important;
+  position: relative;
 }
 
-/* 子菜单展开的内嵌列表 */
-.layout-menu :deep(.el-menu) {
-  background-color: #263445 !important;
-}
-.layout-menu :deep(.el-menu .el-menu-item) {
-  color: #bfcbd9 !important;
-  background-color: #263445 !important;
-  padding-left: 40px !important;
-}
-.layout-menu :deep(.el-menu .el-menu-item:hover),
-.layout-menu :deep(.el-menu .el-menu-item.is-active) {
-  background-color: #1f2d3d !important;
-  color: #409eff !important;
+/* 活跃项左侧指示条 */
+.layout-menu :deep(.el-menu-item.is-active)::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 20px;
+  border-radius: 0 3px 3px 0;
+  background: #409eff;
 }
 
+/* 图标与文字间距 */
+.layout-menu :deep(.el-menu-item .el-icon) {
+  margin-right: 8px;
+  font-size: 15px;
+}
+
+/* ── Header ── */
 .layout-header {
   background-color: #fff;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 20px;
-  box-shadow: 0 1px 4px rgba(0, 21, 41, 0.08);
+  padding: 0 24px;
+  box-shadow: 0 1px 4px rgba(0, 21, 41, 0.06);
+  border-bottom: 1px solid #f0f0f0;
+  height: 56px !important;
+  flex-shrink: 0;
 }
 
 .header-left h2 {
-  font-size: 18px;
-  font-weight: 500;
-  color: #333;
+  font-size: 16px;
+  font-weight: 600;
+  color: #1a2332;
+  letter-spacing: 0.2px;
 }
 
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+
+/* ── Main ── */
 .layout-main {
   background-color: #f5f7fa;
   padding: 20px;
+  overflow-y: auto;
 }
 </style>

@@ -6,9 +6,12 @@ import asyncio
 import sys
 import os
 
-# Windows 下 Playwright async API 需要 ProactorEventLoop 才能 create_subprocess_exec
+# ── Windows 事件循环策略修复（必须在任何 asyncio 操作前设置）────────────────
+# Playwright 需要 ProactorEventLoop 才能在 Windows 上启动浏览器子进程
+# 放在模块级别确保 uvicorn reload 模式下子进程也能正确设置
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,8 +20,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from loguru import logger
 
 from api.routes import router as api_router
-from api.routes import auth_router, webui_router, ai_cases_router, api_test_router
 from api.websocket import websocket_endpoint
+from api.websocket_manager import ws_manager
 from tools.database import init_database
 from tools.config import settings
 from skills.langchain_tools import tool_registry
@@ -202,6 +205,11 @@ async def lifespan(app: FastAPI):
             await db.commit()
             logger.info(f"默认管理员账号已创建：{settings.DEFAULT_USERNAME} / {settings.DEFAULT_PASSWORD}")
 
+    # ── 渗透测试：重置上次服务中断时卡住的 running 任务 ──────────────────────
+    from api.routes.pentest import _watchdog_reset_stale_tasks
+    await _watchdog_reset_stale_tasks()
+    logger.info("渗透测试 watchdog 检查完成")
+
     yield
 
     # 关闭时取消清理任务
@@ -342,11 +350,6 @@ async def root():
     return {"message": "AI 测试工具平台 API", "version": settings.APP_VERSION}
 
 
-@app.get("/health")
-async def health_check():
-    return {"status": "healthy"}
-
-
 @app.get("/{full_path:path}")
 async def catch_all(full_path: str):
     """Vue Router history 模式支持：所有非 API 路径返回 index.html"""
@@ -362,6 +365,10 @@ async def catch_all(full_path: str):
 
 
 if __name__ == "__main__":
+    import sys
+    if sys.platform == "win32":
+        import asyncio
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
     import uvicorn
     uvicorn.run(
         "main:app",
@@ -371,4 +378,6 @@ if __name__ == "__main__":
         workers=1,   # 必须单进程：全局 LLM Semaphore / 后台任务计数器均为进程内对象，
                      # 多 worker 会导致各进程独立计数，失去跨用户并发保护效果。
                      # 如需横向扩展，应在负载均衡层部署多个容器实例，并改用 Redis 共享 Semaphore。
+        loop="none",   # 阻止 uvicorn 在 Windows 上覆盖为 SelectorEventLoopPolicy
+                       # Playwright 需要 ProactorEventLoop 才能启动浏览器子进程
     )
