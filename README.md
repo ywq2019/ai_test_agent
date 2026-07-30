@@ -1,6 +1,6 @@
 # AI 测试工具平台
 
-基于 **AI 大模型 + LangGraph + Playwright** 的智能化零代码全场景自动化测试平台，覆盖 **UI 自动化**与**接口自动化**双引擎，支持 Claude / DeepSeek / GPT / Gemini / Ollama 等任意模型一键切换。
+基于 **AI 大模型 + LangGraph + Playwright** 的智能化零代码全场景自动化测试平台，覆盖 **WebUI 自动化 / 接口自动化 / 渗透测试** 三引擎，支持 Claude / DeepSeek / GPT / Gemini / Ollama 等任意模型一键切换。
 
 📐 [设计思路与技术决策 →](./DESIGN.md)
 
@@ -157,15 +157,40 @@ Playwright 驱动浏览器，支持录制回放和 AI 生成两种方式产生�
 
 ### 接口自动化
 
+从「项目 → 用例 → 执行 → 报告」全链路打通，支持 Swagger / 代码分析 / 自然语言三种用例来源，内置参数化引擎、前置依赖、压力测试和 PDF 报告，适用于日常接口回归与 CI/CD 集成。
+
+#### 项目与鉴权管理
+
 | 功能 | 说明 |
 | --- | --- |
-| 多项目管理 | Base URL + 鉴权（Bearer/Basic/API Key）+ 代理 + Hosts 映射 |
-| AI 生成用例 | Swagger / 自然语言 / 代码（Python/Java/Go/Node.js/PHP）三种输入 |
-| **代码可行性分析** | 识别 `missing`/`mismatch`/`extra`/`risk` 四类偏差，自动生成差异验证用例 |
-| 参数化 | 全局变量池 `{{gvar:name}}`、内置函数 `{{uuid()}}`、自定义脚本函数 |
-| 前置依赖 | 配置登录前置用例，自动提取 Token，鉴权失败自动重试 |
-| 压力测试 | 配置并发/时长/爬坡，实时推送 TPS / P95 / P99 |
-| **报告 PDF 导出** | 含用例明细表格 + AI 分析段落 |
+| 多项目管理 | 每个项目独立配置 Base URL、代理（HTTP/SOCKS5）、Hosts 映射 |
+| 多种鉴权方式 | Bearer Token / Basic Auth / API Key，统一在项目级配置，执行时自动注入 |
+
+#### AI 用例生成
+
+| 输入源 | 说明 |
+| --- | --- |
+| Swagger / OpenAPI | 解析接口定义，自动生成正常 / 异常 / 边界用例 |
+| 自然语言描述 | 描述接口行为，AI 推理补全请求体、断言与边界 |
+| 代码（Python/Java/Go/Node.js/PHP） | 静态分析业务代码，提取接口调用并生成用例 |
+| **代码可行性分析** | 识别 `missing`（缺失接口）/ `mismatch`（字段不符）/ `extra`（多余字段）/ `risk`（潜在风险）四类偏差，自动补充差异验证用例 |
+
+#### 参数化与前置依赖
+
+| 功能 | 说明 |
+| --- | --- |
+| 全局变量池 | `{{gvar:name}}` 语法引用跨用例共享变量，支持提取表达式写回 |
+| 内置函数 | `{{uuid()}}`、`{{timestamp()}}` 等动态值生成，开箱即用 |
+| 自定义脚本函数 | 支持 Python 脚本扩展参数化逻辑，满足复杂签名/加密场景 |
+| 前置依赖 | 配置登录前置用例，自动提取 Token；鉴权失败自动重试，无需手动维护 Cookie |
+
+#### 执行、压测与报告
+
+| 功能 | 说明 |
+| --- | --- |
+| 单次执行 | 选择全部或指定用例，实时 WebSocket 推送每条用例结果 |
+| 压力测试 | 配置并发数 / 持续时长 / 爬坡策略，实时推送 TPS / P95 / P99 指标，ECharts 实时图表 |
+| **报告 PDF 导出** | 含用例明细表格 + AI 智能分析段落，一键导出归档 |
 
 ### 测试计划
 
@@ -177,6 +202,45 @@ Playwright 驱动浏览器，支持录制回放和 AI 生成两种方式产生�
 | 共享变量 | 所有步骤共享 `var_store`，前步提取后步直接引用 |
 | **CI/CD 集成** | Webhook token 触发，支持 Jenkins / GitHub Actions，可选执行完成回调 |
 | **报告 PDF 导出** | 含步骤明细 + AI 分析 |
+
+### 接口渗透测试
+
+基于接口自动化项目中已有的用例，对目标 API 发起安全扫描，自动发现 OWASP API Top 10 及常见漏洞，每条漏洞由 AI 生成定制修复建议，并支持 PDF 报告导出。
+
+> ⚠️ **声明**：本功能仅面向已授权的安全测试场景（内部测试、渗透测试授权委托书、CTF）。请勿对未授权目标使用。
+
+#### 12 个扫描模块
+
+| 模块 | 覆盖标准 | 检测内容 |
+| --- | --- | --- |
+| `unauth` 未授权访问 | OWASP API2 | 去除所有 Authorization/Cookie/URL token 后重放，200 视为未授权可访问 |
+| `idor` 越权访问 | OWASP API1 BOLA | 路径/参数中数字 ID 相邻±1 替换、UUID 替换，检测跨用户资源访问 |
+| `sensitive` 敏感信息泄露 | OWASP API8 | 响应体（密码/密钥/token/手机号/身份证/堆栈追踪）+ 响应头版本信息 + 调试端点探测（/actuator/.env/swagger 等） |
+| `sqli` SQL 注入 | OWASP Injection / CWE-89 | 报错注入（7 条 payload）+ 布尔盲注（真/假条件响应差异 >35%） |
+| `jwt` JWT 安全缺陷 | — | alg:none 绕过 / 缺少 exp 字段 / 有效期 >7 天 / payload 含敏感字段 |
+| `ratelimit` 速率限制缺失 | — | 连续 8 次请求均 2xx，敏感路径（登录/注册/验证码）报 high，普通接口报 medium |
+| `mass_assign` 批量赋值 | OWASP API3 / CWE-915 | POST/PUT/PATCH 接口追加 role/is_admin/privilege 等字段，检测响应回显或长度异常增大 |
+| `cors` CORS 配置错误 | CWE-346 | 注入恶意 Origin，检测 ACAO 通配符/反射 + ACAC:true 组合（会话劫持风险） |
+| `verb_tamper` HTTP 动词篡改 | OWASP API5 / CWE-284 | 原方法被 403/401 拦截时，尝试全部 HTTP 方法是否可绕过权限 |
+| `ssrf` 服务端请求伪造 | OWASP API7 / CWE-918 | url/redirect/callback 等参数注入内网/AWS/GCP 元数据地址，检测有回显 SSRF |
+| `fileupload` 文件上传漏洞 | CWE-434 | 危险扩展名 / MIME 绕过 / 路径穿越文件名 / SVG XSS / 文件大小缺限 / 未授权上传（6 项） |
+| `filedownload` 文件下载/路径穿越 | CWE-22 | 路径穿越读系统文件 / 未授权下载 / 文件 IDOR / Content-Disposition 缺失（4 项） |
+
+#### 主要特性
+
+| 功能 | 说明 |
+| --- | --- |
+| **复用接口用例** | 直接从接口自动化项目中选取已有用例作为扫描目标，无需重复录入接口信息 |
+| **可配置扫描范围** | 创建任务时自由勾选扫描模块和目标用例（全量或指定 ID 列表） |
+| **并发控制** | `concurrency` 参数（1~10）控制并发请求数，默认 3，避免对目标造成过大压力 |
+| **实时进度推送** | WebSocket 按模块维度实时推送扫描进度（已完成 / 总量 / 当前模块） |
+| **任务取消** | 扫描中随时可取消；取消检测通过每次进度回调时查询 DB 状态，无资源泄露 |
+| **超时看门狗** | 服务重启时自动将 >30 分钟未完成的 running 任务重置为 failed |
+| **AI 修复建议** | 每条漏洞调用 LLM 生成定制中文修复建议（high/medium 级别，并发 3 路，失败降级为内置默认建议） |
+| **按严重等级统计** | 漏洞分 high / medium / low / info 四级，综合风险评分（high×10 + medium×5 + low×2 + info） |
+| **⚠ 需人工确认标注** | 布尔盲注（sqli）、响应长度异常（mass_assign）等低置信度发现在报告中自动标注 |
+| **PDF 报告导出** | 覆盖封面（综合风险等级/评分）/ 任务概览 / 漏洞统计 / 模块检测结果表 / 漏洞详情（含请求头/体/响应）/ 安全加固建议汇总 |
+| **工作空间隔离** | 扫描任务按工作空间隔离；成员可查看/执行同一空间内的任务；admin 全局可见 |
 
 ### 工作空间
 
@@ -302,6 +366,14 @@ Prompt 统一管理在 `skills/prompts/*.yaml`，无需改代码即可调整生�
 | 测试计划 | PUT | `/api/v1/test-plans/{id}/webhook-token` | 生成 CI/CD 触发 token |
 | 测试计划 | POST | `/api/v1/test-plans/{id}/trigger?token=xxx` | CI/CD 触发（无需 JWT） |
 | 测试计划 | GET | `/api/v1/test-plans/reports/{id}/pdf` | 导出 PDF |
+| 渗透测试 | GET | `/api/v1/pentest/tasks` | 任务列表（按工作空间） |
+| 渗透测试 | POST | `/api/v1/pentest/tasks` | 创建扫描任务 |
+| 渗透测试 | PUT | `/api/v1/pentest/tasks/{id}` | 编辑任务（名称/模块/用例/并发数） |
+| 渗透测试 | DELETE | `/api/v1/pentest/tasks/{id}` | 删除任务及漏洞记录 |
+| 渗透测试 | POST | `/api/v1/pentest/tasks/{id}/run` | 触发执行 |
+| 渗透测试 | POST | `/api/v1/pentest/tasks/{id}/cancel` | 取消运行中的任务 |
+| 渗透测试 | GET | `/api/v1/pentest/tasks/{id}/findings` | 漏洞列表（可按 severity/vuln_type 过滤） |
+| 渗透测试 | GET | `/api/v1/pentest/tasks/{id}/pdf` | 导出 PDF 报告 |
 | 健康检查 | GET | `/api/v1/health` | 服务健康检查（无需鉴权） |
 
 **WebSocket 频道**（连接地址：`ws://host:4000/ws?client_id=<频道>`）
@@ -314,6 +386,7 @@ Prompt 统一管理在 `skills/prompts/*.yaml`，无需改代码即可调整生�
 | `api_exec` | 接口用例执行进度 |
 | `api_load` | 压测实时指标（TPS / P95 / P99） |
 | `plan_{id}` | 测试计划执行进度 |
+| `pentest` | 渗透扫描实时进度（`pentest_progress` / `pentest_done` / `pentest_error` / `pentest_cancelled`）|
 
 ---
 
@@ -355,6 +428,7 @@ ai_test_agent/
 │   ├── ai_case_generator.py     # 文档驱动用例生成（RAG + 并发控制 + JSON 修复）
 │   ├── api_executor.py          # 接口用例执行引擎
 │   ├── param_resolver.py        # 参数化解析（全局变量池 / 内置函数 / 自定义脚本）
+│   ├── pentest_engine.py        # 渗透测试扫描引擎（12 模块，AI 修复建议，并发控制）
 │   ├── rag.py                   # RAG 向量检索（pgvector / 关键词降级）
 │   ├── langchain_tools.py       # LangChain 工具注册
 │   ├── prompt_loader.py         # YAML Prompt 加载器（懒加载 + LRU 缓存）
