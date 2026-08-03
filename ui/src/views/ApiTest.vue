@@ -657,16 +657,17 @@ async def create_order(user_id: int, product_id: int, quantity: int):
       </template>
     </el-dialog>
 
-    <!-- ============================================================
-         代码可行性分析 对话框（三步流程）
-         ============================================================ -->
-    <el-dialog
+    <!-- 代码可行性分析（已抽离为独立组件） -->
+    <CodeAnalyzeDialog
       v-model="codeAnalyzeVisible"
-      title="代码可行性分析"
-      width="900px"
-      :close-on-click-modal="false"
-      destroy-on-close
-    >
+      :project-id="currentProject?.id"
+      :saving-cases="savingAnalyzeCases"
+      @save-cases="handleSaveAnalyzeCases"
+    />
+
+    <!-- 脚本函数管理 Dialog（抽离为独立组件） -->
+    <ScriptDialog
+      v-model="scriptDialogVisible"
       <!-- Step 1：输入区 -->
       <div v-if="analyzeStep === 1">
         <el-alert
@@ -1103,244 +1104,14 @@ async def create_order(user_id: int, product_id: int, quantity: int):
       </template>
     </el-dialog>
 
-    <!-- 新建/编辑用例 Dialog -->
-    <el-dialog v-model="caseDialogVisible" :title="editingCase ? '编辑用例' : '新建用例'" width="640px">
-      <el-form :model="caseForm" label-width="90px" size="small">
-        <el-form-item label="用例名称" required>
-          <el-input v-model="caseForm.name" />
-        </el-form-item>
-        <el-form-item label="接口描述">
-          <el-input v-model="caseForm.description" placeholder="描述该接口的用途（同路径用例共享）" />
-        </el-form-item>
-        <el-row :gutter="12">
-          <el-col :span="8">
-            <el-form-item label="HTTP方法">
-              <el-select v-model="caseForm.method" style="width:100%">
-                <el-option v-for="m in ['GET','POST','PUT','DELETE','PATCH']" :key="m" :label="m" :value="m" />
-              </el-select>
-            </el-form-item>
-          </el-col>
-          <el-col :span="16">
-            <el-form-item label="路径">
-              <el-input v-model="caseForm.path" placeholder="/users/{id}" />
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-row :gutter="12">
-          <el-col :span="12">
-            <el-form-item label="模块">
-              <el-input v-model="caseForm.module" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="优先级">
-              <el-select v-model="caseForm.priority" style="width:100%">
-                <el-option label="P0" value="P0" /><el-option label="P1" value="P1" /><el-option label="P2" value="P2" />
-              </el-select>
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-form-item label="Headers">
-          <div style="width:100%">
-            <div v-for="(row, i) in caseForm.headersRows" :key="i"
-              style="display:flex;gap:6px;margin-bottom:6px;align-items:center">
-              <el-input v-model="row.key" placeholder="Header名 (如 Content-Type)" style="flex:1.2" size="small" />
-              <el-input v-model="row.value" placeholder="值" style="flex:2" size="small" />
-              <el-dropdown v-if="builtinFnList.length" trigger="click" @command="(cmd) => insertFn(row, cmd)">
-                <el-button size="small" text style="font-family:monospace;color:#909399;padding:0 4px;min-width:20px">ƒ</el-button>
-                <template #dropdown>
-                  <el-dropdown-menu>
-                    <el-dropdown-item v-for="fn in builtinFnList" :key="fn.value" :command="fn.value">
-                      <span style="font-family:monospace;font-size:12px">{{ fn.value }}</span>
-                      <span style="color:#aaa;font-size:11px;margin-left:8px">{{ fn.desc }}</span>
-                    </el-dropdown-item>
-                  </el-dropdown-menu>
-                </template>
-              </el-dropdown>
-              <el-button size="small" text type="danger" @click="removeHeadersRow(i)">
-                <el-icon><Delete /></el-icon>
-              </el-button>
-            </div>
-            <el-button size="small" :icon="Plus" @click="addHeadersRow">添加 Header</el-button>
-          </div>
-        </el-form-item>
-        <el-form-item label="Query Params">
-          <div style="width:100%">
-            <div v-for="(row, i) in caseForm.paramsRows" :key="i"
-              style="display:flex;gap:6px;margin-bottom:6px;align-items:center">
-              <el-input v-model="row.key" placeholder="参数名" style="flex:1" size="small" />
-              <el-input v-model="row.value" placeholder="参数值" style="flex:2" size="small" />
-              <el-dropdown v-if="builtinFnList.length" trigger="click" @command="(cmd) => insertFn(row, cmd)">
-                <el-button size="small" text style="font-family:monospace;color:#909399;padding:0 4px;min-width:20px">ƒ</el-button>
-                <template #dropdown>
-                  <el-dropdown-menu>
-                    <el-dropdown-item v-for="fn in builtinFnList" :key="fn.value" :command="fn.value">
-                      <span style="font-family:monospace;font-size:12px">{{ fn.value }}</span>
-                      <span style="color:#aaa;font-size:11px;margin-left:8px">{{ fn.desc }}</span>
-                    </el-dropdown-item>
-                  </el-dropdown-menu>
-                </template>
-              </el-dropdown>
-              <el-button size="small" text type="danger" @click="removeParamsRow(i)">
-                <el-icon><Delete /></el-icon>
-              </el-button>
-            </div>
-            <el-button size="small" :icon="Plus" @click="addParamsRow">添加参数</el-button>
-          </div>
-        </el-form-item>
-        <el-form-item label="请求体">
-          <div style="width:100%">
-            <el-radio-group v-model="caseForm.bodyType" size="small" style="margin-bottom:8px"
-              @change="onBodyTypeChange">
-              <el-radio-button value="none">无</el-radio-button>
-              <el-radio-button value="json">JSON</el-radio-button>
-              <el-radio-button value="form">Form 表单</el-radio-button>
-              <el-radio-button value="raw">原始文本</el-radio-button>
-            </el-radio-group>
-
-            <!-- JSON -->
-            <div v-if="caseForm.bodyType === 'json'">
-              <div v-if="builtinFnList.length" style="margin-bottom:4px;display:flex;align-items:center;gap:6px">
-                <span style="font-size:12px;color:#909399">插入函数：</span>
-                <el-dropdown trigger="click" @command="insertBodyFn">
-                  <el-button size="small" style="font-family:monospace;font-size:12px">ƒ(x)</el-button>
-                  <template #dropdown>
-                    <el-dropdown-menu>
-                      <el-dropdown-item v-for="fn in builtinFnList" :key="fn.value" :command="fn.value">
-                        <span style="font-family:monospace;font-size:12px">{{ fn.value }}</span>
-                        <span style="color:#aaa;font-size:11px;margin-left:8px">{{ fn.desc }}</span>
-                      </el-dropdown-item>
-                    </el-dropdown-menu>
-                  </template>
-                </el-dropdown>
-              </div>
-              <el-input v-model="caseForm.bodyStr" type="textarea" :rows="5"
-                placeholder='{"key": "value"}' style="font-family:monospace" />
-            </div>
-
-            <!-- Form 表单 key-value 编辑器 -->
-            <div v-else-if="caseForm.bodyType === 'form'">
-              <div v-for="(row, i) in caseForm.formRows" :key="i"
-                style="display:flex;gap:6px;margin-bottom:6px;align-items:center">
-                <el-input v-model="row.key" placeholder="参数名" style="flex:1" size="small" />
-                <el-input v-model="row.value" placeholder="参数值" style="flex:2" size="small" />
-                <el-dropdown v-if="builtinFnList.length" trigger="click" @command="(cmd) => insertFn(row, cmd)">
-                  <el-button size="small" text style="font-family:monospace;color:#909399;padding:0 4px;min-width:20px">ƒ</el-button>
-                  <template #dropdown>
-                    <el-dropdown-menu>
-                      <el-dropdown-item v-for="fn in builtinFnList" :key="fn.value" :command="fn.value">
-                        <span style="font-family:monospace;font-size:12px">{{ fn.value }}</span>
-                        <span style="color:#aaa;font-size:11px;margin-left:8px">{{ fn.desc }}</span>
-                      </el-dropdown-item>
-                    </el-dropdown-menu>
-                  </template>
-                </el-dropdown>
-                <el-button size="small" text type="danger" @click="removeFormRow(i)">
-                  <el-icon><Delete /></el-icon>
-                </el-button>
-              </div>
-              <el-button size="small" :icon="Plus" @click="addFormRow">添加参数</el-button>
-            </div>
-
-            <!-- 原始文本 -->
-            <el-input v-else-if="caseForm.bodyType === 'raw'"
-              v-model="caseForm.bodyRaw" type="textarea" :rows="5"
-              placeholder="请输入原始请求体内容..." style="font-family:monospace" />
-          </div>
-        </el-form-item>
-        <el-form-item label="断言规则">
-          <div style="width:100%">
-            <div v-for="(row, i) in caseForm.assertionRows" :key="i"
-              style="margin-bottom:8px;background:#fafafa;padding:8px 10px;border-radius:6px;border:1px solid #eee">
-              <!-- 第一行：类型 + 操作 -->
-              <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
-                <el-select v-model="row.type" size="small" style="width:120px;flex-shrink:0" @change="onAssertionTypeChange(row)">
-                  <el-option label="状态码" value="status_code" />
-                  <el-option label="JSON Path" value="json_path" />
-                  <el-option label="响应时间" value="response_time" />
-                </el-select>
-                <!-- 状态码断言（单行足够） -->
-                <template v-if="row.type === 'status_code'">
-                  <span style="font-size:12px;color:#909399;flex-shrink:0">期望状态码</span>
-                  <el-input-number v-model="row.expected" :min="100" :max="599" size="small" style="width:110px" controls-position="right" />
-                </template>
-                <!-- 响应时间断言（单行足够） -->
-                <template v-else-if="row.type === 'response_time'">
-                  <span style="font-size:12px;color:#909399;flex-shrink:0">最大响应时间</span>
-                  <el-input-number v-model="row.max_ms" :min="100" :max="60000" :step="500" size="small" style="width:140px" controls-position="right" />
-                  <span style="font-size:12px;color:#909399;flex-shrink:0">ms</span>
-                </template>
-                <el-button size="small" text type="danger" @click="removeAssertionRow(i)" style="margin-left:auto;flex-shrink:0">
-                  <el-icon><Delete /></el-icon>
-                </el-button>
-              </div>
-              <!-- JSON Path 断言：path 独占第二行，匹配方式+期望值第三行 -->
-              <template v-if="row.type === 'json_path'">
-                <el-input v-model="row.path" placeholder="$.data.id  或  $.status.code" size="small"
-                  style="width:100%;margin-bottom:6px;font-family:monospace">
-                  <template #prepend><span style="font-family:monospace;color:#409eff">Path</span></template>
-                </el-input>
-                <div style="display:flex;gap:6px;align-items:center">
-                  <el-select v-model="row.match_type" size="small" style="width:110px;flex-shrink:0" @change="onMatchTypeChange(row)">
-                    <el-option label="等于" value="equals" />
-                    <el-option label="包含" value="contains" />
-                    <el-option label="存在" value="exists" />
-                    <el-option label="不存在" value="not_exists" />
-                    <el-option label="非空" value="not_empty" />
-                    <el-option label="类型是" value="type" />
-                    <el-option label="正则匹配" value="regex" />
-                  </el-select>
-                  <el-select v-if="row.match_type === 'type'" v-model="row.expected" size="small" style="flex:1;min-width:0">
-                    <el-option label="string（字符串）" value="string" />
-                    <el-option label="number（数字）" value="number" />
-                    <el-option label="boolean（布尔）" value="boolean" />
-                    <el-option label="array（数组）" value="array" />
-                    <el-option label="object（对象）" value="object" />
-                    <el-option label="null（空）" value="null" />
-                  </el-select>
-                  <el-input v-else-if="!['exists','not_exists','not_empty'].includes(row.match_type)"
-                    v-model="row.expected"
-                    :placeholder="row.match_type === 'regex' ? '正则，如 ^\\d+$' : row.match_type === 'contains' ? '包含的内容' : '期望值'"
-                    size="small" style="flex:1;min-width:0" />
-                  <span v-else style="font-size:12px;color:#c0c4cc;flex:1">（无需期望值）</span>
-                </div>
-              </template>
-            </div>
-            <el-button size="small" :icon="Plus" @click="addAssertionRow">添加断言</el-button>
-          </div>
-        </el-form-item>
-        <el-form-item label="变量提取">
-          <div style="width:100%">
-            <div style="font-size:12px;color:#909399;margin-bottom:6px">
-              执行后从响应中提取值存入变量。
-              <code style="background:#f5f5f5;padding:1px 4px;border-radius:3px">local</code> — 当前执行链可用 <code style="background:#f5f5f5;padding:1px 4px;border-radius:3px">&#123;&#123;var:名&#125;&#125;</code>；
-              <code style="background:#f5f5f5;padding:1px 4px;border-radius:3px">global</code> — 跨项目可用 <code style="background:#f5f5f5;padding:1px 4px;border-radius:3px">&#123;&#123;gvar:名&#125;&#125;</code>
-            </div>
-            <div v-for="(row, i) in caseForm.varExtractsRows" :key="i"
-              style="display:flex;gap:6px;margin-bottom:6px;align-items:center">
-              <el-input v-model="row.name" placeholder="变量名 (如 token)" style="flex:1" size="small">
-                <template #prepend>变量</template>
-              </el-input>
-              <el-input v-model="row.path" placeholder="$.data.token" style="flex:2" size="small">
-                <template #prepend>Path</template>
-              </el-input>
-              <el-select v-model="row.scope" size="small" style="width:90px" placeholder="范围">
-                <el-option label="local" value="local" />
-                <el-option label="global" value="global" />
-              </el-select>
-              <el-button size="small" text type="danger" @click="removeVarExtractRow(i)">
-                <el-icon><Delete /></el-icon>
-              </el-button>
-            </div>
-            <el-button size="small" :icon="Plus" @click="addVarExtractRow">添加提取规则</el-button>
-          </div>
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="caseDialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="saveCase">保存</el-button>
-      </template>
-    </el-dialog>
+    <!-- 新建/编辑用例（已抽离为独立组件） -->
+    <CaseFormDialog
+      v-model="caseDialogVisible"
+      :editing-case="editingCase"
+      :project-id="currentProject?.id"
+      :fn-list="builtinFnList"
+      @saved="onCaseSaved"
+    />
 
     <!-- 全局变量池管理 Dialog -->
     <el-dialog v-model="gvarDialogVisible" title="全局变量池" width="700px" destroy-on-close>
@@ -1403,6 +1174,8 @@ import { Plus, Edit, Delete, MagicStick, VideoPlay, Refresh, Loading, View, Docu
 import { apiTestApi, scriptApi, gvarApi, downloadPdf } from '../api'
 import { marked } from 'marked'
 import ScriptDialog from './ApiTest/ScriptDialog.vue'
+import CodeAnalyzeDialog from './ApiTest/CodeAnalyzeDialog.vue'
+import CaseFormDialog from './ApiTest/CaseFormDialog.vue'
 import { useWorkspaceStore } from '../stores/workspace'
 import { useAuthStore } from '../stores/auth'
 import { useWebSocket } from '../composables/useWebSocket'
@@ -2086,6 +1859,32 @@ const saveCase = async () => {
 
 const toggleCase = async (c) => {
   await apiTestApi.updateCase(c.id, { enabled: c.enabled })
+}
+
+// ── CaseFormDialog 桥接 ──
+// 子组件 saved 事件：(result, isEdit) → 更新本地 cases 列表
+const onCaseSaved = (result, isEdit) => {
+  if (isEdit) {
+    const idx = cases.value.findIndex(c => c.id === result.id)
+    if (idx !== -1) cases.value[idx] = result
+  } else {
+    cases.value.push(result)
+  }
+}
+
+// ── CodeAnalyzeDialog 桥接 ──
+const handleSaveAnalyzeCases = async (autoCases) => {
+  savingAnalyzeCases.value = true
+  try {
+    const res = await apiTestApi.saveAnalyzeCases(currentProject.value.id, { cases: autoCases })
+    ElMessage.success(res.message || '保存成功')
+    codeAnalyzeVisible.value = false
+    await loadCases()
+  } catch (e) {
+    ElMessage.error('保存失败：' + (e?.response?.data?.detail || e?.message))
+  } finally {
+    savingAnalyzeCases.value = false
+  }
 }
 
 const deleteCases = async (ids) => {
