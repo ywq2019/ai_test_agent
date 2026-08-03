@@ -11,24 +11,28 @@ ARQ 异步任务队列 — 任务注册中心
   get_arq_pool() 返回 None 时表示 Redis 不可用，
   路由层判断后回退到 background_tasks.add_task()。
 
-Worker 启动：
-  python -m worker.arq_worker
-  # 或 Docker：单独起一个 app-worker 容器
+Worker 启动（两种方式）：
+  # 直接启动
+  arq worker.arq_worker.WorkerSettings
+
+  # Docker（--profile worker）
+  docker compose --profile worker up -d
+
+  # 多实例扩容
+  docker compose --profile worker up -d --scale worker=3
 """
 
 from __future__ import annotations
 import logging
 from typing import Optional
 
-from arq import ArqRedis
-
 logger = logging.getLogger(__name__)
 
 # ── 全局连接池（lifespan 中初始化） ────────────────────────────────────────────
-_arq_pool: Optional[ArqRedis] = None
+_arq_pool = None
 
 
-def get_arq_pool() -> Optional[ArqRedis]:
+def get_arq_pool():
     """返回 ARQ Redis 连接池；未初始化或 Redis 不可用时返回 None。"""
     return _arq_pool
 
@@ -80,7 +84,7 @@ async def task_generate_ai_cases(
 
     等价于原 _do_generate_bg，但由 ARQ worker 执行，支持：
       - 任务持久化（进程重启不丢失）
-      - 重试策略（job_retry=2）
+      - 重试策略（max_tries=2）
       - 多 worker 横向扩展
     """
     from api.routes.ai_cases import _do_generate_bg
@@ -134,10 +138,72 @@ async def task_run_execution(
     return {"report_id": report_id, "status": "done"}
 
 
-# ── Worker 配置（arq worker 读取此处配置）──────────────────────────────────────
+# ── Worker 生命周期钩子 ────────────────────────────────────────────────────────
+
+async def on_worker_startup(ctx: dict) -> None:
+    """
+    Worker 进程启动时执行：
+    - 初始化数据库连接（ORM + 迁移）
+    - 加载全局变量池
+    - 重置上次崩溃时卡住的任务状态
+    """
+    logger.info("[ARQ worker] 启动中...")
+
+    # 初始化数据库
+    from tools.database import init_database
+    await init_database()
+    logger.info("[ARQ worker] 数据库已就绪")
+
+    # 加载全局变量池
+    from skills.param_resolver import load_global_vars
+    await load_global_vars()
+    logger.info("[ARQ worker] 全局变量池已加载")
+
+    # 重置卡住的 AI 生成任务（worker 崩溃时可能遗留 generating 状态）
+    from sqlalchemy import update as _sql_update
+    from tools.database import async_session_maker, AICaseFile
+    async with async_session_maker() as db:
+        result = await db.execute(
+            _sql_update(AICaseFile)
+            .where(AICaseFile.gen_status == "generating")
+            .values(gen_status="failed")
+            .returning(AICaseFile.id)
+        )
+        stuck = [row[0] for row in result.fetchall()]
+        await db.commit()
+    if stuck:
+        logger.warning(f"[ARQ worker] 重置 {len(stuck)} 个卡住的生成任务: ids={stuck}")
+
+    logger.info("[ARQ worker] 启动完成，等待任务...")
+
+
+async def on_worker_shutdown(ctx: dict) -> None:
+    """Worker 进程关闭时清理资源。"""
+    logger.info("[ARQ worker] 正在关闭...")
+
+
+# ── Worker 配置 ────────────────────────────────────────────────────────────────
+
+def _get_redis_settings():
+    """从环境变量读取 Redis 配置，供 WorkerSettings 调用。"""
+    from tools.config import settings
+    from arq.connections import RedisSettings
+    return RedisSettings.from_dsn(settings.REDIS_URL or "redis://localhost:6379/0")
+
 
 class WorkerSettings:
-    """arq worker 配置。启动命令：arq worker.arq_worker.WorkerSettings"""
+    """
+    ARQ worker 配置。
+
+    启动命令：
+      arq worker.arq_worker.WorkerSettings
+
+    Docker 多实例：
+      docker compose --profile worker up -d --scale worker=3
+
+    注意：arq 要求 redis_settings 为类变量（不能是 @property），
+    此处使用延迟初始化方案兼容环境变量加载顺序。
+    """
 
     functions = [
         task_generate_ai_cases,
@@ -146,13 +212,15 @@ class WorkerSettings:
         task_run_execution,
     ]
 
-    @property
-    def redis_settings(self):
-        from tools.config import settings
-        from arq.connections import RedisSettings
-        return RedisSettings.from_dsn(settings.REDIS_URL or "redis://localhost:6379/0")
+    on_startup = on_worker_startup
+    on_shutdown = on_worker_shutdown
 
-    max_jobs = 20           # 与 settings.ARQ_MAX_JOBS 一致
-    job_timeout = 3600      # 单任务超时 1 小时
-    max_tries = 2           # 失败最多重试 1 次（共执行 2 次）
-    keep_result = 3600      # 结果保留 1 小时供查询
+    # arq 读取此类属性作为 Redis 连接配置
+    # 若 REDIS_URL 未配置，此处使用默认本地地址（worker 启动本身就依赖 Redis）
+    redis_settings = _get_redis_settings()
+
+    max_jobs = 20       # 单 worker 最大并发任务数；多 worker 时各自独立计数
+    job_timeout = 3600  # 单任务超时 1 小时，超时自动 cancel 并标记失败
+    max_tries = 2       # 失败最多重试 1 次（共执行 2 次）
+    keep_result = 3600  # 任务结果在 Redis 中保留 1 小时供查询
+    queue_read_limit = 10  # 每次从队列取出的最大任务数，控制突发峰值

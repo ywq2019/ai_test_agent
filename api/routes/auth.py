@@ -157,10 +157,21 @@ async def reset_user_password(
 @router.get("/health", response_model=HealthResponse)
 async def health_check():
     from agent.core import uitest_agent  # 延迟导入，避免加载鉴权模块时触发 Agent 重型初始化
+    from worker.arq_worker import get_arq_pool
+    arq_pool = get_arq_pool()
+    arq_status = "redis"
+    if arq_pool:
+        try:
+            await arq_pool.ping()
+        except Exception:
+            arq_status = "redis_error"
+    else:
+        arq_status = "fallback"
     return {
         "status": "healthy",
         "version": settings.APP_VERSION,
-        "agent_state": uitest_agent.get_state()
+        "agent_state": uitest_agent.get_state(),
+        "task_queue": arq_status,   # redis | fallback | redis_error
     }
 
 

@@ -131,6 +131,7 @@ class HealthResponse(BaseModel):
     status: str
     version: str
     agent_state: Dict[str, Any]
+    task_queue: str = "fallback"  # redis | fallback | redis_error
 
 
 class LLMConfigRequest(BaseModel):
