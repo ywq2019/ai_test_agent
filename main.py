@@ -271,6 +271,57 @@ async def http_exception_handler(request: Request, exc: FastAPIHTTPException):
     """标准 HTTPException：不带 code，保持向后兼容。"""
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
+# ── 接口耗时 + trace_id 中间件 ────────────────────────────────────────────────
+import uuid as _uuid_lib
+import time as _time_lib
+
+@app.middleware("http")
+async def access_log_middleware(request: Request, call_next):
+    """
+    为每个请求注入 trace_id，记录接口耗时和状态码。
+    trace_id 同时写入响应头 X-Trace-Id，方便前端 / 网关关联日志。
+    跳过静态资源路径，避免无效日志噪音。
+    """
+    path = request.url.path
+    # 静态资源跳过
+    if any(path.startswith(p) for p in ("/assets/", "/screenshots/", "/reports/")):
+        return await call_next(request)
+
+    trace_id = request.headers.get("X-Trace-Id") or _uuid_lib.uuid4().hex[:12]
+    start = _time_lib.monotonic()
+
+    # 从 JWT 解析用户名（中间件层，尽力而为）
+    username = "-"
+    try:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            from api.auth import decode_token
+            payload = decode_token(auth_header[7:])
+            if payload:
+                username = payload.get("sub", "-")
+    except Exception:
+        pass
+
+    response = await call_next(request)
+    elapsed_ms = int((_time_lib.monotonic() - start) * 1000)
+    response.headers["X-Trace-Id"] = trace_id
+
+    # 超过 500ms 用 WARNING，4xx/5xx 用 WARNING，其余 INFO
+    status = response.status_code
+    level = "WARNING" if (elapsed_ms > 500 or status >= 400) else "INFO"
+    logger.log(
+        level,
+        "[{trace}] {method} {path} {status} {ms}ms user={user}",
+        trace=trace_id,
+        method=request.method,
+        path=path,
+        status=status,
+        ms=elapsed_ms,
+        user=username,
+    )
+
+    return response
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unhandled error [{request.method} {request.url.path}]: {type(exc).__name__}: {exc}")
