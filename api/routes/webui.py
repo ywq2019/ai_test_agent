@@ -139,7 +139,7 @@ async def get_task(task_id: int, db: AsyncSession = Depends(get_db), current_use
     result = await db.execute(select(TestTask).where(TestTask.id == task_id))
     task = result.scalar_one_or_none()
     if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+        raise HTTPException(status_code=404, detail="任务不存在")
     await check_access(db, task, current_user, "任务")
     return TaskResponse(
         id=task.id, name=task.name, url=task.url, status=task.status,
@@ -157,7 +157,7 @@ async def delete_task(task_id: int, db: AsyncSession = Depends(get_db), current_
     result = await db.execute(select(TestTask).where(TestTask.id == task_id))
     task = result.scalar_one_or_none()
     if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+        raise HTTPException(status_code=404, detail="任务不存在")
     await check_access(db, task, current_user, "任务")
     await db.execute(delete(TestTask).where(TestTask.id == task_id))
     await db.execute(delete(TestCase).where(TestCase.task_id == task_id))
@@ -171,7 +171,7 @@ async def update_task(task_id: int, request: TaskUpdateRequest, db: AsyncSession
     result = await db.execute(select(TestTask).where(TestTask.id == task_id))
     task = result.scalar_one_or_none()
     if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+        raise HTTPException(status_code=404, detail="任务不存在")
     await check_access(db, task, current_user, "任务")
 
     # 只更新传入了的字段
@@ -241,9 +241,11 @@ async def parse_page(
                 await db.refresh(task)
         logger.info(f"Page parsed successfully, found {len(elements)} elements")
         return {"url": request.url, "element_count": len(elements), "elements": elements}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error parsing page: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="页面解析失败，请检查 URL 或浏览器配置")
 
 
 @router.post("/parse/document")
@@ -262,8 +264,10 @@ async def parse_document(
     try:
         document_data = await uitest_agent.parse_document(document_path)
         return document_data
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="文档解析失败，请检查文件格式或路径")
 
 
 @router.post("/tasks/{task_id}/elements", response_model=TaskResponse)
@@ -272,7 +276,7 @@ async def set_page_elements(task_id: int, elements: List[dict], db: AsyncSession
         result = await db.execute(select(TestTask).where(TestTask.id == task_id))
         task = result.scalar_one_or_none()
         if not task:
-            raise HTTPException(status_code=404, detail="Task not found")
+            raise HTTPException(status_code=404, detail="任务不存在")
         await check_access(db, task, current_user, "任务")
         task.page_elements = elements
         task.status = "parsed"
@@ -285,9 +289,11 @@ async def set_page_elements(task_id: int, elements: List[dict], db: AsyncSession
             updated_at=task.updated_at.isoformat() if task.updated_at else None,
             page_elements=task.page_elements,
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error setting page elements: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="更新页面元素失败，请稍后重试")
 
 
 # ── 用例管理 ──────────────────────────────────────────────────────────────────
@@ -368,7 +374,7 @@ async def list_cases(task_id: int, db: AsyncSession = Depends(get_db), current_u
     result = await db.execute(select(TestTask).where(TestTask.id == task_id))
     task = result.scalar_one_or_none()
     if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+        raise HTTPException(status_code=404, detail="任务不存在")
     await check_access(db, task, current_user, "任务")
     result = await db.execute(select(TestCase).where(TestCase.task_id == task_id))
     cases = result.scalars().all()
@@ -435,7 +441,7 @@ async def generate_cases(task_id: int, request: dict = None, db: AsyncSession = 
         result = await db.execute(select(TestTask).where(TestTask.id == task_id))
         task = result.scalar_one_or_none()
         if not task:
-            raise HTTPException(status_code=404, detail="Task not found")
+            raise HTTPException(status_code=404, detail="任务不存在")
         await check_access(db, task, current_user, "任务")
 
         if reparse_page and task.url:
@@ -519,9 +525,11 @@ async def generate_cases(task_id: int, request: dict = None, db: AsyncSession = 
             )
             for c in all_cases
         ]
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error generating cases: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="用例生成失败，请稍后重试")
 
 
 @router.post("/cases/optimize/{task_id}")
@@ -535,7 +543,7 @@ async def optimize_cases(task_id: int, request: dict = None, db: AsyncSession = 
         result = await db.execute(select(TestTask).where(TestTask.id == task_id))
         task = result.scalar_one_or_none()
         if not task:
-            raise HTTPException(status_code=404, detail="Task not found")
+            raise HTTPException(status_code=404, detail="任务不存在")
         await check_access(db, task, current_user, "任务")
         result = await db.execute(select(TestCase).where(TestCase.task_id == task_id))
         existing_db_cases = result.scalars().all()
@@ -594,7 +602,7 @@ async def get_coverage(task_id: int, db: AsyncSession = Depends(get_db),
         result = await db.execute(select(TestTask).where(TestTask.id == task_id))
         task = result.scalar_one_or_none()
         if not task:
-            raise HTTPException(status_code=404, detail="Task not found")
+            raise HTTPException(status_code=404, detail="任务不存在")
         await check_access(db, task, current_user, "任务")
         result = await db.execute(select(TestCase).where(TestCase.task_id == task_id))
         db_cases = result.scalars().all()
@@ -623,7 +631,7 @@ async def webui_doc_diff_check(
     result = await db.execute(select(TestTask).where(TestTask.id == task_id))
     task = result.scalar_one_or_none()
     if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+        raise HTTPException(status_code=404, detail="任务不存在")
     await check_access(db, task, current_user, "任务")
     if not request.new_content and not request.new_document_path:
         raise HTTPException(status_code=400, detail="请提供新版文档路径或文本内容")
@@ -663,7 +671,7 @@ async def webui_incremental_update(
     result = await db.execute(select(TestTask).where(TestTask.id == task_id))
     task = result.scalar_one_or_none()
     if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+        raise HTTPException(status_code=404, detail="任务不存在")
     await check_access(db, task, current_user, "任务")
     if not request.new_content and not request.new_document_path:
         raise HTTPException(status_code=400, detail="请提供新版文档路径或文本内容")
@@ -723,9 +731,11 @@ async def webui_incremental_update(
             existing_cases=existing_cases, diff_result=diff_result,
             new_doc_content=new_content, progress_cb=_progress,
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("WebUI 增量更新失败: {}", repr(e))
-        raise HTTPException(status_code=500, detail=f"增量更新失败: {e}")
+        raise HTTPException(status_code=500, detail="增量更新失败，请稍后重试")
     await db.execute(sql_delete(TestCase).where(TestCase.task_id == task_id))
     for case in upd["retained_cases"] + upd["new_cases"] + upd["deprecated_cases"]:
         db.add(TestCase(
@@ -753,7 +763,7 @@ async def update_case(case_id: int, request: CaseUpdateRequest, db: AsyncSession
     result = await db.execute(select(TestCase).where(TestCase.id == case_id))
     case = result.scalar_one_or_none()
     if not case:
-        raise HTTPException(status_code=404, detail="Case not found")
+        raise HTTPException(status_code=404, detail="用例不存在")
     # 通过关联任务校验工作空间访问权限
     task_result = await db.execute(select(TestTask).where(TestTask.id == case.task_id))
     task = task_result.scalar_one_or_none()
@@ -777,7 +787,7 @@ async def delete_case(case_id: int, db: AsyncSession = Depends(get_db), current_
     result = await db.execute(select(TestCase).where(TestCase.id == case_id))
     case = result.scalar_one_or_none()
     if not case:
-        raise HTTPException(status_code=404, detail="Case not found")
+        raise HTTPException(status_code=404, detail="用例不存在")
     # 通过关联任务校验工作空间访问权限
     task_result = await db.execute(select(TestTask).where(TestTask.id == case.task_id))
     task = task_result.scalar_one_or_none()
@@ -1177,7 +1187,7 @@ async def execute_cases(
         if not task:
             async with _running_tasks_lock:
                 _running_tasks.discard(request.task_id)
-            raise HTTPException(status_code=404, detail="Task not found")
+            raise HTTPException(status_code=404, detail="任务不存在")
         await check_access(db, task, current_user, "任务")
         task_url  = task.url  if task else ""
         task_name = task.name if task else f"Task {request.task_id}"
@@ -1238,7 +1248,7 @@ async def get_report_by_id(report_id: int, db: AsyncSession = Depends(get_db), c
     result = await db.execute(select(TestReport).where(TestReport.id == report_id))
     report = result.scalar_one_or_none()
     if not report:
-        raise HTTPException(status_code=404, detail="Report not found")
+        raise HTTPException(status_code=404, detail="报告不存在")
     await check_access(db, report, current_user, "报告")
     return ReportResponse(
         task_id=report.task_id, task_name=report.name,
@@ -1261,7 +1271,7 @@ async def export_report(report_id: int, db: AsyncSession = Depends(get_db),
     result = await db.execute(select(TestReport).where(TestReport.id == report_id))
     report = result.scalar_one_or_none()
     if not report:
-        raise HTTPException(status_code=404, detail="Report not found")
+        raise HTTPException(status_code=404, detail="报告不存在")
     await check_access(db, report, current_user, "报告")
     summary  = json.loads(report.summary) if isinstance(report.summary, str) else (report.summary  or {})
     details  = json.loads(report.details)  if isinstance(report.details, str)  else (report.details  or [])
@@ -1344,7 +1354,7 @@ async def get_report_progress(report_id: int, db: AsyncSession = Depends(get_db)
     result = await db.execute(select(TestReport).where(TestReport.id == report_id))
     report = result.scalar_one_or_none()
     if not report:
-        raise HTTPException(status_code=404, detail="Report not found")
+        raise HTTPException(status_code=404, detail="报告不存在")
     await check_access(db, report, current_user, "报告")
 
     # 检查是否仍在执行中：summary 为空且创建时间在 30 分钟内视为 running
@@ -1377,7 +1387,7 @@ async def export_report_pdf(report_id: int, db: AsyncSession = Depends(get_db),
     result = await db.execute(select(TestReport).where(TestReport.id == report_id))
     report = result.scalar_one_or_none()
     if not report:
-        raise HTTPException(status_code=404, detail="Report not found")
+        raise HTTPException(status_code=404, detail="报告不存在")
     await check_access(db, report, current_user, "报告")
 
     # ── 2. 查关联任务（补充 URL / 浏览器 / 环境等字段）──────────────────────
@@ -1642,7 +1652,7 @@ async def delete_report(report_id: int, db: AsyncSession = Depends(get_db), curr
     result = await db.execute(select(TestReport).where(TestReport.id == report_id))
     report = result.scalar_one_or_none()
     if not report:
-        raise HTTPException(status_code=404, detail="Report not found")
+        raise HTTPException(status_code=404, detail="报告不存在")
     await check_access(db, report, current_user, "报告")
     await db.execute(delete(TestReport).where(TestReport.id == report_id))
     await db.commit()
@@ -1673,7 +1683,7 @@ async def get_report(task_id: int, db: AsyncSession = Depends(get_db), current_u
     result = await db.execute(select(TestReport).where(TestReport.task_id == task_id))
     report = result.scalar_one_or_none()
     if not report:
-        raise HTTPException(status_code=404, detail="Report not found")
+        raise HTTPException(status_code=404, detail="报告不存在")
     await check_access(db, report, current_user, "报告")
     return ReportResponse(
         task_id=report.task_id, task_name=report.name,
@@ -1734,7 +1744,7 @@ async def get_skill(skill_name: str):
     for s in uitest_agent.get_skills():
         if s["name"] == skill_name:
             return s
-    raise HTTPException(status_code=404, detail="Skill not found")
+    raise HTTPException(status_code=404, detail="技能不存在")
 
 
 @router.post("/skills/{skill_name}/reload")
@@ -1759,9 +1769,9 @@ async def get_skill_file_content(skill_name: str, path: str = "SKILL.md"):
             if target.suffix not in allowed_exts:
                 raise HTTPException(status_code=400, detail="File type not allowed")
             if not target.exists():
-                raise HTTPException(status_code=404, detail="File not found")
+                raise HTTPException(status_code=404, detail="文件不存在")
             return {"content": target.read_text(encoding="utf-8"), "path": path}
-    raise HTTPException(status_code=404, detail="Skill not found")
+    raise HTTPException(status_code=404, detail="技能不存在")
 
 
 @router.get("/skills/{skill_name}/files")
@@ -1777,7 +1787,7 @@ async def get_skill_files(skill_name: str):
                     for f in skill_path.rglob("*") if f.is_file()
                 ]
                 return {"skill_name": skill_name, "path": str(skill_path), "files": files}
-    raise HTTPException(status_code=404, detail="Skill not found")
+    raise HTTPException(status_code=404, detail="技能不存在")
 
 
 @router.get("/llm/models")
@@ -2124,7 +2134,7 @@ async def recording_save(body: dict,
     task_result = await db.execute(select(TestTask).where(TestTask.id == task_id))
     task = task_result.scalar_one_or_none()
     if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+        raise HTTPException(status_code=404, detail="任务不存在")
     await check_access(db, task, current_user, "任务")
 
     # ── 智能补全：断言 + wait + 预期结果 + 名称 ──
@@ -2172,7 +2182,7 @@ async def execute_multi_browser(
     result = await db.execute(select(TestTask).where(TestTask.id == task_id))
     task = result.scalar_one_or_none()
     if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+        raise HTTPException(status_code=404, detail="任务不存在")
     await check_access(db, task, current_user, "任务")
 
     # 查用例
@@ -2254,7 +2264,7 @@ async def export_pytest(task_id: int, body: dict = None,
     result = await db.execute(select(TestTask).where(TestTask.id == task_id))
     task = result.scalar_one_or_none()
     if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+        raise HTTPException(status_code=404, detail="任务不存在")
     await check_access(db, task, current_user, "任务")
     try:
         script_path = await export_task_from_db(task_id, db, include_secrets)
@@ -2289,7 +2299,7 @@ async def download_pytest_script(task_id: int,
     result = await db.execute(select(TestTask).where(TestTask.id == task_id))
     task = result.scalar_one_or_none()
     if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+        raise HTTPException(status_code=404, detail="任务不存在")
     await check_access(db, task, current_user, "任务")
     script_path = Path(f"reports/pytest_exports/pytest_{task_id}.py")
     if not script_path.exists():

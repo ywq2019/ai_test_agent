@@ -243,13 +243,23 @@ from fastapi import HTTPException as FastAPIHTTPException
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from api.limiter import limiter
+from api.exceptions import AppException
 
 # 限流器：以客户端 IP 为维度
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+@app.exception_handler(AppException)
+async def app_exception_handler(request: Request, exc: AppException):
+    """业务异常：带 code 字段，供前端按错误码分支处理。"""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"code": exc.code, "detail": exc.message},
+    )
+
 @app.exception_handler(FastAPIHTTPException)
 async def http_exception_handler(request: Request, exc: FastAPIHTTPException):
+    """标准 HTTPException：不带 code，保持向后兼容。"""
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 @app.exception_handler(Exception)

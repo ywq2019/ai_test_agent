@@ -242,7 +242,7 @@ async def download_ai_case(record_id: int, format: str = "md", db: AsyncSession 
             logger.info(f"下载时文件不存在，已重新生成: record_id={record_id}, format={format}, path={p}")
         except Exception as e:
             logger.error(f"重新生成下载文件失败: record_id={record_id}, err={e}")
-            raise HTTPException(status_code=500, detail=f"文件已丢失，重新生成失败: {e}")
+            raise HTTPException(status_code=500, detail="文件已丢失，重新生成失败，请联系管理员")
 
     encoded = quote(record.task_name.replace("/", "_") + ext, safe="")
     return FileResponse(path=str(p), media_type=media_type,
@@ -607,9 +607,11 @@ async def optimize_ai_cases(request: Request, record_id: int, db: AsyncSession =
             client_id="ai_gen",
         )
         raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("AI 用例优化失败: {}", repr(e))
-        raise HTTPException(status_code=500, detail=f"优化失败: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail="用例优化失败，请稍后重试")
 
     record.cases_data = opt_result["cases_data"]
     record.case_count = opt_result["case_count"]
@@ -922,9 +924,11 @@ async def incremental_update_ai_case(
             client_id="ai_gen",
         )
         raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("增量更新失败: {}", repr(e))
-        raise HTTPException(status_code=500, detail=f"增量更新失败: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail="增量更新失败，请稍后重试")
 
     old_record.record_status = "deprecated"
     await db.flush()
@@ -1469,9 +1473,11 @@ async def analyze_coverage_gap(record_id: int, data: dict, db: AsyncSession = De
     except _json.JSONDecodeError as e:
         logger.error(f"缺口分析返回非法 JSON: {e}")
         raise HTTPException(status_code=500, detail="AI 返回格式异常，请稍后重试")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("缺口分析失败: record_id={}, req_id={}", record_id, req_id)
-        raise HTTPException(status_code=500, detail=f"分析失败: {e}")
+        raise HTTPException(status_code=500, detail="缺口分析失败，请稍后重试")
 
     return {
         "req_id":                req_id,

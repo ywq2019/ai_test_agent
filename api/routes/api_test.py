@@ -603,7 +603,7 @@ async def generate_api_cases(
             await ws_manager.broadcast({"type": "api_gen_done", "count": len(cases)}, client_id="api_gen")
         except Exception as e:
             logger.error(f"API case generation failed: {e}", exc_info=True)
-            await ws_manager.broadcast({"type": "api_gen_error", "message": str(e)}, client_id="api_gen")
+            await ws_manager.broadcast({"type": "api_gen_error", "message": "接口用例生成失败，请稍后重试"}, client_id="api_gen")
 
     background_tasks.add_task(_bg)
     return {"message": "AI生成任务已启动，请通过 WebSocket 接收进度", "project_id": project_id}
@@ -651,7 +651,7 @@ async def generate_cases_from_code(
             await ws_manager.broadcast({"type": "api_gen_done", "count": len(cases)}, client_id="api_gen")
         except Exception as e:
             logger.error(f"代码用例生成失败: {e}", exc_info=True)
-            await ws_manager.broadcast({"type": "api_gen_error", "message": str(e)}, client_id="api_gen")
+            await ws_manager.broadcast({"type": "api_gen_error", "message": "代码用例生成失败，请稍后重试"}, client_id="api_gen")
 
     background_tasks.add_task(_bg)
     return {"message": "代码分析任务已启动", "project_id": project_id}
@@ -676,9 +676,11 @@ async def analyze_code_vs_requirement(project_id: int, data: dict, db: AsyncSess
         report = await api_code_analyzer.analyze_vs_requirement(requirement=requirement, code=code, lang=lang)
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("代码可行性分析失败: {}", repr(e))
-        raise HTTPException(status_code=500, detail=f"分析失败: {e}")
+        raise HTTPException(status_code=500, detail="代码可行性分析失败，请稍后重试")
     return report
 
 
