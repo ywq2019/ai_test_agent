@@ -158,9 +158,16 @@ class ApiCaseGenerator:
             await progress_cb(85, "校验断言路径...")
         all_cases = await self._correct_assertions(all_cases, base_url, combined_headers)
 
+        # Step 4.5: ReAct 自检循环 — 执行正常流用例并让 AI 修正不可行的用例
+        if progress_cb:
+            await progress_cb(88, "执行验证，AI 自检修正...")
+        all_cases = await self._self_correct_loop(
+            all_cases, base_url, combined_headers, progress_cb=progress_cb
+        )
+
         # Step 5: 补全描述
         if progress_cb:
-            await progress_cb(92, "补全接口描述...")
+            await progress_cb(95, "补全接口描述...")
         all_cases = await self._fill_descriptions(all_cases)
 
         if progress_cb:
@@ -621,6 +628,173 @@ class ApiCaseGenerator:
                     )
 
             case["assertions"] = new_assertions
+
+    # ─── ReAct 自检循环 ───────────────────────────────────────────────────────
+
+    async def _self_correct_loop(
+        self,
+        cases: List[Dict],
+        base_url: str,
+        headers: Dict,
+        max_rounds: int = 2,
+        progress_cb: Optional[Callable] = None,
+    ) -> List[Dict]:
+        """
+        ReAct 自检：对正常流用例执行一次真实请求，
+        若结果与预期偏差明显，调用 AI 修正用例参数 / body / 断言。
+
+        最多执行 max_rounds 轮，每轮只处理仍有问题的用例。
+        无法联通的接口（网络错误）跳过，不计入失败。
+
+        修正维度：
+          - 请求 body 字段名 / 类型错误（AI 基于响应修正）
+          - 状态码预期错误（如生成了 200 但实际返回 422 参数校验失败）
+          - 无效的 json_path 断言（断言路径在响应中不存在）
+        """
+        import httpx
+
+        # 只处理正常流用例（scenario 含正常/normal/happy/success）
+        normal_cases = [
+            c for c in cases
+            if re.search(r'正常|normal|happy|success', c.get("scenario", ""), re.IGNORECASE)
+        ]
+        if not normal_cases:
+            # 没有明确标注正常流的，取每个 path 第一条用例
+            seen: set = set()
+            for c in cases:
+                key = (c.get("method", "GET"), c.get("path", "/"))
+                if key not in seen:
+                    seen.add(key)
+                    normal_cases.append(c)
+
+        # 限制：最多 self-correct 10 条，避免超时
+        normal_cases = normal_cases[:10]
+
+        problem_cases = normal_cases
+        for round_idx in range(max_rounds):
+            if not problem_cases:
+                break
+
+            sem = asyncio.Semaphore(3)
+            fixed_count = [0]
+
+            async def verify_and_fix(case: Dict) -> Dict:
+                async with sem:
+                    return await self._verify_one_case(case, base_url, headers, fixed_count)
+
+            results = await asyncio.gather(
+                *[verify_and_fix(c) for c in problem_cases],
+                return_exceptions=True,
+            )
+
+            # 收集仍有问题的用例进入下一轮
+            next_problem = []
+            for r in results:
+                if isinstance(r, dict) and r.get("_self_correct_failed"):
+                    next_problem.append(r)
+
+            logger.info(
+                f"[self_correct] round {round_idx + 1}: "
+                f"checked {len(problem_cases)}, fixed {fixed_count[0]}, "
+                f"still problematic {len(next_problem)}"
+            )
+            problem_cases = next_problem
+
+        # 清理内部标记
+        for c in cases:
+            c.pop("_self_correct_failed", None)
+
+        return cases
+
+    async def _verify_one_case(
+        self,
+        case: Dict,
+        base_url: str,
+        headers: Dict,
+        fixed_count: List[int],
+    ) -> Dict:
+        """
+        执行单条用例的真实请求，若结果异常则调用 AI 修正。
+        返回修正后的 case（若无法修正则打上 _self_correct_failed 标记）。
+        """
+        import httpx
+        method = case.get("method", "GET").upper()
+        path = case.get("path", "/")
+        url = base_url.rstrip("/") + path
+
+        req_headers = {**headers, **(case.get("headers") or {})}
+        params = case.get("params") or {}
+        body = case.get("body") if method in ("POST", "PUT", "PATCH") else None
+
+        try:
+            async with httpx.AsyncClient(verify=False, timeout=15) as client:
+                resp = await client.request(
+                    method, url,
+                    headers=req_headers,
+                    params=params,
+                    json=body if body else None,
+                )
+            actual_status = resp.status_code
+            try:
+                actual_body = resp.json()
+            except Exception:
+                actual_body = resp.text[:500]
+
+        except Exception as e:
+            # 网络错误：跳过，不算失败
+            logger.info(f"[self_correct] skip {method} {path}: {e}")
+            return case
+
+        # 判断是否需要修正
+        expected_status = next(
+            (a["expected"] for a in (case.get("assertions") or [])
+             if a.get("type") == "status_code"),
+            200,
+        )
+        status_ok = (actual_status == expected_status)
+
+        # 响应 4xx 且预期 2xx：明显有问题，需修正
+        needs_fix = (not status_ok and actual_status >= 400 and expected_status < 300)
+
+        if not needs_fix:
+            # 状态码符合预期，不需要修正
+            return case
+
+        # ── 调用 AI 修正 ──────────────────────────────────────────────────────
+        fix_prompt = (
+            f"以下接口用例执行后返回了非预期结果，请修正用例，使其能成功请求并通过断言。\n\n"
+            f"接口信息：\n"
+            f"  方法: {method}\n"
+            f"  路径: {path}\n"
+            f"  完整URL: {url}\n\n"
+            f"原用例（JSON）：\n{json.dumps(case, ensure_ascii=False, indent=2)}\n\n"
+            f"真实响应：\n"
+            f"  状态码: {actual_status}\n"
+            f"  响应体: {json.dumps(actual_body, ensure_ascii=False)[:800] if isinstance(actual_body, (dict, list)) else str(actual_body)[:800]}\n\n"
+            f"请分析原因并输出修正后的完整用例 JSON（只输出 JSON，不要解释）。\n"
+            f"修正规则：\n"
+            f"1. 若响应体包含字段说明，据此修正 body / params 的字段名和类型\n"
+            f"2. 若真实接口返回 {actual_status} 是正常行为（如登录接口未提供 token 返回 401），"
+            f"则修改 assertions 中的 status_code expected 为 {actual_status}\n"
+            f"3. 保持用例其他字段不变"
+        )
+
+        try:
+            system = "你是接口测试专家。请根据接口真实响应修正测试用例，只输出 JSON，不要任何解释。"
+            raw = await self._call_api(system, fix_prompt)
+            fixed = self._extract_json_obj(raw)
+            if fixed and isinstance(fixed, dict) and fixed.get("path"):
+                # 用修正后的用例覆盖原用例（原地修改）
+                case.update(fixed)
+                fixed_count[0] += 1
+                logger.info(f"[self_correct] fixed {method} {path}: {actual_status} → expected updated")
+                return case
+        except Exception as e:
+            logger.warning(f"[self_correct] AI fix failed for {method} {path}: {e}")
+
+        # AI 修正失败，标记留到下一轮
+        case["_self_correct_failed"] = True
+        return case
 
     # ─── LLM 调用 ─────────────────────────────────────────────────────────────
 

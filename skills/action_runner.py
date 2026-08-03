@@ -178,6 +178,25 @@ class ActionRunner:
 
         except Exception as e:
             duration = (time.monotonic() - t0) * 1000
+
+            # ── AI Selector 自动修复 ─────────────────────────────────────────
+            # 仅对需要 selector 的交互动作且 selector 非空时尝试
+            if action in _interact_actions and selector:
+                fixed_selector = await self._ai_fix_selector(page, step, selector, str(e))
+                if fixed_selector and fixed_selector != selector:
+                    try:
+                        await self._dispatch(action, page, fixed_selector, value, url, expected, timeout)
+                        duration = (time.monotonic() - t0) * 1000
+                        logger.info(
+                            f"[AI selector fix] step={step.get('id')} "
+                            f"原: {selector!r} → 修复: {fixed_selector!r}"
+                        )
+                        # 将修复后的 selector 写回 step，后续步骤复用
+                        step["selector"] = fixed_selector
+                        return _step_result(step, True, duration_ms=duration)
+                    except Exception:
+                        pass  # 修复后仍失败，继续走原有失败流程
+
             # 失败时自动截图
             try:
                 fname = f"step_{step.get('id', 'unknown')}_{int(time.time())}.png"
@@ -190,6 +209,108 @@ class ActionRunner:
                                  error=str(e),
                                  duration_ms=duration,
                                  screenshot=screenshot_path)
+
+    async def _ai_fix_selector(
+        self,
+        page: "Page",
+        step: dict,
+        failed_selector: str,
+        error_msg: str,
+    ) -> Optional[str]:
+        """
+        当所有候选 selector 都失败时，抓取当前页面可交互元素列表，
+        让 AI 推断一个可用的 selector。
+
+        返回 AI 推断的新 selector，或 None（AI 不确定时不强行修复）。
+
+        设计约束：
+          - 只抓前 60 个可交互元素（避免 prompt 过长）
+          - 调用 LLM 超时设为 20s（步骤执行不能被 AI 拖死）
+          - 失败时静默返回 None，不抛出异常
+        """
+        try:
+            # 抓取当前页面可交互元素概要
+            elements = await page.evaluate("""() => {
+                const selectors = [
+                    'button', 'a', 'input', 'select', 'textarea',
+                    '[role="button"]', '[role="link"]', '[role="tab"]',
+                    '[role="menuitem"]', '[role="checkbox"]', '[role="radio"]',
+                    '[onclick]', 'form'
+                ];
+                const items = [];
+                for (const sel of selectors) {
+                    for (const el of document.querySelectorAll(sel)) {
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width === 0 && rect.height === 0) continue;
+                        items.push({
+                            tag: el.tagName.toLowerCase(),
+                            id: el.id || '',
+                            text: (el.textContent || '').trim().slice(0, 40),
+                            name: el.getAttribute('name') || '',
+                            type: el.getAttribute('type') || '',
+                            placeholder: el.getAttribute('placeholder') || '',
+                            class: (el.className || '').split(' ').slice(0, 3).join(' '),
+                            role: el.getAttribute('role') || '',
+                            href: el.getAttribute('href') || '',
+                        });
+                        if (items.length >= 60) break;
+                    }
+                    if (items.length >= 60) break;
+                }
+                return items;
+            }""")
+
+            if not elements:
+                return None
+
+            # 格式化元素列表为 prompt 可读格式
+            el_lines = []
+            for el in elements[:60]:
+                parts = [el["tag"]]
+                if el["id"]:
+                    parts.append(f'id="{el["id"]}"')
+                if el["name"]:
+                    parts.append(f'name="{el["name"]}"')
+                if el["type"]:
+                    parts.append(f'type="{el["type"]}"')
+                if el["text"]:
+                    parts.append(f'text="{el["text"]}"')
+                if el["placeholder"]:
+                    parts.append(f'placeholder="{el["placeholder"]}"')
+                el_lines.append("  " + " ".join(parts))
+
+            action = step.get("action", "")
+            step_desc = step.get("description") or step.get("name") or action
+            page_url = page.url
+
+            prompt = (
+                f"在 Playwright 自动化测试中，以下 selector 执行 '{action}' 操作失败：\n"
+                f"  失败的 selector：{failed_selector!r}\n"
+                f"  错误信息：{error_msg[:200]}\n"
+                f"  步骤描述：{step_desc}\n"
+                f"  当前页面 URL：{page_url}\n\n"
+                f"当前页面中找到以下可交互元素（共 {len(elements)} 个）：\n"
+                + "\n".join(el_lines[:40]) +
+                "\n\n"
+                f"请根据步骤描述推断最可能匹配的元素，输出一个有效的 CSS selector 或 XPath。\n"
+                f"只输出 selector 字符串，不要任何解释。\n"
+                f"若无法确定，输出 NONE。"
+            )
+
+            system = "你是 Playwright 自动化测试专家，擅长从页面元素列表中推断正确的 selector。"
+            from tools.llm_client import call_llm
+            raw = await call_llm(system, prompt, max_tokens=200, timeout_secs=20)
+            candidate = raw.strip().strip('"\'`').strip()
+
+            if not candidate or candidate.upper() == "NONE" or len(candidate) > 200:
+                return None
+
+            logger.info(f"[AI selector fix] AI 推断候选 selector: {candidate!r}")
+            return candidate
+
+        except Exception as e:
+            logger.warning(f"[AI selector fix] 推断失败: {e}")
+            return None
 
     async def _dispatch(self, action: str, page: "Page",
                         selector: str, value: str, url: str,
