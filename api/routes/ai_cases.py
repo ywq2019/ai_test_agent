@@ -168,11 +168,24 @@ async def generate_ai_cases(
     db.add(placeholder)
     await db.commit()
     await db.refresh(placeholder)
-    background_tasks.add_task(
-        _do_generate_bg,
-        record_id=placeholder.id, task_name=body.task_name,
-        document_path=body.document_path, content=body.content, formats=body.formats,
-    )
+
+    # 优先走 ARQ（Redis 已配置且连接正常），否则降级为 BackgroundTasks
+    from worker.arq_worker import get_arq_pool, task_generate_ai_cases
+    arq_pool = get_arq_pool()
+    if arq_pool:
+        await arq_pool.enqueue_job(
+            task_generate_ai_cases.__name__,
+            record_id=placeholder.id, task_name=body.task_name,
+            document_path=body.document_path, content=body.content, formats=body.formats,
+        )
+        logger.info(f"[ARQ] AI 用例生成任务已入队: record_id={placeholder.id}")
+    else:
+        background_tasks.add_task(
+            _do_generate_bg,
+            record_id=placeholder.id, task_name=body.task_name,
+            document_path=body.document_path, content=body.content, formats=body.formats,
+        )
+
     return _ai_case_response(placeholder)
 
 

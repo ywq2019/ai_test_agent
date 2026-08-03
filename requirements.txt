@@ -29,3 +29,5 @@ python-jose[cryptography]==3.3.0
 bcrypt==4.2.1
 pgvector==0.3.6
 beautifulsoup4==4.12.3
+arq>=0.26.0
+redis>=5.0.0

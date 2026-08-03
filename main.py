@@ -156,6 +156,11 @@ async def lifespan(app: FastAPI):
         )
         logger.info("LangGraph Agent initialized")
 
+    # 初始化 ARQ 任务队列（可选，Redis 不可用时自动降级）
+    from worker.arq_worker import init_arq_pool
+    arq_enabled = await init_arq_pool()
+    logger.info(f"ARQ 任务队列: {'Redis 模式' if arq_enabled else '降级模式（BackgroundTasks）'}")
+
     # 启动日志定时清理后台任务
     cleanup_task = asyncio.create_task(_log_cleanup_loop())
     logger.info("日志定时清理任务已启动（保留 {} 天）".format(
@@ -211,6 +216,10 @@ async def lifespan(app: FastAPI):
     logger.info("渗透测试 watchdog 检查完成")
 
     yield
+
+    # 关闭 ARQ 连接池
+    from worker.arq_worker import close_arq_pool
+    await close_arq_pool()
 
     # 关闭时取消清理任务
     cleanup_task.cancel()

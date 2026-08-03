@@ -22,6 +22,21 @@ services:
       retries: 5
       start_period: 10s
 
+  # ── Redis（ARQ 任务队列，可选）────────────────────────────────────────────────
+  # 不配置 REDIS_URL 时任务队列自动降级为 BackgroundTasks，此服务可不启动
+  redis:
+    image: redis:7-alpine
+    container_name: ai-test-redis
+    command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    networks:
+      - ai-test-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
   # ── 应用服务 ─────────────────────────────────────────────────────────────────
   app:
     build:
@@ -46,6 +61,30 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+
+  # ── ARQ Worker（任务队列执行器，需 Redis，可选）──────────────────────────────
+  # 启动方式：docker compose --profile worker up -d
+  # 可独立扩容：docker compose --profile worker up -d --scale worker=3
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai-test-worker
+    profiles:
+      - worker
+    command: ["python", "-m", "arq", "worker.arq_worker.WorkerSettings"]
+    env_file:
+      - .env.docker
+    volumes:
+      - app_data:/data
+    networks:
+      - ai-test-net
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
 
   # ── Nginx 反向代理（可选，默认不启动）──────────────────────────────────────
   # 启动方式：docker compose --profile nginx up -d

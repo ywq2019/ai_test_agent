@@ -40,6 +40,13 @@ class Settings(BaseSettings):
     LLM_SEM_TIMEOUT: int = 60       # LLM Semaphore 等待超时（秒），超时返回"系统繁忙"
     MAX_ACTIVE_GENERATE: int = 3    # 同时进行的 AI 生成任务上限，超出返回 429
 
+    # ── ARQ 任务队列（可选，需 Redis）──────────────────────────────────────────
+    # 留空时任务队列降级为 FastAPI BackgroundTasks（进程内，重启任务丢失）
+    # 填写 Redis URL 后，AI 生成 / WebUI 执行 / 渗透扫描 改走 ARQ，支持多 worker 横向扩展
+    REDIS_URL: str = ""              # 例：redis://localhost:6379/0
+    ARQ_MAX_JOBS: int = 20           # ARQ worker 最大并发 job 数
+    ARQ_JOB_TIMEOUT: int = 3600      # 单个 job 超时（秒），默认 1 小时
+
     # ── 告警推送 ───────────────────────────────────────────────────────────────
     # 支持钉钉/企业微信/飞书 Webhook；留空则关闭告警
     ALERT_WEBHOOK_URL: str = ""
