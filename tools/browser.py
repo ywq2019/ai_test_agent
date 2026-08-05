@@ -53,16 +53,20 @@ class BrowserTool:
                 "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
             )})
 
-        # wait_until="networkidle" 等待网络请求静止，确保动态内容渲染完毕
-        # 兜底：networkidle 失败则改用 load
+        # SPA / 动态页面优先用 domcontentloaded（不等网络 idle），更快更稳
+        # networkidle 对 WebSocket/轮询类应用会一直等，容易超时
         try:
-            await self.page.goto(url, timeout=timeout, wait_until="networkidle")
+            await self.page.goto(url, timeout=timeout, wait_until="domcontentloaded")
         except Exception:
-            await self.page.goto(url, timeout=timeout, wait_until="load")
+            # 兜底：commit（只要收到响应就算，最宽松）
+            try:
+                await self.page.goto(url, timeout=timeout, wait_until="commit")
+            except Exception:
+                pass  # 已有部分内容，继续尝试抓取
 
         logger.info(f"Navigated to {url}")
         # 额外等待 JS 渲染（动态框架通常需要 1-2 秒完成首屏渲染）
-        await self.page.wait_for_timeout(3000)
+        await self.page.wait_for_timeout(2000)
 
         # 自动滚动页面，触发懒加载内容（需求页面、列表页等常见场景）
         await self._scroll_to_load()
@@ -70,16 +74,16 @@ class BrowserTool:
     async def _scroll_to_load(self):
         """分段滚动页面到底部，触发懒加载内容。
         策略：
-        - 每步滚动一屏，等待网络请求静止或超时
+        - 每步滚动一屏，等待 JS 渲染
         - 检测页面高度变化，有新内容时额外等待
         - 连续两步高度不变则认为内容已全部加载
-        - 最多滚动 40 屏（约 40000px）防止无限页面
+        - 最多滚动 5 屏（页面元素抓取只需首屏内容，不做全量懒加载）
         """
         try:
             viewport_height = await self.page.evaluate("() => window.innerHeight") or 1080
             page_height     = await self.page.evaluate("() => document.body.scrollHeight")
             current_pos     = 0
-            max_scrolls     = 40
+            max_scrolls     = 5
             scroll_count    = 0
             unchanged_count = 0   # 连续高度未变计数
 
@@ -89,20 +93,15 @@ class BrowserTool:
                 next_pos = current_pos + viewport_height
                 await self.page.evaluate(f"window.scrollTo({{top: {next_pos}, behavior: 'smooth'}})")
 
-                # 等待网络请求静止（最多 2s），再额外等 800ms 让 JS 渲染
-                try:
-                    await self.page.wait_for_load_state("networkidle", timeout=2000)
-                except Exception:
-                    pass
-                await self.page.wait_for_timeout(800)
+                # 等待渲染，不用等 networkidle（避免 SPA 轮询导致永久等待）
+                await self.page.wait_for_timeout(600)
 
                 new_height = await self.page.evaluate("() => document.body.scrollHeight")
                 if new_height > page_height:
                     logger.debug(f"页面高度增加 {page_height}→{new_height}px，等待内容稳定...")
                     page_height     = new_height
                     unchanged_count = 0
-                    # 新内容出现，多等 1.5s 让后续内容继续加载
-                    await self.page.wait_for_timeout(1500)
+                    await self.page.wait_for_timeout(800)
                 else:
                     unchanged_count += 1
 
@@ -116,9 +115,9 @@ class BrowserTool:
             logger.info(f"滚动完成，共滚动 {scroll_count} 屏，最终页面高度: {page_height}px")
 
             # 停在底部等内容稳定，然后回顶
-            await self.page.wait_for_timeout(1000)
+            await self.page.wait_for_timeout(500)
             await self.page.evaluate("window.scrollTo(0, 0)")
-            await self.page.wait_for_timeout(1000)
+            await self.page.wait_for_timeout(500)
 
         except Exception as e:
             logger.warning(f"滚动加载失败（不影响主流程）: {e}")

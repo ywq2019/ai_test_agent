@@ -129,7 +129,40 @@ def _parse_response(fmt: str, data: dict) -> str:
     else:  # openai / claude_proxy 响应格式相同
         # 优先尝试 OpenAI choices 格式
         if data.get("choices"):
-            return data["choices"][0]["message"]["content"]
+            msg = data["choices"][0]["message"]
+            content = (msg.get("content") or "").strip()
+            if content:
+                return content
+            # reasoner 模型（如 DeepSeek-R1）：content 为空时从 reasoning_content 里找 JSON
+            reasoning = (msg.get("reasoning_content") or "").strip()
+            if reasoning:
+                # 同时搜索 JSON 对象 { 和数组 [，取最长的完整结构
+                candidates = []
+
+                def _extract_balanced(text, open_ch, close_ch):
+                    results = []
+                    for i, ch in enumerate(text):
+                        if ch == open_ch:
+                            depth, j = 0, i
+                            while j < len(text):
+                                if text[j] == open_ch:  depth += 1
+                                elif text[j] == close_ch:
+                                    depth -= 1
+                                    if depth == 0:
+                                        results.append(text[i:j+1])
+                                        break
+                                j += 1
+                    return results
+
+                candidates += _extract_balanced(reasoning, '{', '}')
+                candidates += _extract_balanced(reasoning, '[', ']')
+
+                if candidates:
+                    best = max(candidates, key=len)
+                    if len(best) > 50:
+                        logger.warning(f"[llm_client] content 为空，从 reasoning_content 提取 JSON，len={len(best)}")
+                        return best
+            return ""
         # 部分代理返回 Anthropic 格式响应
         if data.get("content"):
             content = data["content"]

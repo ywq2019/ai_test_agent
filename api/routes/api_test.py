@@ -4,7 +4,7 @@
   - /global-vars/*
   - /test-plans/*
 """
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import List, Optional
@@ -229,6 +229,7 @@ def _proj_dict(p: ApiProject) -> dict:
         "auth_config": p.auth_config, "global_headers": p.global_headers,
         "setup_cases": clean_setup, "auth_error_patterns": p.auth_error_patterns or [],
         "proxy_url": p.proxy_url or "", "hosts_map": p.hosts_map or "",
+        "environments": p.environments or [],  # [{name, base_url}]
         "workspace_id": p.workspace_id,
         "created_at": p.created_at.isoformat() if p.created_at else "",
     }
@@ -241,6 +242,7 @@ def _case_dict(c: ApiCase) -> dict:
         "body_type": c.body_type or "json", "body": c.body, "body_raw": c.body_raw or "",
         "assertions": c.assertions, "var_extracts": c.var_extracts or [],
         "priority": c.priority, "enabled": c.enabled, "description": c.description or "",
+        "timeout_ms": c.timeout_ms,  # None=使用执行引擎默认值(30s)
         "created_at": c.created_at.isoformat() if c.created_at else "",
     }
 
@@ -270,6 +272,8 @@ def _plan_dict(p: TestPlan, steps: list = None) -> dict:
         "project_id": p.project_id, "status": p.status or "pending",
         "proxy_url": p.proxy_url or "", "hosts_map": p.hosts_map or "",
         "webhook_token": p.webhook_token or "",   # 供前端展示触发 URL
+        "cron_expr": p.cron_expr or "",
+        "cron_enabled": bool(p.cron_enabled),
         "steps": steps or [],
         "created_at": p.created_at.isoformat() if p.created_at else "",
         "updated_at": p.updated_at.isoformat() if p.updated_at else "",
@@ -347,6 +351,7 @@ async def create_api_project(data: dict, db: AsyncSession = Depends(get_db), cur
         description=data.get("description", ""), auth_type=data.get("auth_type", "none"),
         auth_config=data.get("auth_config"), global_headers=data.get("global_headers"),
         proxy_url=data.get("proxy_url", ""), hosts_map=data.get("hosts_map", ""),
+        environments=data.get("environments"),
         workspace_id=data.get("workspace_id"),
         created_by=current_user.username,
     )
@@ -448,7 +453,7 @@ async def update_api_project(project_id: int, data: dict, db: AsyncSession = Dep
         raise HTTPException(status_code=404, detail="项目不存在")
     await check_access(db, proj, current_user, "接口项目")
     for field in ("name", "base_url", "description", "auth_type", "auth_config", "global_headers",
-                  "setup_cases", "auth_error_patterns", "proxy_url", "hosts_map"):
+                  "setup_cases", "auth_error_patterns", "proxy_url", "hosts_map", "environments"):
         if field in data:
             setattr(proj, field, data[field])
     await db.commit()
@@ -526,7 +531,8 @@ async def update_api_case(case_id: int, data: dict, db: AsyncSession = Depends(g
         raise HTTPException(status_code=404, detail="项目不存在")
     await check_access(db, proj, current_user, "接口项目")
     for field in ("name", "module", "method", "path", "headers", "params", "body", "body_type",
-                  "body_raw", "assertions", "var_extracts", "priority", "enabled", "description"):
+                  "body_raw", "assertions", "var_extracts", "priority", "enabled", "description",
+                  "timeout_ms"):
         if field in data:
             setattr(case, field, data[field])
     await db.commit()
@@ -577,9 +583,11 @@ async def generate_api_cases(
         from skills.api_case_generator import api_case_generator
         from tools.database import async_session_maker
 
+        ws_cid = f"api_gen_{project_id}"
+
         async def progress_cb(pct, stage):
             await ws_manager.broadcast(
-                {"type": "api_gen_progress", "percent": pct, "stage": stage}, client_id="api_gen",
+                {"type": "api_gen_progress", "percent": pct, "stage": stage}, client_id=ws_cid,
             )
 
         try:
@@ -600,13 +608,79 @@ async def generate_api_cases(
                         priority=c.get("priority", "P1"), description=c.get("description", ""), enabled=True,
                     ))
                 await s.commit()
-            await ws_manager.broadcast({"type": "api_gen_done", "count": len(cases)}, client_id="api_gen")
+            await ws_manager.broadcast({"type": "api_gen_done", "count": len(cases)}, client_id=ws_cid)
+            # 全局铃铛通知
+            await ws_manager.broadcast_to_workspace(
+                {"type": "cases_generated", "case_count": len(cases), "source": "api_test",
+                 "message": f"接口用例生成完成，共 {len(cases)} 条"},
+                workspace_id=proj.workspace_id,
+            )
         except Exception as e:
             logger.error(f"API case generation failed: {e}", exc_info=True)
-            await ws_manager.broadcast({"type": "api_gen_error", "message": "接口用例生成失败，请稍后重试"}, client_id="api_gen")
+            await ws_manager.broadcast({"type": "api_gen_error", "message": "接口用例生成失败，请稍后重试"}, client_id=ws_cid)
 
     background_tasks.add_task(_bg)
-    return {"message": "AI生成任务已启动，请通过 WebSocket 接收进度", "project_id": project_id}
+    return {"message": "AI生成任务已启动，请通过 WebSocket 接收进度", "project_id": project_id, "ws_client_id": f"api_gen_{project_id}"}
+
+
+@router.post("/api-test/projects/{project_id}/cases/import")
+async def import_cases(
+    project_id: int,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """导入 Postman Collection v2.1 或 HAR 文件为接口用例。"""
+    proj_r = await db.execute(select(ApiProject).where(ApiProject.id == project_id))
+    proj = proj_r.scalar_one_or_none()
+    if not proj:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    await check_access(db, proj, current_user, "接口项目")
+
+    content_bytes = await file.read()
+    try:
+        content = content_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        content = content_bytes.decode("utf-8-sig", errors="replace")
+
+    try:
+        from skills.import_parser import parse_import_file
+        cases = parse_import_file(content, file.filename or "", proj.base_url)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"[import] 解析失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"解析失败: {e}")
+
+    if not cases:
+        raise HTTPException(status_code=400, detail="文件中没有解析到任何请求，请检查文件内容")
+
+    created = []
+    for c in cases:
+        case = ApiCase(
+            project_id=project_id,
+            name=c.get("name", "未命名"),
+            module=c.get("module", "导入"),
+            method=c.get("method", "GET"),
+            path=c.get("path", "/"),
+            headers=c.get("headers"),
+            params=c.get("params"),
+            body=c.get("body"),
+            body_type=c.get("body_type", "json"),
+            body_raw=c.get("body_raw", ""),
+            assertions=c.get("assertions"),
+            var_extracts=None,
+            priority=c.get("priority", "P1"),
+            description=c.get("description", ""),
+            enabled=True,
+        )
+        db.add(case)
+        created.append(case)
+    await db.commit()
+    for case in created:
+        await db.refresh(case)
+
+    return {"imported": len(created), "message": f"成功导入 {len(created)} 条用例"}
 
 
 @router.post("/api-test/projects/{project_id}/cases/generate-from-code")
@@ -628,9 +702,11 @@ async def generate_cases_from_code(
         from skills.api_case_generator import api_code_analyzer
         from tools.database import async_session_maker
 
+        ws_cid = f"api_gen_{project_id}"
+
         async def progress_cb(pct, stage):
             await ws_manager.broadcast(
-                {"type": "api_gen_progress", "percent": pct, "stage": stage}, client_id="api_gen",
+                {"type": "api_gen_progress", "percent": pct, "stage": stage}, client_id=ws_cid,
             )
 
         try:
@@ -648,13 +724,19 @@ async def generate_cases_from_code(
                         description=c.get("description", ""), enabled=True,
                     ))
                 await s.commit()
-            await ws_manager.broadcast({"type": "api_gen_done", "count": len(cases)}, client_id="api_gen")
+            await ws_manager.broadcast({"type": "api_gen_done", "count": len(cases)}, client_id=ws_cid)
+            # 全局铃铛通知
+            await ws_manager.broadcast_to_workspace(
+                {"type": "cases_generated", "case_count": len(cases), "source": "api_test",
+                 "message": f"接口用例生成完成，共 {len(cases)} 条"},
+                workspace_id=proj.workspace_id,
+            )
         except Exception as e:
             logger.error(f"代码用例生成失败: {e}", exc_info=True)
-            await ws_manager.broadcast({"type": "api_gen_error", "message": "代码用例生成失败，请稍后重试"}, client_id="api_gen")
+            await ws_manager.broadcast({"type": "api_gen_error", "message": "代码用例生成失败，请稍后重试"}, client_id=ws_cid)
 
     background_tasks.add_task(_bg)
-    return {"message": "代码分析任务已启动", "project_id": project_id}
+    return {"message": "代码分析任务已启动", "project_id": project_id, "ws_client_id": f"api_gen_{project_id}"}
 
 
 @router.post("/api-test/projects/{project_id}/code-analyze")
@@ -843,6 +925,104 @@ async def delete_script(script_id: int, db: AsyncSession = Depends(get_db),
 
 # ── 单测执行 ──────────────────────────────────────────────────────────────────
 
+@router.post("/api-test/projects/{project_id}/cases/{case_id}/data-driven")
+async def execute_data_driven(
+    project_id: int,
+    case_id: int,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    background_tasks: BackgroundTasks = None,
+):
+    """
+    CSV 数据驱动执行：上传 CSV 文件，每行作为一组参数执行同一个用例。
+    首行为变量名，对应用例 params/body 中的 {{var:变量名}} 占位符。
+    """
+    proj_r = await db.execute(select(ApiProject).where(ApiProject.id == project_id))
+    proj = proj_r.scalar_one_or_none()
+    if not proj:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    await check_access(db, proj, current_user, "接口项目")
+
+    case_r = await db.execute(select(ApiCase).where(ApiCase.id == case_id, ApiCase.project_id == project_id))
+    case = case_r.scalar_one_or_none()
+    if not case:
+        raise HTTPException(status_code=404, detail="用例不存在")
+
+    content_bytes = await file.read()
+    try:
+        content = content_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        content = content_bytes.decode("utf-8-sig", errors="replace")
+
+    from skills.csv_driver import parse_csv_data
+    try:
+        rows = parse_csv_data(content)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"CSV 解析失败: {e}")
+
+    if not rows:
+        raise HTTPException(status_code=400, detail="CSV 文件中没有数据行")
+    if len(rows) > 500:
+        raise HTTPException(status_code=400, detail="CSV 行数超过上限（500行）")
+
+    proj_dict = _proj_dict(proj)
+    case_dict = _case_dict(case)
+
+    async def _bg():
+        from skills.api_executor import api_executor
+        from tools.database import async_session_maker
+        from sqlalchemy import or_ as _or
+
+        ws_cid = f"api_exec_{project_id}"
+
+        async with async_session_maker() as s:
+            sq = select(CustomScript).where(
+                _or(CustomScript.project_id == project_id, CustomScript.project_id == None)
+            )
+            custom_scripts = [_script_dict(sc) for sc in (await s.execute(sq)).scalars()]
+
+        # 每行数据注入 var_store，执行一次
+        all_results = []
+        for i, row in enumerate(rows):
+            # 把 CSV 列名作为 var_store 传给执行器
+            case_with_row = {**case_dict}
+            summary = await api_executor.execute_cases(
+                proj_dict, [case_with_row],
+                progress_cb=None,
+                custom_scripts=custom_scripts,
+                extra_var_store=row,  # CSV 行数据注入
+            )
+            result = summary["results"][0] if summary["results"] else {}
+            result["_csv_row"] = row
+            result["_row_index"] = i + 1
+            all_results.append(result)
+
+        passed = sum(1 for r in all_results if r.get("status") == "passed")
+        async with async_session_maker() as s:
+            report = ApiTestReport(
+                project_id=project_id, project_name=proj.name, report_type="data_driven",
+                total=len(all_results), passed=passed, failed=len(all_results) - passed,
+                summary={"pass_rate": round(passed / len(all_results) * 100, 1), "rows": len(rows)},
+                details=all_results,
+                created_by=current_user.username,
+            )
+            s.add(report)
+            await s.commit()
+            await s.refresh(report)
+
+        await ws_manager.broadcast(
+            {"type": "api_exec_done", "total": len(all_results), "passed": passed,
+             "failed": len(all_results) - passed,
+             "pass_rate": round(passed / len(all_results) * 100, 1),
+             "results": all_results, "report_id": report.id},
+            client_id=ws_cid,
+        )
+
+    background_tasks.add_task(_bg)
+    return {"message": f"数据驱动执行已启动，共 {len(rows)} 行数据", "rows": len(rows), "ws_client_id": f"api_exec_{project_id}"}
+
+
 @router.post("/api-test/projects/{project_id}/execute")
 async def execute_api_cases(
     project_id: int, data: dict, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db),
@@ -854,12 +1034,17 @@ async def execute_api_cases(
         raise HTTPException(status_code=404, detail="项目不存在")
     await check_access(db, proj, current_user, "接口项目")
     case_ids = data.get("case_ids")
+    env_base_url = data.get("env_base_url", "")  # 环境切换：覆盖项目 Base URL
     proj_dict = _proj_dict(proj)
+    if env_base_url:
+        proj_dict["base_url"] = env_base_url  # 执行时覆盖，不修改数据库
 
     async def _bg():
         from skills.api_executor import api_executor
         from tools.database import async_session_maker
         from sqlalchemy import or_ as _or
+
+        ws_cid = f"api_exec_{project_id}"
 
         async with async_session_maker() as s:
             q = select(ApiCase).where(ApiCase.project_id == project_id)
@@ -872,7 +1057,7 @@ async def execute_api_cases(
             custom_scripts = [_script_dict(sc) for sc in (await s.execute(sq)).scalars()]
 
         async def progress_cb(p):
-            await ws_manager.broadcast({"type": "api_exec_progress", **p}, client_id="api_exec")
+            await ws_manager.broadcast({"type": "api_exec_progress", **p}, client_id=ws_cid)
 
         summary = await api_executor.execute_cases(proj_dict, cases, progress_cb, custom_scripts=custom_scripts)
 
@@ -895,11 +1080,29 @@ async def execute_api_cases(
             await s.refresh(report)
 
         await ws_manager.broadcast(
-            {"type": "api_exec_done", "report_id": report.id, **summary}, client_id="api_exec",
+            {"type": "api_exec_done", "report_id": report.id, **summary}, client_id=ws_cid,
         )
 
+        # 执行完成通知
+        try:
+            from tools.config import settings
+            if settings.ALERT_WEBHOOK_URL:
+                from tools.alerter import fire_alert
+                passed = summary["passed"]
+                total = summary["total"]
+                pass_rate = summary["pass_rate"]
+                icon = "✅" if summary["failed"] == 0 else "⚠️"
+                fire_alert(
+                    f"> **项目**：{proj.name}\n\n"
+                    f"> **结果**：通过率 {pass_rate}%（{passed}/{total}）",
+                    title=f"{icon} 接口测试执行完成",
+                    fingerprint=f"api_exec_{report.id}",
+                )
+        except Exception as _ne:
+            logger.warning(f"[exec] 通知失败: {_ne}")
+
     background_tasks.add_task(_bg)
-    return {"message": "执行任务已启动", "project_id": project_id}
+    return {"message": "执行任务已启动", "project_id": project_id, "ws_client_id": f"api_exec_{project_id}"}
 
 
 # ── 压力测试 ──────────────────────────────────────────────────────────────────
@@ -923,6 +1126,8 @@ async def run_load_test(
         from skills.api_load_tester import api_load_tester
         from tools.database import async_session_maker
 
+        ws_cid = f"api_load_{project_id}"
+
         async with async_session_maker() as s:
             q = select(ApiCase).where(ApiCase.project_id == project_id, ApiCase.enabled == True)
             if case_ids:
@@ -930,7 +1135,7 @@ async def run_load_test(
             cases = [_case_dict(c) for c in (await s.execute(q)).scalars().all()]
 
         async def metrics_cb(m):
-            await ws_manager.broadcast({"type": "load_metrics", **m}, client_id="api_load")
+            await ws_manager.broadcast({"type": "load_metrics", **m}, client_id=ws_cid)
 
         summary = await api_load_tester.run(proj_dict, cases, config, metrics_cb)
 
@@ -946,11 +1151,11 @@ async def run_load_test(
             await s.refresh(report)
 
         await ws_manager.broadcast(
-            {"type": "load_done", "report_id": report.id, **summary}, client_id="api_load",
+            {"type": "load_done", "report_id": report.id, **summary}, client_id=ws_cid,
         )
 
     background_tasks.add_task(_bg)
-    return {"message": "压测任务已启动", "project_id": project_id}
+    return {"message": "压测任务已启动", "project_id": project_id, "ws_client_id": f"api_load_{project_id}"}
 
 
 @router.post("/api-test/load/stop")

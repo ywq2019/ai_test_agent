@@ -11,6 +11,7 @@ from api.routes.global_vars import router as global_vars_router
 from api.routes.test_plans  import router as test_plans_router
 from api.routes.workspaces  import router as workspaces_router
 from api.routes.pentest     import router as pentest_router
+from api.routes.mock        import router as mock_router, mock_catch_router
 
 # 向后兼容：把所有子路由合并为一个 router
 router = APIRouter()
@@ -22,10 +23,11 @@ router.include_router(global_vars_router)
 router.include_router(test_plans_router)
 router.include_router(workspaces_router)
 router.include_router(pentest_router)
+router.include_router(mock_router)
 
 __all__ = [
-    "router",
+    "router", "mock_catch_router",
     "auth_router", "webui_router", "ai_cases_router",
     "api_test_router", "global_vars_router", "test_plans_router",
-    "workspaces_router", "pentest_router",
+    "workspaces_router", "pentest_router", "mock_router",
 ]

@@ -55,6 +55,7 @@ class CaseUpdateRequest(BaseModel):
     steps: Optional[str] = None
     expected_results: Optional[str] = None
     enabled: Optional[bool] = None
+    steps_json: Optional[List[Any]] = None  # 可视化步骤编辑器保存结构化步骤
 
 
 class CaseResponse(BaseModel):
@@ -69,6 +70,7 @@ class CaseResponse(BaseModel):
     element_selector: Optional[str] = ""
     enabled: bool
     deprecated: bool = False  # 需求变更废弃标记（与用户禁用 enabled 分开）
+    source: Optional[str] = "manual"  # recorded / ai_generated / manual
 
 
 class ExecuteRequest(BaseModel):

@@ -175,9 +175,10 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Loading, WarningFilled, Warning, SuccessFilled, Document, DocumentAdd } from '@element-plus/icons-vue'
+import { apiTestApi } from '../../api'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -191,9 +192,6 @@ const visible = computed({
   get: () => props.modelValue,
   set: (v) => emit('update:modelValue', v),
 })
-
-import { computed } from 'vue'
-import { apiTestApi } from '../../api'
 
 // 内部状态
 const step        = ref(1)

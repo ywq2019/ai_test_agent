@@ -29,16 +29,29 @@
       <el-row :gutter="12">
         <el-col :span="12">
           <el-form-item label="模块">
-            <el-input v-model="form.module" />
+            <el-autocomplete
+              v-model="form.module"
+              :fetch-suggestions="queryModules"
+              placeholder="选择或输入模块名"
+              style="width:100%"
+              clearable
+            />
           </el-form-item>
         </el-col>
-        <el-col :span="12">
+        <el-col :span="8">
           <el-form-item label="优先级">
             <el-select v-model="form.priority" style="width:100%">
               <el-option label="P0" value="P0" />
               <el-option label="P1" value="P1" />
               <el-option label="P2" value="P2" />
             </el-select>
+          </el-form-item>
+        </el-col>
+        <el-col :span="8">
+          <el-form-item label="超时(ms)">
+            <el-input-number v-model="form.timeout_ms" :min="500" :max="300000" :step="1000"
+              controls-position="right" style="width:100%"
+              placeholder="留空=默认30s" :precision="0" />
           </el-form-item>
         </el-col>
       </el-row>
@@ -266,6 +279,7 @@ const props = defineProps({
   editingCase: { type: Object, default: null },
   projectId: { type: Number, default: null },
   fnList: { type: Array, default: () => [] },
+  moduleList: { type: Array, default: () => [] },  // 当前项目已有的模块列表
 })
 
 const emit = defineEmits(['update:modelValue', 'saved'])
@@ -274,6 +288,17 @@ const visible = computed({
   get: () => props.modelValue,
   set: (v) => emit('update:modelValue', v),
 })
+
+// 模块自动补全：按输入过滤已有模块，始终把「通用」放第一个
+const queryModules = (query, cb) => {
+  const all = props.moduleList.length
+    ? [...new Set(['通用', ...props.moduleList])]
+    : ['通用']
+  const results = query
+    ? all.filter(m => m.toLowerCase().includes(query.toLowerCase()))
+    : all
+  cb(results.map(m => ({ value: m })))
+}
 
 // 请求体草稿（切换 bodyType 时暂存内容）
 const _bodyDraft = { json: '', raw: '', form: [] }
@@ -286,6 +311,7 @@ const _defaultForm = () => ({
   formRows: [{ key: '', value: '' }],
   assertionRows: [{ type: 'status_code', expected: 200, path: '', match_type: 'equals', max_ms: 3000 }],
   varExtractsRows: [],
+  timeout_ms: null,
   _prevBodyType: 'json',
 })
 
@@ -321,6 +347,7 @@ const handleOpen = () => {
       formRows: (bt === 'form' && c.body) ? Object.entries(c.body).map(([k, v]) => ({ key: k, value: v })) : [{ key: '', value: '' }],
       assertionRows: toAssertionRows(c.assertions),
       varExtractsRows: (c.var_extracts || []).map(r => ({ name: r.name || '', path: r.path || '', scope: r.scope || 'local' })),
+      timeout_ms: c.timeout_ms || null,
       _prevBodyType: bt,
     })
     if (!form.headersRows.length) form.headersRows.push({ key: '', value: '' })
@@ -383,6 +410,7 @@ const handleSave = async () => {
     headers: Object.keys(headers).length ? headers : null,
     params: Object.keys(params).length ? params : null,
     body_type: form.bodyType, body, body_raw, assertions,
+    timeout_ms: form.timeout_ms || null,
     var_extracts: form.varExtractsRows
       .filter(r => r.name.trim() && r.path.trim())
       .map(r => ({ name: r.name.trim(), path: r.path.trim(), scope: r.scope || 'local' })),

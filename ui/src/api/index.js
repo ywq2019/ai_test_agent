@@ -86,10 +86,15 @@ export const taskApi = {
 
 export const caseApi = {
   list: (taskId) => api.get(`/tasks/${taskId}/cases`),
+  get: (id) => api.get(`/cases/${id}`),
+  getSteps: (id) => api.get(`/cases/${id}/steps`),
   create: (data) => api.post('/cases', data),
   update: (id, data) => api.put(`/cases/${id}`, data),
   delete: (id) => api.delete(`/cases/${id}`),
   generate: (taskId, options = {}, config = {}) => api.post(`/cases/generate/${taskId}`, options, { timeout: 600000, ...config }),
+  planScenes: (taskId, data = {}) => api.post(`/cases/plan-scenes/${taskId}`, data, { timeout: 180000 }),
+  getScenePlan: (taskId) => api.get(`/cases/scene-plan/${taskId}`),
+  markSceneRecorded: (taskId, sceneId, recorded = true) => api.patch(`/cases/scene-plan/${taskId}/mark-recorded`, { scene_id: sceneId, recorded }),
   optimize: (taskId, wsClientId = 'cases_gen') => api.post(`/cases/optimize/${taskId}`, { ws_client_id: wsClientId }, { timeout: 300000 }),
   coverage: (taskId) => api.get(`/cases/coverage/${taskId}`),
   // 文档变更检测与增量更新
@@ -122,7 +127,7 @@ export const documentApi = {
 }
 
 export const pageApi = {
-  parse: (url, browser, taskId) => api.post('/parse/page', { url, browser, task_id: taskId })
+  parse: (url, browser, taskId) => api.post('/parse/page', { url, browser, task_id: taskId }, { timeout: 120000 })
 }
 
 export const commandApi = {
@@ -146,7 +151,7 @@ export const agentApi = {
 
 export const aiCaseApi = {
   generate: (data, signal) => api.post('/ai-cases/generate', data, { timeout: 420000, signal }),
-  optimize: (id, signal) => api.post(`/ai-cases/${id}/optimize`, {}, { timeout: 420000, signal }),
+  optimize: (id, signal) => api.post(`/ai-cases/${id}/optimize`, {}, { timeout: 300000, signal }),
   coverage: (id) => api.get(`/ai-cases/${id}/coverage`),
   list: (workspaceId = null) => api.get('/ai-cases', { params: workspaceId ? { workspace_id: workspaceId } : {} }),
   getById: (id) => api.get(`/ai-cases/${id}`),
@@ -181,6 +186,8 @@ export const apiTestApi = {
   updateCase: (id, data) => api.put(`/api-test/cases/${id}`, data),
   deleteCases: (ids) => api.delete('/api-test/cases', { data: ids }),
   generateCases: (projectId, data) => api.post(`/api-test/projects/${projectId}/cases/generate`, data, { timeout: 300000 }),
+  importCases: (projectId, formData) => api.post(`/api-test/projects/${projectId}/cases/import`, formData, { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 60000 }),
+  dataDrivenExecute: (projectId, caseId, formData) => api.post(`/api-test/projects/${projectId}/cases/${caseId}/data-driven`, formData, { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 600000 }),
   // 代码分析
   generateFromCode: (projectId, data) => api.post(`/api-test/projects/${projectId}/cases/generate-from-code`, data, { timeout: 300000 }),
   codeAnalyze: (projectId, data) => api.post(`/api-test/projects/${projectId}/code-analyze`, data, { timeout: 180000 }),
@@ -249,9 +256,9 @@ export const pentestApi = {
 export const recordingApi = {
   // taskId, url, browserType → POST /recording/start { task_id, url, browser_type }
   start:  (taskId, url = '', browserType = 'chromium') =>
-    api.post('/recording/start', { task_id: taskId, url, browser_type: browserType }),
-  // sessionId → POST /recording/stop  { session_id }
-  stop:   (sessionId)                  => api.post('/recording/stop', { session_id: sessionId }),
+    api.post('/recording/start', { task_id: taskId, url, browser_type: browserType }, { timeout: 60000 }),
+  // sessionId → POST /recording/stop  { session_id }，无 sessionId 时传 task_id 兜底
+  stop: (sessionId, taskId) => api.post('/recording/stop', sessionId ? { session_id: sessionId } : { task_id: taskId }),
   status: (sessionId)                  => api.get(`/recording/status/${sessionId}`),
   // taskId, steps, name → POST /recording/save  { task_id, steps, name, page_title }
   save:   (taskId, steps, name = '', pageTitle = '')   => api.post('/recording/save', { task_id: taskId, steps, name, page_title: pageTitle }),

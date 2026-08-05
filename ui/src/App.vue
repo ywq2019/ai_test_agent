@@ -18,11 +18,14 @@
 
         <el-menu
           :default-active="$route.path"
+          :default-openeds="defaultOpenedMenus"
           router
           class="layout-menu"
           background-color="transparent"
           text-color="#bfcbd9"
           active-text-color="#409eff"
+          @open="onMenuOpen"
+          @close="onMenuClose"
         >
           <!-- 首页独立置顶 -->
           <el-menu-item index="/">
@@ -30,18 +33,24 @@
             <span>首页</span>
           </el-menu-item>
 
-          <!-- AI 能力 -->
-          <el-menu-item-group>
-            <template #title><span class="menu-group-label">AI 能力</span></template>
+          <!-- AI 能力（可折叠，与其他模块保持一致） -->
+          <el-sub-menu index="ai">
+            <template #title>
+              <el-icon><MagicStick /></el-icon>
+              <span>AI 能力</span>
+            </template>
             <el-menu-item index="/ai-cases">
               <el-icon><MagicStick /></el-icon>
               <span>AI 用例生成</span>
             </el-menu-item>
-          </el-menu-item-group>
+          </el-sub-menu>
 
-          <!-- WebUI 自动化 -->
-          <el-menu-item-group>
-            <template #title><span class="menu-group-label">WebUI 自动化</span></template>
+          <!-- WebUI 自动化（可折叠） -->
+          <el-sub-menu index="webui">
+            <template #title>
+              <el-icon><Monitor /></el-icon>
+              <span>WebUI 自动化</span>
+            </template>
             <el-menu-item index="/tasks">
               <el-icon><FolderOpened /></el-icon>
               <span>任务管理</span>
@@ -58,11 +67,14 @@
               <el-icon><DataAnalysis /></el-icon>
               <span>报告查看</span>
             </el-menu-item>
-          </el-menu-item-group>
+          </el-sub-menu>
 
-          <!-- 接口自动化 -->
-          <el-menu-item-group>
-            <template #title><span class="menu-group-label">接口自动化</span></template>
+          <!-- 接口自动化（可折叠） -->
+          <el-sub-menu index="apitest">
+            <template #title>
+              <el-icon><Tickets /></el-icon>
+              <span>接口自动化</span>
+            </template>
             <el-menu-item index="/api-test">
               <el-icon><Tickets /></el-icon>
               <span>接口测试</span>
@@ -75,11 +87,18 @@
               <el-icon><Warning /></el-icon>
               <span>渗透测试</span>
             </el-menu-item>
-          </el-menu-item-group>
+            <el-menu-item index="/mock">
+              <el-icon><Connection /></el-icon>
+              <span>Mock 服务</span>
+            </el-menu-item>
+          </el-sub-menu>
 
-          <!-- 系统设置 -->
-          <el-menu-item-group>
-            <template #title><span class="menu-group-label">系统设置</span></template>
+          <!-- 系统设置（可折叠） -->
+          <el-sub-menu index="settings">
+            <template #title>
+              <el-icon><Setting /></el-icon>
+              <span>系统设置</span>
+            </template>
             <el-menu-item index="/workspaces">
               <el-icon><Folder /></el-icon>
               <span>工作空间</span>
@@ -92,7 +111,7 @@
               <el-icon><Cpu /></el-icon>
               <span>大模型配置</span>
             </el-menu-item>
-          </el-menu-item-group>
+          </el-sub-menu>
         </el-menu>
       </el-aside>
 
@@ -240,7 +259,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useTaskStore } from './stores/task'
 import { useAuthStore } from './stores/auth'
 import { useWorkspaceStore } from './stores/workspace'
-import { RefreshRight, Plus, Warning } from '@element-plus/icons-vue'
+import { RefreshRight, Plus, Warning, Bell, Connection } from '@element-plus/icons-vue'
 import { ElMessageBox, ElMessage } from 'element-plus'
 import { userApi } from './api'
 
@@ -249,6 +268,51 @@ const router = useRouter()
 const taskStore = useTaskStore()
 const auth = useAuthStore()
 const wsStore = useWorkspaceStore()
+
+// ── 折叠菜单状态（localStorage 持久化）────────────────────────────────────────
+const MENU_STORAGE_KEY = 'menu_opened'
+const ALL_SUBMENUS = ['ai', 'webui', 'apitest', 'settings']
+
+// 路由 → 所属子菜单 index 的映射
+const ROUTE_TO_SUBMENU = {
+  '/ai-cases': 'ai',
+  '/tasks': 'webui', '/cases': 'webui', '/execution': 'webui', '/reports': 'webui',
+  '/api-test': 'apitest', '/test-plan': 'apitest', '/pentest': 'apitest', '/mock': 'apitest',
+  '/workspaces': 'settings', '/skills': 'settings', '/llm': 'settings',
+}
+
+function loadOpenedMenus() {
+  try {
+    const saved = localStorage.getItem(MENU_STORAGE_KEY)
+    if (saved) return JSON.parse(saved)
+  } catch {}
+  // 默认：当前路由所在的子菜单展开，其余收起
+  const cur = ROUTE_TO_SUBMENU[route.path]
+  return cur ? [cur] : ['webui']
+}
+
+const defaultOpenedMenus = ref(loadOpenedMenus())
+
+const onMenuOpen = (index) => {
+  if (!defaultOpenedMenus.value.includes(index)) {
+    defaultOpenedMenus.value.push(index)
+  }
+  localStorage.setItem(MENU_STORAGE_KEY, JSON.stringify(defaultOpenedMenus.value))
+}
+
+const onMenuClose = (index) => {
+  defaultOpenedMenus.value = defaultOpenedMenus.value.filter(i => i !== index)
+  localStorage.setItem(MENU_STORAGE_KEY, JSON.stringify(defaultOpenedMenus.value))
+}
+
+// 路由切换时，确保当前路由所在的子菜单展开
+watch(() => route.path, (path) => {
+  const submenu = ROUTE_TO_SUBMENU[path]
+  if (submenu && !defaultOpenedMenus.value.includes(submenu)) {
+    defaultOpenedMenus.value.push(submenu)
+    localStorage.setItem(MENU_STORAGE_KEY, JSON.stringify(defaultOpenedMenus.value))
+  }
+})
 
 const wsConnected = ref(false)
 const wsDialogVisible = ref(false)
@@ -274,6 +338,9 @@ const refreshPage = () => {
 
 const handleLogout = async () => {
   await ElMessageBox.confirm('确定退出登录？', '提示', { type: 'warning', confirmButtonText: '退出' })
+  _wsManualClose = true
+  if (_wsReconnectTimer) clearTimeout(_wsReconnectTimer)
+  if (ws) ws.close()
   auth.logout()
   ElMessage.success('已退出登录')
   router.push('/login')
@@ -351,12 +418,15 @@ const pageTitle = computed(() => {
     '/skills': '技能管理',
     '/llm': '大模型配置',
     '/workspaces': '工作空间管理',
-    '/pentest': '渗透测试'
+    '/pentest': '渗透测试',
+    '/mock': 'Mock 服务'
   }
   return titles[route.path] || 'AI测试工具平台'
 })
 
 let ws = null
+let _wsReconnectTimer = null
+let _wsManualClose = false   // 标记是主动关闭（logout/unmount），不触发重连
 
 const connectWebSocket = () => {
   // 使用相对路径协议和当前 host（不硬编码 8000 端口），
@@ -367,6 +437,7 @@ const connectWebSocket = () => {
 
   ws.onopen = () => {
     wsConnected.value = true
+    _wsManualClose = false
     console.log('WebSocket connected')
     // 连接成功后立即发送工作空间订阅
     sendWsSubscribe()
@@ -375,6 +446,13 @@ const connectWebSocket = () => {
   ws.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data)
+      // 回 pong，防止服务端因超时主动断开
+      if (data.type === 'ping') {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'pong' }))
+        }
+        return
+      }
       handleWebSocketMessage(data)
     } catch (e) {
       console.error('WebSocket message parse error:', e)
@@ -384,6 +462,13 @@ const connectWebSocket = () => {
   ws.onclose = () => {
     wsConnected.value = false
     console.log('WebSocket disconnected')
+    // 非主动关闭时 5 秒后自动重连
+    if (!_wsManualClose) {
+      _wsReconnectTimer = setTimeout(() => {
+        console.log('WebSocket reconnecting...')
+        connectWebSocket()
+      }, 5000)
+    }
   }
 
   ws.onerror = (error) => {
@@ -417,7 +502,11 @@ const handleWebSocketMessage = (data) => {
       break
     case 'cases_generated':
       taskStore.setCases(data.cases || [])
-      pushNotify('用例', 'success', `${data.cases?.length || data.case_count || 0} 条 AI 用例已生成`)
+      if (data.source === 'api_test') {
+        pushNotify('接口用例', 'success', `接口用例生成完成，共 ${data.case_count || 0} 条`)
+      } else {
+        pushNotify('用例', 'success', `${data.cases?.length || data.case_count || 0} 条 AI 用例已生成`)
+      }
       break
     case 'report_generated':
       taskStore.setReportPath(data.report_path)
@@ -466,6 +555,8 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  _wsManualClose = true
+  if (_wsReconnectTimer) clearTimeout(_wsReconnectTimer)
   if (ws) {
     ws.close()
   }
@@ -568,6 +659,39 @@ onUnmounted(() => {
 .layout-menu :deep(.el-menu-item-group__title) {
   padding: 14px 18px 4px !important;
   line-height: 1 !important;
+}
+
+/* sub-menu 标题行 */
+.layout-menu :deep(.el-sub-menu__title) {
+  height: 40px !important;
+  line-height: 40px !important;
+  margin: 1px 10px !important;
+  border-radius: 7px !important;
+  padding: 0 12px !important;
+  color: rgba(191, 203, 217, 0.9) !important;
+  font-size: 13.5px !important;
+  transition: all 0.18s ease !important;
+}
+.layout-menu :deep(.el-sub-menu__title:hover) {
+  background: rgba(255,255,255,0.07) !important;
+  color: #fff !important;
+}
+/* 折叠箭头颜色 */
+.layout-menu :deep(.el-sub-menu__icon-arrow) {
+  color: rgba(255,255,255,0.35) !important;
+}
+/* sub-menu 展开时标题高亮 */
+.layout-menu :deep(.el-sub-menu.is-opened > .el-sub-menu__title) {
+  color: rgba(255,255,255,0.95) !important;
+}
+/* sub-menu 内部列表去掉背景 */
+.layout-menu :deep(.el-menu--inline) {
+  background: transparent !important;
+}
+/* sub-menu 图标 */
+.layout-menu :deep(.el-sub-menu__title .el-icon) {
+  margin-right: 8px !important;
+  font-size: 15px !important;
 }
 
 /* 菜单项 */

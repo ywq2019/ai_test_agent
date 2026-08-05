@@ -160,10 +160,16 @@ class ApiCaseGenerator:
 
         # Step 4.5: ReAct 自检循环 — 执行正常流用例并让 AI 修正不可行的用例
         if progress_cb:
-            await progress_cb(88, "执行验证，AI 自检修正...")
-        all_cases = await self._self_correct_loop(
-            all_cases, base_url, combined_headers, progress_cb=progress_cb
-        )
+            await progress_cb(88, "AI 自检修正中...")
+        try:
+            all_cases = await asyncio.wait_for(
+                self._self_correct_loop(all_cases, base_url, combined_headers, progress_cb=progress_cb),
+                timeout=60,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("[self_correct] 自检超时（60s），跳过")
+        except Exception as e:
+            logger.warning(f"[self_correct] 自检异常，跳过: {e}")
 
         # Step 5: 补全描述
         if progress_cb:
@@ -326,56 +332,161 @@ class ApiCaseGenerator:
 
     # ─── 用例生成 ─────────────────────────────────────────────────────────────
 
+    # 兜底场景列表（AI 分析失败时使用）
+    _DEFAULT_SCENES = [
+        "正常流-所有参数正确",
+        "鉴权失败-passport为空",
+        "鉴权失败-token无效",
+        "缺少必填参数",
+        "边界值-数值参数为0",
+        "边界值-数值参数为负数",
+    ]
+
+    async def _analyze_scenes(self, group: Dict) -> List[str]:
+        """
+        根据接口信息让 AI 自主规划测试场景列表。
+        prompt 极短，max_tokens=600，只输出场景名 JSON 数组。
+        失败时返回默认场景列表。
+        """
+        name = group.get("name", "API")
+        probe_hint = group.get("_probe_hint", {})
+        real_params = probe_hint.get("params", {})
+        path = probe_hint.get("path", "/")
+
+        # 只传参数 key 列表，不传值（避免 token 过多）
+        param_keys = list(real_params.keys()) if real_params else []
+
+        prompt = (
+            f"API: GET {path}, module: {name}, params: {', '.join(param_keys)}\n"
+            "List the test scenarios needed for this API as a JSON array of Chinese strings.\n"
+            "Include: normal flow, auth failures, missing required params, boundary values.\n"
+            "Max 8 scenarios. Output JSON array only."
+        )
+        try:
+            from tools.llm_client import call_llm
+            raw = await call_llm(
+                "Output a JSON array of Chinese test scenario names only. No explanation.",
+                prompt,
+                max_tokens=600,
+                timeout_secs=30,
+            )
+            scenes = self._extract_json(raw)
+            if isinstance(scenes, list) and scenes and all(isinstance(s, str) for s in scenes):
+                logger.info(f"AI planned {len(scenes)} scenes for '{name}': {scenes}")
+                return scenes[:8]
+        except Exception as e:
+            logger.warning(f"Scene analysis failed for '{name}': {e}")
+        return self._DEFAULT_SCENES
+
     async def _generate_for_group(self, base_url: str, group: Dict, user_intent: dict = None) -> List[Dict]:
+        """
+        两阶段并行生成：
+          1. AI 分析接口功能，自主规划测试场景（快速，~500ms）
+          2. 并行为每个场景各生成 1 条用例（4 路并发）
+        """
+        name = group.get("name", "API")
+
+        # 根据用户意图确定场景列表
+        intent = user_intent or {}
+        count_hint = intent.get("count")
+        scenes_hint = intent.get("scenes")
+
+        if scenes_hint:
+            scenes = scenes_hint
+            if count_hint and count_hint < len(scenes):
+                scenes = scenes[:count_hint]
+        elif count_hint:
+            scenes = self._DEFAULT_SCENES[:count_hint]
+        else:
+            # AI 自主分析场景
+            scenes = await self._analyze_scenes(group)
+
+        # 并行生成，每个场景独立一次 LLM 调用
+        sem = asyncio.Semaphore(4)
+
+        async def gen_one(scenario: str) -> Optional[Dict]:
+            async with sem:
+                return await self._generate_single_case(base_url, group, scenario)
+
+        results = await asyncio.gather(
+            *[gen_one(s) for s in scenes],
+            return_exceptions=True,
+        )
+
+        cases = [r for r in results if isinstance(r, dict) and r.get("path")]
+        logger.info(f"Generated {len(cases)}/{len(scenes)} cases for module '{name}'")
+        return cases
+
+    async def _generate_single_case(
+        self,
+        base_url: str,
+        group: Dict,
+        scenario: str,
+    ) -> Optional[Dict]:
+        """
+        只生成 1 条用例的 LLM 调用。
+        prompt 极短（约 300-500 token），reasoner 模型思考约 200 token，
+        输出单条 JSON 对象约 150-200 token，max_tokens=800 完全够用。
+        """
         name = group.get("name", "API")
         endpoints = group.get("endpoints", group.get("description", ""))
         if isinstance(endpoints, list):
             endpoints = json.dumps(endpoints, ensure_ascii=False)
 
-        probe_section = self._build_probe_section(group.get("_probe"))
+        # 从 probe_hint 提取真实参数值（URL 输入时有完整参数值）
+        probe_hint = group.get("_probe_hint", {})
+        real_params = probe_hint.get("params", {})
 
-        # 根据用户意图动态调整生成指令
-        intent = user_intent or {}
-        count_hint  = intent.get("count")    # 数字或 None
-        scenes      = intent.get("scenes")   # ['正向'] / ['正向','边界值'] / None
+        # 构建参数描述：有真实值的带上真实值，没有的只列 key
+        if real_params:
+            # 鉴权类参数识别
+            auth_keys = {'token', 'passport', 'access_token', 'edu24ol_token',
+                         'authorization', 'auth', 'api_key', 'apikey', 'secret'}
+            is_auth_fail = "鉴权" in scenario or "auth" in scenario.lower()
 
-        if count_hint and scenes:
-            scope_line = f"只生成 {count_hint} 条用例，场景限定为：{'、'.join(scenes)}。"
-        elif count_hint:
-            scope_line = f"只生成 {count_hint} 条用例，覆盖正常流、鉴权、边界值、错误码场景。"
-        elif scenes:
-            scope_line = f"只生成以下场景的用例（不要生成其他场景）：{'、'.join(scenes)}。"
+            param_parts = []
+            for k, v in real_params.items():
+                is_auth = any(ak in k.lower() for ak in auth_keys)
+                if is_auth:
+                    # 鉴权失败场景：填空；正常流：用真实值
+                    val = "" if is_auth_fail else str(v)
+                else:
+                    val = str(v)
+                param_parts.append(f"{k}={val}")
+            params_line = ", ".join(param_parts)
         else:
-            scope_line = "生成完整测试用例，覆盖正常流、鉴权、边界值、错误码场景。"
+            # 非 URL 输入，只有参数名
+            import re as _re
+            endpoints_str = str(endpoints)
+            keys = _re.findall(r'- (\w+):', endpoints_str[:500])
+            params_line = ", ".join(keys) if keys else endpoints_str[:200]
+
+        path = probe_hint.get("path", "/")
+        method = probe_hint.get("method", "GET")
 
         prompt = (
-            f"为以下接口{scope_line}\n"
-            f"Base URL: {base_url}\n"
-            f"模块名称: {name}\n\n"
-            f"接口信息:\n{str(endpoints)[:3000]}\n"
-            f"{probe_section}"
-            "\n重要要求：\n"
-            "1. 接口信息中列出的所有 Query 参数必须填入每条用例的 params 字段\n"
-            "2. 正常流用例的 params 包含所有参数及其示例值\n"
-            "3. 异常用例通过移除或修改某个参数来覆盖错误场景\n"
-            "4. path 只填相对路径，不含域名\n"
-            "5. POST/PUT/PATCH 用例的 body 字段必须是包含示例数据的 JSON 对象，禁止为 null 或 {}\n"
-            "6. GET/DELETE 用例的 body 必须为 null\n"
-            "7. 每条用例必须包含 description 字段，内容为该接口的功能简介（一句话）；同一 path 的所有用例 description 必须完全相同\n"
-            "8. 严格输出 JSON 数组，不加任何解释"
+            f"Generate 1 test case. API: {method} {path}. "
+            f"Module: {name}. Base URL: {base_url}.\n"
+            f"Params: {params_line}\n"
+            f"Scenario: {scenario}\n"
+            "Rules: name=中文(接口功能-场景), all params required, "
+            "use exact param values above, auth failure params set to empty string."
         )
         try:
             raw = await self._call_api(_get_system_prompt(), prompt)
-            cases = self._extract_json(raw)
-            if isinstance(cases, list):
-                for c in cases:
-                    c["module"] = c.get("module") or name
-                logger.info(f"Generated {len(cases)} cases for module '{name}'")
-                return cases
-            logger.warning(f"No JSON list for '{name}', raw[:300]: {raw[:300]}")
+            # 优先解析为单个对象，其次尝试取数组第一条
+            case = self._extract_json_obj(raw)
+            if not case:
+                arr = self._extract_json(raw)
+                if isinstance(arr, list) and arr:
+                    case = arr[0]
+            if case and isinstance(case, dict) and case.get("path"):
+                case["module"] = case.get("module") or name
+                return case
+            logger.warning(f"Single case parse failed for '{name}/{scenario}', raw[:200]: {raw[:200]}")
         except Exception as e:
-            logger.warning(f"Case gen failed for {name}: {e}")
-        return []
+            logger.warning(f"Single case gen failed for '{name}/{scenario}': {e}")
+        return None
 
     def _build_probe_section(self, probe: Optional[Dict]) -> str:
         """将预探测结果格式化为 prompt 上下文段落。"""
@@ -394,17 +505,14 @@ class ApiCaseGenerator:
             return ""
 
         path_lines = []
-        for p in json_paths[:25]:
+        for p in json_paths[:10]:
             val = p.get("value")
             if val is None:
-                path_lines.append(f'  {p["path"]}  → ({p["type"]})')
+                path_lines.append(f'  {p["path"]}')
             else:
-                path_lines.append(f'  {p["path"]}  → {repr(val)}')
+                path_lines.append(f'  {p["path"]} = {repr(val)}')
 
-        body_preview = ""
-        if json_body is not None:
-            raw_str = json.dumps(json_body, ensure_ascii=False)
-            body_preview = f"\n完整响应体:\n{raw_str[:800]}"
+        body_preview = ""  # 不再包含完整响应体，避免 reasoner 模型思考量爆炸
 
         return (
             f"\n\n【真实接口正常流响应（HTTP {status}）】\n"
@@ -800,7 +908,8 @@ class ApiCaseGenerator:
 
     async def _call_api(self, system_prompt: str, user_prompt: str) -> str:
         from tools.llm_client import call_llm
-        text = await call_llm(system_prompt, user_prompt, max_tokens=8192, timeout_secs=120)
+        # max_tokens=1200：英文 system + 单条用例，reasoner 思考约 500 token，输出约 300 token
+        text = await call_llm(system_prompt, user_prompt, max_tokens=1200, timeout_secs=60)
         logger.info(f"API response received, len={len(text)}")
         return text
 

@@ -181,6 +181,110 @@
           </el-table>
         </el-tab-pane>
 
+        <!-- Tab3：CI/CD 集成 -->
+        <el-tab-pane label="CI/CD 集成" name="cicd">
+          <div style="padding: 20px 0; max-width: 680px">
+
+            <!-- 定时执行区块 -->
+            <div style="margin-bottom: 28px">
+              <div style="font-size: 14px; font-weight: 600; color: #303133; margin-bottom: 12px">
+                ⏰ 定时执行
+              </div>
+              <el-form label-width="90px" size="small">
+                <el-form-item label="启用定时">
+                  <el-switch v-model="cronEnabled" @change="saveCronConfig" />
+                  <span style="font-size:12px;color:#909399;margin-left:10px">
+                    {{ cronEnabled ? '已启用，按 Cron 表达式自动执行' : '未启用' }}
+                  </span>
+                </el-form-item>
+                <el-form-item v-if="cronEnabled" label="Cron 表达式">
+                  <el-input v-model="cronExpr" placeholder="0 9 * * 1-5（工作日 09:00）"
+                    style="width:260px" @blur="saveCronConfig">
+                    <template #append>
+                      <el-tooltip placement="top" :content="`下次执行: ${nextCronTime}`">
+                        <el-icon style="cursor:pointer"><InfoFilled /></el-icon>
+                      </el-tooltip>
+                    </template>
+                  </el-input>
+                  <div style="font-size:12px;color:#909399;margin-top:4px">
+                    标准 5 字段 Cron：分 时 日 月 周。例：<code>0 9 * * *</code>（每天09:00）、<code>*/30 * * * *</code>（每30分钟）
+                  </div>
+                </el-form-item>
+              </el-form>
+            </div>
+
+            <el-divider />
+
+            <!-- Webhook Token 区块 -->
+            <div style="margin-bottom: 28px">
+              <div style="font-size: 14px; font-weight: 600; color: #303133; margin-bottom: 12px">
+                🔗 Webhook 触发
+              </div>
+              <div style="font-size: 13px; color: #606266; margin-bottom: 12px; line-height: 1.6">
+                生成 Token 后，外部系统（Jenkins / GitHub Actions 等）可通过 HTTP POST 请求触发本计划执行，无需 JWT 登录。
+              </div>
+
+              <!-- 无 Token 状态 -->
+              <div v-if="!activePlan.webhook_token">
+                <el-button type="primary" :loading="webhookLoading" @click="generateWebhookToken">
+                  生成 Webhook Token
+                </el-button>
+              </div>
+
+              <!-- 有 Token 状态 -->
+              <div v-else>
+                <el-form label-width="90px" size="small">
+                  <el-form-item label="Token">
+                    <el-input :value="activePlan.webhook_token" readonly style="font-family:monospace">
+                      <template #append>
+                        <el-button @click="copyText(activePlan.webhook_token)">复制</el-button>
+                      </template>
+                    </el-input>
+                  </el-form-item>
+                  <el-form-item label="触发 URL">
+                    <el-input :value="webhookTriggerUrl" readonly style="font-family:monospace;font-size:12px">
+                      <template #append>
+                        <el-button @click="copyText(webhookTriggerUrl)">复制</el-button>
+                      </template>
+                    </el-input>
+                  </el-form-item>
+                </el-form>
+
+                <!-- curl 示例 -->
+                <div style="margin-top:12px">
+                  <div style="font-size:12px;color:#909399;margin-bottom:6px">curl 示例：</div>
+                  <div style="background:#1e1e1e;border-radius:6px;padding:12px 14px;font-family:monospace;font-size:12px;color:#d4d4d4;line-height:1.8;overflow-x:auto;white-space:pre">{{ curlExample }}</div>
+                </div>
+
+                <div style="margin-top:14px;display:flex;gap:10px">
+                  <el-button size="small" @click="generateWebhookToken" :loading="webhookLoading">重新生成</el-button>
+                  <el-button size="small" type="danger" plain @click="revokeWebhookToken" :loading="webhookLoading">撤销 Token</el-button>
+                </div>
+              </div>
+            </div>
+
+            <!-- 使用说明 -->
+            <el-divider />
+            <div style="font-size: 14px; font-weight: 600; color: #303133; margin-bottom: 12px">
+              📖 使用说明
+            </div>
+            <el-descriptions :column="1" border size="small">
+              <el-descriptions-item label="Jenkins">
+                在构建后步骤中添加 HTTP Request 插件，POST 请求触发 URL
+              </el-descriptions-item>
+              <el-descriptions-item label="GitHub Actions">
+                使用 <code style="background:#f0f0f0;padding:1px 5px;border-radius:3px">curl -X POST "$TRIGGER_URL"</code> 步骤触发
+              </el-descriptions-item>
+              <el-descriptions-item label="回调通知">
+                触发时附加 <code style="background:#f0f0f0;padding:1px 5px;border-radius:3px">?callback_url=https://your-ci/hook</code> 参数，执行完成后回调
+              </el-descriptions-item>
+              <el-descriptions-item label="安全">
+                Token 可随时撤销，撤销后旧请求立即返回 401
+              </el-descriptions-item>
+            </el-descriptions>
+          </div>
+        </el-tab-pane>
+
         <!-- Tab2：执行报告 -->
         <el-tab-pane name="reports">
           <template #label>
@@ -541,6 +645,91 @@ const running = ref(false)
 const saving = ref(false)
 const reports = ref([])
 const lastReport = ref(null)
+
+// ── Webhook / CI/CD ──────────────────────────────────────────────────────────
+const webhookLoading = ref(false)
+const cronEnabled = ref(false)
+const cronExpr = ref('')
+
+// 简单估算下次执行时间（只用于提示，不做严格解析）
+const nextCronTime = computed(() => {
+  if (!cronExpr.value || !cronEnabled.value) return '—'
+  return '请重启后端后在日志中确认'
+})
+
+// 切换计划时同步 Cron 配置
+watch(activePlan, (plan) => {
+  if (plan) {
+    cronEnabled.value = plan.cron_enabled || false
+    cronExpr.value = plan.cron_expr || ''
+  }
+}, { immediate: true })
+
+const saveCronConfig = async () => {
+  if (!activePlanId.value) return
+  try {
+    await api.put(`/test-plans/${activePlanId.value}`, {
+      cron_enabled: cronEnabled.value,
+      cron_expr: cronExpr.value || null,
+    })
+    activePlan.value.cron_enabled = cronEnabled.value
+    activePlan.value.cron_expr = cronExpr.value
+    ElMessage.success('定时配置已保存')
+  } catch (e) {
+    ElMessage.error('保存失败：' + (e?.response?.data?.detail || e?.message))
+  }
+}
+
+const webhookTriggerUrl = computed(() => {
+  if (!activePlan.value?.webhook_token) return ''
+  const base = window.location.origin
+  return `${base}/api/v1/test-plans/${activePlanId.value}/trigger?token=${activePlan.value.webhook_token}`
+})
+
+const curlExample = computed(() => {
+  if (!webhookTriggerUrl.value) return ''
+  return `curl -X POST "${webhookTriggerUrl.value}"
+
+# 带回调通知（可选）
+curl -X POST "${webhookTriggerUrl.value}&callback_url=https://your-ci.example.com/hook"`
+})
+
+const copyText = (text) => {
+  navigator.clipboard.writeText(text).then(() => {
+    ElMessage.success('已复制到剪贴板')
+  }).catch(() => {
+    ElMessage.warning('复制失败，请手动复制')
+  })
+}
+
+const generateWebhookToken = async () => {
+  webhookLoading.value = true
+  try {
+    const res = await api.put(`/test-plans/${activePlanId.value}/webhook-token`, {})
+    activePlan.value.webhook_token = res.webhook_token
+    ElMessage.success('Webhook Token 已生成')
+  } catch (e) {
+    const detail = e?.response?.data?.detail
+    const msg = Array.isArray(detail) ? detail.map(d => d.msg).join('; ') : (detail || e?.message)
+    ElMessage.error('生成失败：' + msg)
+  } finally {
+    webhookLoading.value = false
+  }
+}
+
+const revokeWebhookToken = async () => {
+  await ElMessageBox.confirm('撤销后，CI/CD 触发将返回 401，确定撤销？', '确认撤销', { type: 'warning' })
+  webhookLoading.value = true
+  try {
+    await api.delete(`/test-plans/${activePlanId.value}/webhook-token`)
+    activePlan.value.webhook_token = ''
+    ElMessage.success('Token 已撤销')
+  } catch (e) {
+    ElMessage.error('撤销失败：' + (e?.response?.data?.detail || e?.message))
+  } finally {
+    webhookLoading.value = false
+  }
+}
 
 // 执行进度
 const executionProgress = ref({ current: 0, total: 0, currentName: '', failed: 0, passed: 0 })

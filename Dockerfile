@@ -39,6 +39,7 @@ COPY agent/   ./agent/
 COPY api/     ./api/
 COPY skills/  ./skills/
 COPY tools/   ./tools/
+COPY worker/  ./worker/
 COPY main.py  ./
 
 # ── 数据目录（会被 Volume 挂载覆盖，此处仅做占位）───────────────────────────

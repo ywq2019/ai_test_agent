@@ -59,7 +59,7 @@
             <div class="module-badge badge-blue"><el-icon size="18"><Monitor /></el-icon></div>
             <div>
               <div class="module-title">WebUI 自动化</div>
-              <div class="module-subtitle">有头浏览器录制 · AI 元素分析 · 自我修正 · 多浏览器并行执行 · 截图报告</div>
+              <div class="module-subtitle">AI 场景规划 · 有头浏览器录制 · 步骤健壮化 · 多浏览器并行执行 · 截图报告</div>
             </div>
           </div>
         </div>
@@ -96,31 +96,31 @@
                 <div class="flow-num fn-1">1</div>
                 <div class="flow-body">
                   <div class="flow-title">新建任务</div>
-                  <div class="flow-desc">填写目标 URL，可选上传需求文档</div>
+                  <div class="flow-desc">填写目标 URL，抓取页面元素</div>
                 </div>
               </div>
               <div class="flow-arrow"><el-icon><ArrowRight /></el-icon></div>
               <div class="flow-step">
                 <div class="flow-num fn-2">2</div>
                 <div class="flow-body">
-                  <div class="flow-title">生成用例</div>
-                  <div class="flow-desc">AI 分析元素生成 / 录制真实操作 / 覆盖率补全</div>
+                  <div class="flow-title">AI 规划场景</div>
+                  <div class="flow-desc">5 个维度自动规划 · 一键启动录制</div>
                 </div>
               </div>
               <div class="flow-arrow"><el-icon><ArrowRight /></el-icon></div>
               <div class="flow-step">
                 <div class="flow-num fn-3">3</div>
                 <div class="flow-body">
-                  <div class="flow-title">配置执行</div>
-                  <div class="flow-desc">选择浏览器，配置环境变量</div>
+                  <div class="flow-title">录制 & 健壮化</div>
+                  <div class="flow-desc">真实操作录制 · AI 自动补全断言 · Selector 多候选</div>
                 </div>
               </div>
               <div class="flow-arrow"><el-icon><ArrowRight /></el-icon></div>
               <div class="flow-step">
                 <div class="flow-num fn-4">4</div>
                 <div class="flow-body">
-                  <div class="flow-title">查看报告</div>
-                  <div class="flow-desc">分浏览器报告 · 截图 · PDF 导出 · 失败自动修正</div>
+                  <div class="flow-title">执行 & 报告</div>
+                  <div class="flow-desc">多浏览器并行 · 截图 · PDF · 失败修正</div>
                 </div>
               </div>
             </div>
@@ -129,12 +129,23 @@
           <!-- 子模块入口 + 最近任务 -->
           <el-row :gutter="16" style="margin-top:12px">
             <el-col :span="16">
+              <div class="sub-card" style="margin-bottom:12px">
+                <div class="sub-card-title">核心能力</div>
+                <div class="feature-list">
+                  <div class="feature-item"><div class="feature-dot" style="background:#409eff"></div><span>AI 场景规划 — 5 个落地维度（核心流程/表单验证/增删改/筛选/异常反馈）自动生成录制场景</span></div>
+                  <div class="feature-item"><div class="feature-dot" style="background:#67c23a"></div><span>录制健壮化 — Selector 多候选 + A/B/C/D 稳定性评级，执行失败率显著降低</span></div>
+                  <div class="feature-item"><div class="feature-dot" style="background:#9254de"></div><span>可视化步骤编辑器 — 行内编辑 action/selector/value，D 级 selector 标红提示替换</span></div>
+                  <div class="feature-item"><div class="feature-dot" style="background:#e6a23c"></div><span>智能断言补全 — 关键操作后自动插入 wait + assert，避免执行空档漏检</span></div>
+                  <div class="feature-item"><div class="feature-dot" style="background:#36cfc9"></div><span>多浏览器并行 — Chromium / Firefox / WebKit 同步执行，矩阵报告对比</span></div>
+                  <div class="feature-item"><div class="feature-dot" style="background:#f56c6c"></div><span>场景覆盖视图 — 规划场景与录制用例对照，直观看哪个维度还没覆盖</span></div>
+                </div>
+              </div>
               <div class="action-grid-2">
                 <div class="action-item" @click="$router.push('/tasks')">
                   <div class="action-icon ai-blue"><el-icon size="18"><FolderOpened /></el-icon></div>
                   <div class="action-info">
                     <div class="action-name">任务管理</div>
-                    <div class="action-desc">新建 / 管理测试任务</div>
+                    <div class="action-desc">新建任务 · 抓取页面元素</div>
                   </div>
                   <el-icon class="action-go"><ArrowRight /></el-icon>
                 </div>
@@ -142,7 +153,7 @@
                   <div class="action-icon ai-green"><el-icon size="18"><Document /></el-icon></div>
                   <div class="action-info">
                     <div class="action-name">用例管理</div>
-                    <div class="action-desc">查看编辑测试用例步骤</div>
+                    <div class="action-desc">来源标签 · 步骤编辑器 · 场景覆盖</div>
                   </div>
                   <el-icon class="action-go"><ArrowRight /></el-icon>
                 </div>
@@ -150,7 +161,7 @@
                   <div class="action-icon ai-orange"><el-icon size="18"><VideoCamera /></el-icon></div>
                   <div class="action-info">
                     <div class="action-name">录制 & 执行</div>
-                    <div class="action-desc">有头浏览器录制 · 并行执行</div>
+                    <div class="action-desc">AI 规划场景 · 录制 · 并行执行</div>
                   </div>
                   <el-icon class="action-go"><ArrowRight /></el-icon>
                 </div>
@@ -201,7 +212,7 @@
             <div class="module-badge badge-teal"><el-icon size="18"><Tickets /></el-icon></div>
             <div>
               <div class="module-title">接口自动化</div>
-              <div class="module-subtitle">Swagger / 代码导入生成 · 断言与变量提取 · 全局变量池 · 压测 · 链路编排</div>
+              <div class="module-subtitle">AI 生成 · 多环境 · 数据驱动 · 压测 · CI/CD · Mock · 定时执行</div>
             </div>
           </div>
         </div>
@@ -212,7 +223,9 @@
               <div class="dash-card-icon-wrap dci-teal"><el-icon size="24"><Tickets /></el-icon></div>
               <div class="dash-card-body">
                 <div class="dash-card-title">接口测试</div>
-                <div class="dash-card-desc">Swagger / 代码 / 手动导入，AI 生成用例，断言与变量提取，全局变量池跨项目共享</div>
+                <div class="dash-card-desc">
+                  AI 生成用例（Swagger / 代码 / URL）· Postman/HAR 导入 · 多环境切换 · 断言 · 变量提取 · CSV 数据驱动 · 压测
+                </div>
               </div>
               <div class="dash-card-footer">
                 <div class="dash-stat">
@@ -227,7 +240,9 @@
               <div class="dash-card-icon-wrap dci-cyan"><el-icon size="24"><Memo /></el-icon></div>
               <div class="dash-card-body">
                 <div class="dash-card-title">测试计划</div>
-                <div class="dash-card-desc">跨项目用例编排，共享变量上下文，端到端链路测试</div>
+                <div class="dash-card-desc">
+                  跨项目用例编排 · 共享变量上下文 · Cron 定时执行 · CI/CD Webhook 触发 · 执行完成推送通知
+                </div>
               </div>
               <div class="dash-card-footer">
                 <div class="dash-stat">
@@ -242,11 +257,25 @@
               <div class="dash-card-icon-wrap dci-red"><el-icon size="24"><Warning /></el-icon></div>
               <div class="dash-card-body">
                 <div class="dash-card-title">渗透测试</div>
-                <div class="dash-card-desc">接口安全探测，SQL 注入 / XSS / 敏感信息扫描</div>
+                <div class="dash-card-desc">12 个扫描模块，覆盖 OWASP API Top 10，SQL 注入 / 越权 / 敏感信息泄露，AI 修复建议</div>
               </div>
               <div class="dash-card-footer">
                 <el-tag size="small" type="danger" effect="plain">安全检测</el-tag>
                 <el-button type="danger" link size="small">进入</el-button>
+              </div>
+            </div>
+
+            <div class="dash-card" @click="$router.push('/mock')">
+              <div class="dash-card-icon-wrap dci-purple"><el-icon size="24"><Connection /></el-icon></div>
+              <div class="dash-card-body">
+                <div class="dash-card-title">Mock 服务</div>
+                <div class="dash-card-desc">
+                  配置路径 + 方法 + 参数匹配规则，返回预设响应，支持延迟模拟与模板变量
+                </div>
+              </div>
+              <div class="dash-card-footer">
+                <el-tag size="small" type="info" effect="plain">联调利器</el-tag>
+                <el-button type="primary" link size="small">进入</el-button>
               </div>
             </div>
           </div>

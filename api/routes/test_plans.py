@@ -10,7 +10,7 @@ from loguru import logger
 
 from tools.database import (
     get_db, ApiCase, ApiProject, ApiTestReport,
-    TestPlan, TestPlanStep, TestPlanReport, User,
+    TestPlan, TestPlanStep, TestPlanReport, User, CustomScript,
 )
 from api.auth import get_current_user, check_workspace_member, check_access
 from api.websocket_manager import ws_manager
@@ -121,12 +121,16 @@ async def update_test_plan(plan_id: int, data: dict, db: AsyncSession = Depends(
     if not plan:
         raise HTTPException(status_code=404, detail="测试计划不存在")
     await check_access(db, plan, current_user, "测试计划")
-    for field in ("name", "description", "project_id", "proxy_url", "hosts_map"):
+    for field in ("name", "description", "project_id", "proxy_url", "hosts_map",
+                  "cron_expr", "cron_enabled"):
         if field in data:
             setattr(plan, field, data[field])
     plan.updated_at = _dt.utcnow()
     await db.commit()
     await db.refresh(plan)
+    # 更新 Cron 调度（如有变化）
+    from api.scheduler import refresh_plan_schedule
+    await refresh_plan_schedule(plan)
     return _plan_dict(plan)
 
 
@@ -487,6 +491,23 @@ async def _execute_plan_bg(plan_id: int, callback_url: Optional[str] = None, exe
             logger.info(f"[webhook] 回调成功: {callback_url} → {resp.status_code}")
         except Exception as cb_err:
             logger.warning(f"[webhook] 回调失败: {callback_url} → {cb_err}")
+
+    # 执行完成通知（钉钉/企微/飞书），ALERT_WEBHOOK_URL 有配置时推送
+    try:
+        from tools.config import settings
+        if settings.ALERT_WEBHOOK_URL:
+            from tools.alerter import fire_alert
+            icon = "✅" if final_status == "passed" else "❌"
+            title = f"{icon} 测试计划执行完成"
+            body = (
+                f"> **计划**：{plan_name}\n\n"
+                f"> **结果**：{final_status}　通过率 {pass_rate}%\n\n"
+                f"> **步骤**：共 {total} 步，通过 {passed} 步，失败 {failed_count} 步\n\n"
+                f"> **触发者**：{executed_by or 'system'}"
+            )
+            fire_alert(body, title=title, fingerprint=f"plan_done_{plan_id}_{report_id}")
+    except Exception as _notify_err:
+        logger.warning(f"[plan_exec] 通知推送失败: {_notify_err}")
 
 
 # ── 辅助：报告访问校验 ────────────────────────────────────────────────────────

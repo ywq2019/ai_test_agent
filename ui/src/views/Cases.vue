@@ -81,20 +81,17 @@
           <!-- Row 3: Actions -->
           <div class="header-row header-row-3">
             <div class="action-bar">
-              <el-button type="primary" @click="showCreateDialog = true">
+              <el-button type="primary" @click="openCreateDialog">
                 <el-icon><Plus /></el-icon>新建用例
               </el-button>
-              <el-button-group>
-                <el-button type="success" @click="generateCases" :loading="generating" :disabled="!filterTaskId">
-                  <el-icon><MagicStick /></el-icon>AI生成
-                </el-button>
-                <el-tooltip :content="reparseBeforeGen ? '生成前重新抓取页面元素' : '点击开启重新抓取'" placement="bottom">
-                  <el-button :type="reparseBeforeGen ? 'success' : 'default'" style="padding: 0 8px;" :disabled="!filterTaskId"
-                    @click.stop="reparseBeforeGen = !reparseBeforeGen">
-                    <el-icon><RefreshRight /></el-icon>
-                  </el-button>
-                </el-tooltip>
-              </el-button-group>
+              <!-- AI 规划场景（主入口，替代原 AI 生成） -->
+              <el-button type="success" @click="goScenePlanner" :disabled="!filterTaskId">
+                <el-icon><MagicStick /></el-icon>AI 规划场景
+              </el-button>
+              <!-- 快速录制 -->
+              <el-button type="primary" plain @click="goRecord" :disabled="!filterTaskId">
+                <el-icon><VideoCamera /></el-icon>录制用例
+              </el-button>
               <el-tooltip :content="selectedCases.length === 0 ? '请先勾选用例' : `执行选中 ${selectedCases.length} 条`" placement="bottom">
                 <el-button type="danger" @click="runBatch">
                   <el-icon><VideoPlay /></el-icon>
@@ -102,32 +99,35 @@
                 </el-button>
               </el-tooltip>
 
-              <!-- More actions dropdown -->
+              <!-- 批量操作（勾选后显示） -->
+              <template v-if="selectedCases.length > 0">
+                <el-divider direction="vertical" style="height:20px;margin:0 4px" />
+                <span style="font-size:13px;color:#606266;white-space:nowrap">已选 {{ selectedCases.length }} 条</span>
+                <el-button size="default" @click="batchEnable">批量启用</el-button>
+                <el-button size="default" @click="batchDisable">批量禁用</el-button>
+                <el-button size="default" type="danger" plain :loading="batchDeleting" @click="batchDelete">批量删除</el-button>
+              </template>
+              <el-button size="default" @click="toggleAllSelection" style="margin-left:auto">
+                {{ isAllSelected ? '取消全选' : '全选' }}
+              </el-button>
+
+              <!-- More actions dropdown（瘦身后） -->
               <el-dropdown trigger="click" :disabled="!filterTaskId">
                 <el-button :disabled="!filterTaskId">
                   更多操作<el-icon style="margin-left:4px"><ArrowDown /></el-icon>
                 </el-button>
                 <template #dropdown>
                   <el-dropdown-menu>
-                    <el-dropdown-item @click="optimizeCases" :disabled="optimizing">
-                      <el-icon><Cpu /></el-icon>优化用例
-                    </el-dropdown-item>
                     <el-dropdown-item @click="showCoverage" :disabled="loadingCoverage">
                       <el-icon><DataAnalysis /></el-icon>覆盖度分析
                     </el-dropdown-item>
                     <el-dropdown-item @click="openDocDiffDialog">
                       <el-icon><Refresh /></el-icon>文档变更更新
                     </el-dropdown-item>
-                    <el-dropdown-item divided
-                      @click="fixCases"
-                      :disabled="!filterTaskId || fixing"
-                    >
+                    <el-dropdown-item divided @click="fixCases" :disabled="!filterTaskId || fixing">
                       <el-icon><MagicStick /></el-icon>
                       修正失败用例
                       <el-badge v-if="lastExecutionFailed.length" :value="lastExecutionFailed.length" style="margin-left:6px" />
-                    </el-dropdown-item>
-                    <el-dropdown-item @click="autoFixAll" :disabled="autoFixing || !allCases.length">
-                      <el-icon><Select /></el-icon>一键修正补全
                     </el-dropdown-item>
                   </el-dropdown-menu>
                 </template>
@@ -137,15 +137,28 @@
         </div>
       </template>
 
-      <el-table ref="tableRef" :data="filteredCases" stripe style="width: 100%" @selection-change="handleSelectionChange">
+      <!-- ══ 主内容 Tabs ══ -->
+      <el-tabs v-model="mainTab" type="border-card" style="margin-top:2px">
+
+        <!-- Tab 1：用例列表 -->
+        <el-tab-pane label="用例列表" name="list">
+      <el-table ref="tableRef" :data="pagedCases" stripe style="width: 100%" @selection-change="handleSelectionChange">
         <el-table-column type="selection" width="40" />
         <el-table-column type="index" label="#" width="55" />
-        <el-table-column prop="name" label="用例名称" min-width="140" show-overflow-tooltip>
+        <el-table-column prop="name" label="用例名称" min-width="160" show-overflow-tooltip>
           <template #default="{ row }">
-            <span :class="{ 'case-deprecated': row.deprecated }">{{ row.name }}</span>
-            <el-tag v-if="row.deprecated" size="small" type="danger" effect="plain" style="margin-left:4px">废弃</el-tag>
-            <el-tag v-else-if="row.is_new" size="small" type="success" effect="dark" style="margin-left:4px">NEW</el-tag>
-            <el-tag v-else-if="row.is_updated" size="small" type="warning" effect="dark" style="margin-left:4px">更新</el-tag>
+            <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
+              <span :class="{ 'case-deprecated': row.deprecated }">{{ row.name }}</span>
+              <el-tag v-if="row.deprecated" size="small" type="danger" effect="plain">废弃</el-tag>
+              <el-tag v-else-if="row.is_new" size="small" type="success" effect="dark">NEW</el-tag>
+              <el-tag v-else-if="row.is_updated" size="small" type="warning" effect="dark">更新</el-tag>
+              <!-- 来源标签 -->
+              <el-tooltip :content="sourceLabel(row.source).tip" placement="top">
+                <el-tag :type="sourceLabel(row.source).type" size="small" effect="plain" class="source-tag">
+                  {{ sourceLabel(row.source).text }}
+                </el-tag>
+              </el-tooltip>
+            </div>
           </template>
         </el-table-column>
         <el-table-column prop="module" label="模块" width="110" show-overflow-tooltip />
@@ -156,7 +169,7 @@
         </el-table-column>
         <el-table-column prop="steps" label="测试步骤" min-width="180" show-overflow-tooltip />
         <el-table-column prop="expected_results" label="预期结果" min-width="130" show-overflow-tooltip />
-        <el-table-column label="执行状态" width="85" align="center">
+        <el-table-column label="执行状态" width="100" align="center">
           <template #default="{ row }">
             <el-tooltip
               v-if="getCaseExecStatus(row) === 'passed'"
@@ -165,13 +178,17 @@
             >
               <el-tag type="success" size="small" effect="dark">通过</el-tag>
             </el-tooltip>
-            <el-tooltip
-              v-else-if="getCaseExecStatus(row) === 'failed'"
-              :content="getCaseExecError(row) || '上次执行失败'"
-              placement="top"
-            >
-              <el-tag type="danger" size="small" effect="dark">失败</el-tag>
-            </el-tooltip>
+            <!-- AI生成且失败 → 显示重录按钮 -->
+            <template v-else-if="getCaseExecStatus(row) === 'failed'">
+              <el-tooltip :content="getCaseExecError(row) || '上次执行失败'" placement="top">
+                <el-tag type="danger" size="small" effect="dark">失败</el-tag>
+              </el-tooltip>
+              <el-tooltip v-if="row.source === 'ai_generated'" content="AI生成用例执行失败，建议用录制替换" placement="top">
+                <el-button link type="warning" size="small" style="margin-left:2px;padding:0" @click="reRecordCase(row)">
+                  重录
+                </el-button>
+              </el-tooltip>
+            </template>
             <span v-else class="exec-unknown">-</span>
           </template>
         </el-table-column>
@@ -200,12 +217,111 @@
         </el-table-column>
       </el-table>
 
-      <div class="batch-actions">
-        <el-button size="small" @click="toggleAllSelection">{{ isAllSelected ? '取消全选' : '全选' }}</el-button>
-        <el-button size="small" @click="batchEnable">批量启用</el-button>
-        <el-button size="small" @click="batchDisable">批量禁用</el-button>
-        <el-button size="small" type="danger" :loading="batchDeleting" @click="batchDelete">批量删除</el-button>
+      <!-- 分页 -->
+      <div v-if="filteredCases.length > pageSize" class="pagination-bar">
+        <el-pagination
+          v-model:current-page="currentPage"
+          v-model:page-size="pageSize"
+          :total="filteredCases.length"
+          :page-sizes="[20, 50, 100]"
+          layout="total, sizes, prev, pager, next, jumper"
+          background
+          @size-change="currentPage = 1"
+        />
       </div>
+
+        </el-tab-pane>
+
+        <!-- Tab 2：场景覆盖 -->
+        <el-tab-pane name="scene-coverage">
+          <template #label>
+            <span>
+              场景覆盖
+              <el-badge v-if="sceneStats.total > 0" :value="`${sceneStats.covered}/${sceneStats.total}`"
+                :type="sceneStats.covered === sceneStats.total ? 'success' : 'warning'"
+                style="margin-left:4px" />
+            </span>
+          </template>
+
+          <!-- 无场景规划时引导 -->
+          <div v-if="!scenePlanCache.length" class="scene-coverage-empty">
+            <el-empty description="当前任务还没有 AI 场景规划">
+              <el-button type="primary" @click="goScenePlanner" :disabled="!filterTaskId">
+                <el-icon><MagicStick /></el-icon>去 AI 规划场景
+              </el-button>
+            </el-empty>
+          </div>
+
+          <!-- 有场景规划 -->
+          <div v-else>
+            <!-- 总览进度 -->
+            <div class="scene-overview">
+              <div class="scene-overview-stats">
+                <span class="ov-num">{{ sceneStats.covered }}</span>
+                <span class="ov-sep">/</span>
+                <span class="ov-total">{{ sceneStats.total }}</span>
+                <span class="ov-label">个场景已覆盖</span>
+              </div>
+              <el-progress
+                :percentage="sceneStats.total ? Math.round(sceneStats.covered / sceneStats.total * 100) : 0"
+                :status="sceneStats.covered === sceneStats.total ? 'success' : ''"
+                :stroke-width="10"
+                style="flex:1;max-width:400px"
+              />
+              <el-button size="small" text @click="goScenePlanner" :disabled="!filterTaskId">
+                <el-icon><Refresh /></el-icon>重新规划
+              </el-button>
+            </div>
+
+            <!-- 场景卡片网格 -->
+            <div class="scene-grid">
+              <div
+                v-for="scene in scenePlanCache"
+                :key="scene.id"
+                class="scene-cov-card"
+                :class="{ 'covered': scene.recorded, 'uncovered': !scene.recorded }"
+              >
+                <div class="scene-cov-header">
+                  <el-tag
+                    size="small"
+                    :type="scene.priority === 'P0' ? 'danger' : scene.priority === 'P1' ? 'warning' : 'info'"
+                    effect="plain"
+                  >{{ scene.priority }}</el-tag>
+                  <span class="scene-cov-name">{{ scene.name }}</span>
+                  <el-tag v-if="scene.recorded" size="small" type="success" effect="dark">✓ 已覆盖</el-tag>
+                  <el-tag v-else size="small" type="danger" effect="plain">待录制</el-tag>
+                </div>
+                <div class="scene-cov-desc">{{ scene.description }}</div>
+                <!-- 关联用例 -->
+                <div v-if="getCasesForScene(scene).length" class="scene-cov-cases">
+                  <div v-for="c in getCasesForScene(scene)" :key="c.id" class="scene-cov-case-item">
+                    <el-icon size="12" color="#67c23a"><SuccessFilled /></el-icon>
+                    <span>{{ c.name }}</span>
+                    <el-button link size="small" type="primary" @click="runSingleById(c)" style="margin-left:auto">执行</el-button>
+                  </div>
+                </div>
+                <!-- 操作 -->
+                <div class="scene-cov-actions">
+                  <el-button
+                    v-if="!scene.recorded"
+                    type="primary" size="small"
+                    @click="goRecordScene(scene)"
+                  >
+                    <el-icon><VideoCamera /></el-icon>去录制
+                  </el-button>
+                  <el-button
+                    v-else size="small" plain
+                    @click="goRecordScene(scene)"
+                  >
+                    <el-icon><Refresh /></el-icon>重新录制
+                  </el-button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </el-tab-pane>
+
+      </el-tabs>
     </el-card>
 
     <!-- 生成/优化进度弹窗 -->
@@ -327,42 +443,219 @@
     </el-drawer>
 
     <!-- 新建/编辑弹窗 -->
-    <el-dialog v-model="showCreateDialog" :title="editingCase ? '编辑用例' : '新建用例'" width="640px">
-      <el-form :model="caseForm" label-width="90px">
-        <el-form-item label="所属任务">
-          <el-select v-model="caseForm.task_id" style="width:100%">
-            <el-option v-for="task in taskStore.tasks" :key="task.id" :label="task.name" :value="task.id" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="用例名称">
-          <el-input v-model="caseForm.name" placeholder="请输入用例名称" />
-        </el-form-item>
-        <el-form-item label="所属模块">
-          <el-input v-model="caseForm.module" placeholder="请输入所属模块" />
-        </el-form-item>
-        <el-form-item label="优先级">
-          <el-select v-model="caseForm.priority" style="width:100%">
-            <el-option label="P0 - 核心必测" value="P0" />
-            <el-option label="P1 - 常规测试" value="P1" />
-            <el-option label="P2 - 次要场景" value="P2" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="前置条件">
-          <el-input v-model="caseForm.preconditions" type="textarea" :rows="2" />
-        </el-form-item>
-        <el-form-item label="测试步骤">
-          <el-input v-model="caseForm.steps" type="textarea" :rows="3" />
-        </el-form-item>
-        <el-form-item label="预期结果">
-          <el-input v-model="caseForm.expected_results" type="textarea" :rows="2" />
-        </el-form-item>
-        <el-form-item label="启用状态">
-          <el-switch v-model="caseForm.enabled" />
-        </el-form-item>
-      </el-form>
+    <el-dialog v-model="showCreateDialog" :title="editingCase ? '编辑用例' : '新建用例'"
+      width="860px" :close-on-click-modal="false">
+      <el-tabs v-model="caseEditTab" type="border-card" style="min-height:360px">
+
+        <!-- Tab 1：基本信息 -->
+        <el-tab-pane label="基本信息" name="info">
+          <el-form :model="caseForm" label-width="90px" style="padding:8px 4px 0">
+            <el-form-item label="所属任务">
+              <el-select v-model="caseForm.task_id" style="width:100%">
+                <el-option v-for="task in taskStore.tasks" :key="task.id" :label="task.name" :value="task.id" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="用例名称">
+              <el-input v-model="caseForm.name" placeholder="请输入用例名称" />
+            </el-form-item>
+            <el-form-item label="所属模块">
+              <el-input v-model="caseForm.module" placeholder="请输入所属模块" />
+            </el-form-item>
+            <el-form-item label="优先级">
+              <el-select v-model="caseForm.priority" style="width:100%">
+                <el-option label="P0 - 核心必测" value="P0" />
+                <el-option label="P1 - 常规测试" value="P1" />
+                <el-option label="P2 - 次要场景" value="P2" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="前置条件">
+              <el-input v-model="caseForm.preconditions" type="textarea" :rows="2" />
+            </el-form-item>
+            <el-form-item label="测试步骤">
+              <el-input v-model="caseForm.steps" type="textarea" :rows="3"
+                placeholder="文字描述，步骤编辑器中可编辑结构化步骤" />
+            </el-form-item>
+            <el-form-item label="预期结果">
+              <el-input v-model="caseForm.expected_results" type="textarea" :rows="2" />
+            </el-form-item>
+            <el-form-item label="启用状态">
+              <el-switch v-model="caseForm.enabled" />
+            </el-form-item>
+          </el-form>
+        </el-tab-pane>
+
+        <!-- Tab 2：步骤编辑器（仅编辑已有用例时可用） -->
+        <el-tab-pane name="steps-editor" :disabled="!editingCase">
+          <template #label>
+            <el-tooltip :content="editingCase ? '' : '新建用例保存后才能编辑步骤'" placement="top">
+              <span>
+                步骤编辑器
+                <el-tag v-if="editingCase && stepsJson.length" size="small" type="info"
+                  style="margin-left:4px">{{ stepsJson.length }}步</el-tag>
+              </span>
+            </el-tooltip>
+          </template>
+
+          <!-- 工具栏 -->
+          <div class="step-editor-toolbar">
+            <el-button size="small" type="primary" plain @click="addStep">
+              <el-icon><Plus /></el-icon>添加步骤
+            </el-button>
+            <el-button size="small" :loading="stepsLoading" @click="reloadSteps" :disabled="!editingCase">
+              <el-icon><Refresh /></el-icon>重新加载
+            </el-button>
+            <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+              <span style="font-size:12px;color:#909399">健壮度：</span>
+              <el-tag size="small" type="success" effect="plain">A 稳定</el-tag>
+              <el-tag size="small" type="warning" effect="plain">B 一般</el-tag>
+              <el-tag size="small" type="info" effect="plain">C 可用</el-tag>
+              <el-tag size="small" type="danger" effect="plain">D 风险</el-tag>
+            </div>
+          </div>
+
+          <!-- 步骤列表 -->
+          <div v-if="stepsLoading" style="text-align:center;padding:40px 0;color:#909399">
+            <el-icon class="is-loading"><Loading /></el-icon> 加载中...
+          </div>
+          <div v-else-if="!stepsJson.length" style="text-align:center;padding:40px 0">
+            <el-empty description="暂无结构化步骤">
+              <el-button size="small" type="primary" @click="addStep">添加第一个步骤</el-button>
+            </el-empty>
+          </div>
+          <div v-else class="step-table">
+            <!-- 表头 -->
+            <div class="step-row step-header">
+              <div class="step-col col-grade">健壮度</div>
+              <div class="step-col col-action">Action</div>
+              <div class="step-col col-selector">Selector（点击切换备选）</div>
+              <div class="step-col col-value">Value / Expected</div>
+              <div class="step-col col-opts">超时/可选</div>
+              <div class="step-col col-ops">操作</div>
+            </div>
+
+            <div v-for="(step, idx) in stepsJson" :key="step.id || idx" class="step-row"
+              :class="{ 'step-row-danger': step.robustness === 'D', 'step-row-auto': step._auto_inserted }">
+
+              <!-- 健壮度 -->
+              <div class="step-col col-grade">
+                <el-tooltip v-if="step.robustness"
+                  :content="gradeDesc(step.robustness)" placement="top">
+                  <el-tag :type="gradeType(step.robustness)" size="small" effect="plain"
+                    class="grade-badge">
+                    {{ step.robustness || '-' }}
+                  </el-tag>
+                </el-tooltip>
+                <span v-else style="color:#c0c4cc;font-size:12px">-</span>
+              </div>
+
+              <!-- Action -->
+              <div class="step-col col-action">
+                <el-select v-model="step.action" size="small" style="width:100%"
+                  @change="onActionChange(step)">
+                  <el-option-group label="交互">
+                    <el-option v-for="a in interactActions" :key="a" :label="a" :value="a" />
+                  </el-option-group>
+                  <el-option-group label="断言">
+                    <el-option v-for="a in assertActions" :key="a" :label="a" :value="a" />
+                  </el-option-group>
+                  <el-option-group label="其他">
+                    <el-option v-for="a in otherActions" :key="a" :label="a" :value="a" />
+                  </el-option-group>
+                </el-select>
+              </div>
+
+              <!-- Selector（带备选下拉） -->
+              <div class="step-col col-selector">
+                <template v-if="needsSelector(step.action)">
+                  <el-popover
+                    v-if="(step.selectors || []).length > 1"
+                    placement="bottom-start" :width="320" trigger="click">
+                    <template #reference>
+                      <div class="selector-pill"
+                        :class="'grade-' + (step.robustness || 'D').toLowerCase()">
+                        <el-icon v-if="step.robustness === 'D'" color="#f56c6c" size="12">
+                          <WarningFilled />
+                        </el-icon>
+                        <span class="selector-text">{{ step.selector || '点击设置' }}</span>
+                        <el-icon size="10" color="#909399"><ArrowDown /></el-icon>
+                      </div>
+                    </template>
+                    <!-- 备选列表 -->
+                    <div class="sel-candidates">
+                      <div style="font-size:12px;color:#909399;margin-bottom:8px">
+                        选择备选 Selector（按稳定性排序）：
+                      </div>
+                      <div v-for="(cand, ci) in (step.selectors || [])" :key="ci"
+                        class="sel-candidate-item"
+                        :class="{ 'sel-active': cand === step.selector }"
+                        @click="applySelector(step, cand)">
+                        <el-tag :type="gradeType(selectorGrade(cand))" size="small" effect="plain"
+                          style="flex-shrink:0">{{ selectorGrade(cand) }}</el-tag>
+                        <span class="sel-cand-text">{{ cand }}</span>
+                        <el-icon v-if="cand === step.selector" color="#67c23a"><Select /></el-icon>
+                      </div>
+                      <div style="margin-top:8px;border-top:1px solid #f0f0f0;padding-top:8px">
+                        <el-input v-model="step.selector" size="small" placeholder="或手动输入..."
+                          @change="updateStepGrade(step)" />
+                      </div>
+                    </div>
+                  </el-popover>
+                  <el-input v-else v-model="step.selector" size="small" placeholder="selector"
+                    @change="updateStepGrade(step)" />
+                </template>
+                <!-- navigate/assert_url 用 url/expected 字段 -->
+                <template v-else-if="step.action === 'navigate'">
+                  <el-input v-model="step.url" size="small" placeholder="https://..." />
+                </template>
+                <span v-else style="color:#c0c4cc;font-size:12px">—</span>
+              </div>
+
+              <!-- Value / Expected -->
+              <div class="step-col col-value">
+                <el-input
+                  v-if="needsValue(step.action)"
+                  v-model="step.value" size="small"
+                  :placeholder="valuePlaceholder(step.action)" />
+                <el-input
+                  v-else-if="needsExpected(step.action)"
+                  v-model="step.expected" size="small"
+                  :placeholder="'期望：' + (step.action === 'assert_url' ? 'URL 关键词' : '文本/正则')" />
+                <span v-else style="color:#c0c4cc;font-size:12px">—</span>
+              </div>
+
+              <!-- 超时 / optional -->
+              <div class="step-col col-opts">
+                <el-input-number v-model="step.timeout" size="small" :min="500" :max="60000"
+                  :step="1000" style="width:90px" controls-position="right" />
+                <el-tooltip content="可选：失败不中断" placement="top">
+                  <el-checkbox v-model="step.optional" size="small" style="margin-left:4px" />
+                </el-tooltip>
+              </div>
+
+              <!-- 操作 -->
+              <div class="step-col col-ops">
+                <el-button-group>
+                  <el-button size="small" :disabled="idx === 0" @click="moveStep(idx, -1)"
+                    title="上移">↑</el-button>
+                  <el-button size="small" :disabled="idx === stepsJson.length - 1"
+                    @click="moveStep(idx, 1)" title="下移">↓</el-button>
+                </el-button-group>
+                <el-button size="small" type="danger" plain @click="removeStep(idx)"
+                  style="margin-left:4px"><el-icon><Delete /></el-icon></el-button>
+              </div>
+            </div>
+          </div>
+        </el-tab-pane>
+
+      </el-tabs>
+
       <template #footer>
         <el-button @click="showCreateDialog = false">取消</el-button>
-        <el-button type="primary" @click="saveCase" :loading="saving">保存</el-button>
+        <el-button v-if="caseEditTab === 'steps-editor' && editingCase"
+          type="success" @click="saveSteps" :loading="saving">
+          保存步骤
+        </el-button>
+        <el-button v-else type="primary" @click="saveCase" :loading="saving">保存</el-button>
       </template>
     </el-dialog>
 
@@ -371,7 +664,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, nextTick, watch } from 'vue'
+import { ref, reactive, computed, onMounted, onActivated, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useTaskStore } from '../stores/task'
 import { useWorkspaceStore } from '../stores/workspace'
@@ -382,8 +675,9 @@ import { useWebSocket } from '../composables/useWebSocket'
 import { useFailedCases } from '../composables/useFailedCases'
 import { caseApi } from '../api/index'
 import {
-  Plus, MagicStick, Cpu, DataAnalysis, VideoPlay, Edit, Delete, Refresh, Select,
-  Hide, View, RefreshRight, Search, ArrowDown, InfoFilled, RefreshLeft,
+  Plus, MagicStick, DataAnalysis, VideoPlay, VideoCamera, Edit, Delete, Refresh,
+  Hide, View, Search, ArrowDown, InfoFilled, RefreshLeft, SuccessFilled,
+  WarningFilled, Loading, Select,
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
@@ -499,6 +793,21 @@ const filteredCases = computed(() => {
   return base
 })
 
+// ── 分页 ──────────────────────────────────────────────────────────────────────
+const currentPage = ref(1)
+const pageSize    = ref(20)
+
+// 筛选/搜索条件变化时回到第 1 页
+watch(
+  [filterTaskId, filterPriority, filterModule, filterStatus, searchText, showDeprecated],
+  () => { currentPage.value = 1 }
+)
+
+const pagedCases = computed(() => {
+  const start = (currentPage.value - 1) * pageSize.value
+  return filteredCases.value.slice(start, start + pageSize.value)
+})
+
 const allCases = computed(() => {
   return filterTaskId.value
     ? taskStore.cases.filter(c => c.task_id === filterTaskId.value)
@@ -506,7 +815,8 @@ const allCases = computed(() => {
 })
 
 const isAllSelected = computed(() =>
-  filteredCases.value.length > 0 && selectedCases.value.length === filteredCases.value.length
+  pagedCases.value.length > 0 &&
+  pagedCases.value.every(c => selectedCases.value.some(s => s.id === c.id))
 )
 
 const deprecatedCount = computed(() => {
@@ -702,6 +1012,30 @@ const fixCases = async () => {
     ElMessage.info('没有需要修正的失败用例，请先执行一次测试')
     return
   }
+  // 弹出选择对话框：AI修正 or 录制替换
+  try {
+    await ElMessageBox.confirm(
+      `共有 ${lastExecutionFailed.value.length} 条失败用例，请选择处理方式：`,
+      '修正失败用例',
+      {
+        confirmButtonText: '🎬 去录制替换（推荐）',
+        cancelButtonText: '🤖 AI 自动修正',
+        distinguishCancelAndClose: true,
+        type: 'warning',
+      }
+    )
+    // 点了"去录制替换"
+    router.push({ name: 'Execution', query: { taskId: filterTaskId.value, startRecord: '1', from: 'cases' } })
+  } catch (action) {
+    if (action === 'cancel') {
+      // 点了"AI 自动修正"
+      await _doAiFixCases()
+    }
+    // close：点了 X，什么也不做
+  }
+}
+
+const _doAiFixCases = async () => {
   fixing.value = true
   showProgress.value = true
   progressTitle.value = 'AI 修正失败用例'
@@ -728,6 +1062,91 @@ const fixCases = async () => {
     disconnectWs()
   }
 }
+
+// ── 来源标签辅助 ──
+function sourceLabel(source) {
+  if (source === 'recorded') return { text: '🎬录制', type: 'success', tip: '由录制操作生成，执行可靠性高' }
+  if (source === 'ai_generated') return { text: '🤖AI', type: 'warning', tip: 'AI推断生成，建议执行失败后用录制替换' }
+  return { text: '✏️手动', type: 'info', tip: '手动创建的用例' }
+}
+
+// ── AI 规划场景入口 → 跳 Execution 页打开抽屉 ──
+const goScenePlanner = () => {
+  if (!filterTaskId.value) return
+  router.push({ name: 'Execution', query: { taskId: filterTaskId.value, openScenePlanner: '1', from: 'cases' } })
+}
+
+// ── 快速录制入口 ──
+const goRecord = () => {
+  if (!filterTaskId.value) return
+  router.push({ name: 'Execution', query: { taskId: filterTaskId.value, startRecord: '1', from: 'cases' } })
+}
+
+// ── 重录：AI生成用例失败后，跳录制页并预设用例名 ──
+const reRecordCase = (row) => {
+  router.push({
+    name: 'Execution',
+    query: { taskId: row.task_id, startRecord: '1', from: 'cases', replaceCaseName: row.name }
+  })
+}
+
+// ── T5：场景覆盖视图 ──────────────────────────────────────────────────────────
+const mainTab = ref('list')
+const scenePlanCache = ref([])
+
+// 切换到场景覆盖 Tab 时加载持久化场景
+watch(mainTab, async (tab) => {
+  if (tab === 'scene-coverage' && filterTaskId.value) {
+    await loadScenePlan()
+  }
+})
+
+const loadScenePlan = async () => {
+  if (!filterTaskId.value) return
+  try {
+    const res = await caseApi.getScenePlan(filterTaskId.value)
+    scenePlanCache.value = res.scenes || []
+  } catch { scenePlanCache.value = [] }
+}
+
+// 任务切换时清空场景缓存
+watch(filterTaskId, () => { scenePlanCache.value = [] })
+
+// 场景覆盖统计
+const sceneStats = computed(() => {
+  const total = scenePlanCache.value.length
+  const covered = scenePlanCache.value.filter(s => s.recorded).length
+  return { total, covered }
+})
+
+// 根据场景名模糊匹配该场景对应的用例
+const getCasesForScene = (scene) => {
+  return taskStore.cases.filter(c =>
+    c.name.includes(scene.name) || scene.name.includes(c.name.replace(/（.*）|\(.*\)/, '').trim())
+  )
+}
+
+// 从场景覆盖 Tab 跳去录制，携带场景名
+const goRecordScene = (scene) => {
+  router.push({
+    name: 'Execution',
+    query: {
+      taskId: filterTaskId.value,
+      startRecord: '1',
+      from: 'cases',
+      replaceCaseName: scene.name,
+    }
+  })
+}
+
+// 在场景覆盖 Tab 执行单条用例
+const runSingleById = (caseRow) => {
+  router.push({
+    name: 'Execution',
+    query: { taskId: caseRow.task_id, caseIds: String(caseRow.id) }
+  })
+}
+
 const autoFixAll = async () => {
   if (!filterTaskId.value) return
   autoFixing.value = true
@@ -824,15 +1243,6 @@ const batchDelete = async () => {
   finally { batchDeleting.value = false }
 }
 
-const editCase = (row) => {
-  editingCase.value = row
-  Object.assign(caseForm, {
-    task_id: row.task_id, name: row.name, module: row.module,
-    priority: row.priority, preconditions: row.preconditions,
-    steps: row.steps, expected_results: row.expected_results, enabled: row.enabled,
-  })
-  showCreateDialog.value = true
-}
 const saveCase = async () => {
   if (!caseForm.name || !caseForm.steps) { ElMessage.warning('请填写用例名称和测试步骤'); return }
   saving.value = true
@@ -868,6 +1278,140 @@ const resetForm = () => {
   caseForm.enabled = true; editingCase.value = null
 }
 
+const openCreateDialog = () => {
+  resetForm()
+  caseEditTab.value = 'info'
+  stepsJson.value = []
+  showCreateDialog.value = true
+}
+
+// ── 步骤编辑器 ────────────────────────────────────────────────────────────────
+const caseEditTab = ref('info')
+const stepsJson   = ref([])
+const stepsLoading = ref(false)
+
+// action 分类
+const interactActions = ['navigate','click','dblclick','rightclick','fill','type',
+  'select','check','uncheck','hover','press','scroll','upload','submit','keydown','wait']
+const assertActions   = ['assert_text','assert_visible','assert_hidden',
+  'assert_url','assert_title','assert_count']
+const otherActions    = ['wait_for','screenshot','evaluate']
+
+// 打开编辑时如果切到步骤 Tab 则加载 steps_json
+watch(caseEditTab, async (tab) => {
+  if (tab === 'steps-editor' && editingCase.value) {
+    await reloadSteps()
+  }
+})
+
+const reloadSteps = async () => {
+  if (!editingCase.value) return
+  stepsLoading.value = true
+  try {
+    const res = await caseApi.getSteps(editingCase.value.id)
+    stepsJson.value = (res.steps_json || []).map(s => ({ ...s }))
+  } catch { ElMessage.error('加载步骤失败') }
+  finally { stepsLoading.value = false }
+}
+
+// selector 评级（前端版本，对应后端 selector_grade 规则）
+const _gradeA = [/\[data-testid=/,/\[data-test=/,/\[data-cy=/,/\[aria-label=/,
+  /\[name=/,/\[placeholder=/,/\[role="/]
+const _gradeB = [/:has-text\(/,/text=/,/\[type="submit"/,/\[type="button"/,/\[aria-/,/\[role=/]
+const selectorGrade = (sel) => {
+  if (!sel) return 'D'
+  if (/^#\w*\d{5,}/.test(sel) || /--[a-f0-9]{4,}/.test(sel)) return 'D'
+  if (_gradeA.some(r => r.test(sel))) return 'A'
+  if (_gradeB.some(r => r.test(sel))) return 'B'
+  if (/\.\w/.test(sel) || /\[class/.test(sel) || /^#[a-zA-Z]/.test(sel)) return 'C'
+  return 'D'
+}
+
+const gradeType = (g) => ({ A: 'success', B: 'warning', C: 'info', D: 'danger' }[g] || 'info')
+const gradeDesc = (g) => ({
+  A: 'A级：data-testid/aria-label/name，最稳定',
+  B: 'B级：:has-text/type=submit，较稳定',
+  C: 'C级：class/id，可能随重构变化',
+  D: 'D级：动态id/纯tag，建议替换',
+}[g] || '')
+
+const updateStepGrade = (step) => {
+  step.robustness = selectorGrade(step.selector)
+  if (!step.selectors || !step.selectors.includes(step.selector)) {
+    step.selectors = [step.selector, ...(step.selectors || [])]
+  }
+}
+
+const applySelector = (step, cand) => {
+  step.selector = cand
+  step.robustness = selectorGrade(cand)
+}
+
+// 判断该 action 是否需要对应字段
+const needsSelector = (action) => ['click','dblclick','rightclick','fill','type','select',
+  'check','uncheck','hover','scroll','upload','submit','wait_for',
+  'assert_text','assert_visible','assert_hidden','assert_count'].includes(action)
+const needsValue    = (action) => ['fill','type','select','press','evaluate','upload','wait'].includes(action)
+const needsExpected = (action) => ['assert_text','assert_url','assert_title','assert_count'].includes(action)
+const valuePlaceholder = (action) => ({
+  fill: '填写内容', type: '输入内容', select: '选项值', press: 'Enter/Tab/Escape',
+  evaluate: 'JS 表达式', upload: '文件路径', wait: '等待毫秒数(可选)',
+}[action] || '值')
+
+// action 切换时重置无关字段
+const onActionChange = (step) => {
+  if (!needsSelector(step.action))  step.selector = ''
+  if (!needsValue(step.action))     step.value    = ''
+  if (!needsExpected(step.action))  step.expected = ''
+  if (step.action === 'navigate')   { step.selector = ''; step.value = '' }
+  step.robustness = selectorGrade(step.selector)
+}
+
+// 步骤操作
+const addStep = () => {
+  const newStep = {
+    id: `s${String(stepsJson.value.length + 1).padStart(3, '0')}`,
+    action: 'click', selector: '', selectors: [], value: '',
+    url: '', expected: '', description: '', timeout: 10000,
+    optional: false, robustness: 'D',
+  }
+  stepsJson.value.push(newStep)
+}
+
+const removeStep = (idx) => { stepsJson.value.splice(idx, 1) }
+
+const moveStep = (idx, dir) => {
+  const arr = stepsJson.value
+  const target = idx + dir
+  if (target < 0 || target >= arr.length) return;
+  [arr[idx], arr[target]] = [arr[target], arr[idx]]
+}
+
+// 保存步骤（步骤编辑器 Tab 专用按钮）
+const saveSteps = async () => {
+  if (!editingCase.value) return
+  saving.value = true
+  try {
+    await taskStore.updateCase(editingCase.value.id, { steps_json: stepsJson.value })
+    ElMessage.success('步骤已保存')
+  } catch (e) {
+    ElMessage.error('保存失败: ' + (e?.response?.data?.detail || e.message))
+  } finally { saving.value = false }
+}
+
+// editCase 补充加载 steps_json
+const editCase = (row) => {
+  editingCase.value = row
+  Object.assign(caseForm, {
+    task_id: row.task_id, name: row.name, module: row.module,
+    priority: row.priority, preconditions: row.preconditions,
+    steps: row.steps, expected_results: row.expected_results, enabled: row.enabled,
+  })
+  caseEditTab.value = 'info'
+  stepsJson.value = []
+  showCreateDialog.value = true
+}
+
 // ═══════════════════════════════════════════════════════════
 // Lifecycle
 // ═══════════════════════════════════════════════════════════
@@ -882,6 +1426,13 @@ onMounted(async () => {
     await taskStore.fetchCases(filterTaskId.value)
   } else {
     taskStore.setCases([])
+  }
+})
+
+// 从 Execution 页录制完成后跳回来时，自动刷新用例列表
+onActivated(async () => {
+  if (route.query.refresh === '1' && filterTaskId.value) {
+    await taskStore.fetchCases(filterTaskId.value)
   }
 })
 watch(showDeprecated, () => { selectedCases.value = [] })
@@ -917,7 +1468,12 @@ watch(() => wsStore.initialized, async (ready) => {
 .exec-summary-time { color: #909399; font-size: 12px; }
 .exec-unknown { color: #c0c4cc; font-size: 12px; }
 
-.batch-actions { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+/* action bar */
+
+.pagination-bar {
+  display: flex; justify-content: flex-end;
+  padding: 14px 4px 4px;
+}
 
 .row-actions { display: flex; align-items: center; justify-content: center; gap: 0; white-space: nowrap; }
 .row-actions .el-button { padding: 2px 6px; font-size: 12px; }
@@ -975,6 +1531,9 @@ watch(() => wsStore.initialized, async (ready) => {
 /* deprecated */
 .case-deprecated { text-decoration: line-through; color: #c0c4cc; }
 
+/* 来源标签 — 字号小一号，不抢主视觉 */
+.source-tag { font-size: 11px; padding: 0 5px; height: 18px; line-height: 18px; }
+
 /* fix result */
 .fix-result-body { padding: 4px 0; }
 .fix-stats { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
@@ -990,4 +1549,97 @@ watch(() => wsStore.initialized, async (ready) => {
 .fix-after pre { background: #f0f9eb; border: 1px solid #e1f3d8; color: #27ae60; }
 .fix-note { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-radius: 6px; background: #ecf5ff; color: #409eff; font-size: 13px; }
 .new-case-item { display: flex; align-items: center; gap: 8px; padding: 6px 10px; margin-bottom: 4px; border-radius: 4px; background: #f5f7fa; font-size: 13px; }
+
+/* ── 场景覆盖视图 ── */
+.scene-coverage-empty { padding: 40px 0; }
+.scene-overview {
+  display: flex; align-items: center; gap: 16px; padding: 14px 16px;
+  background: #f8faff; border-radius: 8px; margin-bottom: 16px;
+}
+.scene-overview-stats { display: flex; align-items: baseline; gap: 4px; white-space: nowrap; }
+.ov-num { font-size: 28px; font-weight: 700; color: #409eff; }
+.ov-sep { font-size: 18px; color: #c0c4cc; }
+.ov-total { font-size: 22px; font-weight: 600; color: #606266; }
+.ov-label { font-size: 13px; color: #909399; margin-left: 4px; }
+
+.scene-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+.scene-cov-card {
+  border: 1px solid #e4e7ed; border-radius: 10px; padding: 14px 16px;
+  background: #fff; transition: box-shadow .2s, border-color .2s;
+}
+.scene-cov-card:hover { box-shadow: 0 2px 12px rgba(0,0,0,.08); }
+.scene-cov-card.covered { border-color: #b7ebc8; background: #f6fff9; }
+.scene-cov-card.uncovered { border-color: #fcd3d3; background: #fff8f8; }
+.scene-cov-header {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 8px;
+}
+.scene-cov-name {
+  flex: 1; font-size: 14px; font-weight: 600; color: #303133;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.scene-cov-desc { font-size: 13px; color: #606266; margin-bottom: 10px; line-height: 1.5; }
+.scene-cov-cases { margin-bottom: 10px; }
+.scene-cov-case-item {
+  display: flex; align-items: center; gap: 6px; font-size: 12px; color: #606266;
+  padding: 4px 0; border-bottom: 1px dashed #f0f0f0;
+}
+.scene-cov-actions { display: flex; justify-content: flex-end; }
+
+/* ── 步骤编辑器 ── */
+.step-editor-toolbar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 4px 12px; border-bottom: 1px solid #f0f0f0; margin-bottom: 10px;
+}
+.step-table { display: flex; flex-direction: column; gap: 4px; }
+
+.step-header { background: #f5f7fa !important; font-weight: 600; font-size: 12px;
+  color: #606266; border-radius: 6px; }
+
+.step-row {
+  display: grid;
+  grid-template-columns: 52px 130px 1fr 140px 130px 80px;
+  gap: 6px; align-items: center;
+  padding: 6px 8px; border-radius: 6px;
+  border: 1px solid #f0f0f0; background: #fff;
+  transition: background .15s;
+}
+.step-row:hover { background: #fafbff; }
+.step-row-danger { border-color: #fde2e2; background: #fff8f8; }
+.step-row-auto   { border-style: dashed; opacity: .85; }
+
+.step-col { overflow: hidden; }
+.col-grade   { display: flex; justify-content: center; }
+.col-ops     { display: flex; align-items: center; justify-content: flex-end; }
+.col-opts    { display: flex; align-items: center; gap: 4px; }
+
+.grade-badge { cursor: default; font-weight: 700; min-width: 28px; text-align: center; }
+
+/* Selector 胶囊 */
+.selector-pill {
+  display: flex; align-items: center; gap: 4px; cursor: pointer;
+  border: 1px solid #dcdfe6; border-radius: 4px; padding: 3px 8px;
+  font-size: 12px; background: #fff; transition: border-color .2s;
+  max-width: 100%; overflow: hidden;
+}
+.selector-pill:hover { border-color: #409eff; }
+.selector-pill.grade-a { border-color: #b7ebc8; }
+.selector-pill.grade-b { border-color: #fcd3a6; }
+.selector-pill.grade-c { border-color: #d8d8d8; }
+.selector-pill.grade-d { border-color: #fcd3d3; }
+.selector-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 备选列表 */
+.sel-candidates { max-height: 260px; overflow-y: auto; }
+.sel-candidate-item {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+  border-radius: 6px; cursor: pointer; font-size: 12px;
+  transition: background .15s;
+}
+.sel-candidate-item:hover { background: #f0f4ff; }
+.sel-candidate-item.sel-active { background: #ecf5ff; }
+.sel-cand-text { flex: 1; word-break: break-all; color: #303133; }
 </style>

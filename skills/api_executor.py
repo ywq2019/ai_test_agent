@@ -202,6 +202,7 @@ class ApiExecutor:
         cases: List[Dict],
         progress_cb: Optional[Callable] = None,
         custom_scripts: Optional[List] = None,
+        extra_var_store: Optional[Dict] = None,  # CSV 数据驱动注入的额外变量
     ) -> Dict[str, Any]:
         import httpx
 
@@ -217,6 +218,9 @@ class ApiExecutor:
         total = len(enabled)
         results = []
         var_store: Dict = {}
+        # 数据驱动：注入 CSV 行变量
+        if extra_var_store:
+            var_store.update(extra_var_store)
 
         if proxy_url and "://" not in proxy_url:
             proxy_url = "http://" + proxy_url
@@ -306,6 +310,13 @@ class ApiExecutor:
         path = case.get("path") or "/"
         url = base_url + path
 
+        # 用例级超时：timeout_ms 字段覆盖 client 默认值
+        case_timeout = case.get("timeout_ms")
+        if case_timeout:
+            _timeout = case_timeout / 1000.0  # ms → s
+        else:
+            _timeout = None  # 使用 client 创建时的默认值(30s)
+
         # ── 解析动态参数占位符 ──────────────────────────────────────────────
         case_headers = resolve_obj(case.get("headers") or {}, var_store, custom_scripts)
         params       = resolve_obj(case.get("params")  or {}, var_store, custom_scripts)
@@ -328,7 +339,10 @@ class ApiExecutor:
                 req_kwargs["json"] = body
 
         try:
-            resp = await client.request(method, url, **req_kwargs)
+            req_kwargs_final = {**req_kwargs}
+            if _timeout is not None:
+                req_kwargs_final["timeout"] = _timeout
+            resp = await client.request(method, url, **req_kwargs_final)
             duration_ms = int((time.time() - t0) * 1000)
             assertion_results = self._run_assertions(resp, duration_ms, case.get("assertions") or [])
             passed = all(a["passed"] for a in assertion_results)

@@ -45,6 +45,10 @@ class TestTask(Base):
     doc_snapshot = Column(Text, nullable=True)
     doc_hash = Column(String(64), nullable=True)
 
+    # ── AI 场景规划持久化 ─────────────────────────────────────────────────────
+    # plan_scenes 接口生成的场景列表，格式: [{id, name, priority, description, steps_desc, expected, recorded}, ...]
+    scene_plan = Column(JSON, nullable=True)
+
 
 class TestCase(Base):
     __tablename__ = "test_cases"
@@ -67,6 +71,10 @@ class TestCase(Base):
     steps_json = Column(JSON, nullable=True)
     # 浏览器矩阵执行结果快照：{chromium: {status, duration}, firefox: {...}, ...}
     browser_matrix = Column(JSON, nullable=True)
+
+    # ── 用例来源 ──────────────────────────────────────────────────────────────
+    # recorded=录制产生  ai_generated=AI生成  manual=手动创建
+    source = Column(String(20), nullable=True, default="manual")
 
     # ── 权限与隔离 ──
     created_by = Column(String(100), nullable=True, index=True)
@@ -238,6 +246,7 @@ class ApiProject(Base):
     auth_error_patterns = Column(JSON, nullable=True)
     proxy_url = Column(String(512), nullable=True, default="")
     hosts_map = Column(Text, nullable=True, default="")
+    environments = Column(JSON, nullable=True)  # [{name, base_url}] 多环境配置
     created_by = Column(String(100), nullable=True, index=True)
     workspace_id = Column(Integer, nullable=True, index=True)  # 所属工作空间（避免与自身 project 概念冲突）
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -262,6 +271,7 @@ class ApiCase(Base):
     priority = Column(String(10), default="P1")
     enabled = Column(Boolean, default=True)
     description = Column(Text, nullable=True, default='')
+    timeout_ms = Column(Integer, nullable=True)  # 用例级超时（毫秒），None=使用项目默认30s
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -320,6 +330,27 @@ class GlobalVariable(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class MockRule(Base):
+    """Mock 规则：匹配请求路径+方法，返回预设响应体。"""
+    __tablename__ = "mock_rules"
+
+    id = Column(Integer, primary_key=True, index=True)
+    project_id = Column(Integer, nullable=True, index=True)  # 关联接口项目，None=全局
+    name = Column(String(255), nullable=False)
+    method = Column(String(10), default="GET")     # GET/POST/PUT/DELETE/ANY
+    path = Column(String(1024), nullable=False)    # 匹配路径，如 /api/users/{id}
+    status_code = Column(Integer, default=200)
+    response_headers = Column(JSON, nullable=True)  # {"Content-Type": "application/json"}
+    response_body = Column(Text, nullable=True)    # 响应体，支持 {{var}} 模板
+    match_params = Column(JSON, nullable=True)     # {key: value} 请求参数匹配条件，空=匹配所有
+    delay_ms = Column(Integer, default=0)          # 模拟延迟（毫秒）
+    enabled = Column(Boolean, default=True)
+    description = Column(Text, nullable=True, default="")
+    created_by = Column(String(100), nullable=True)
+    workspace_id = Column(Integer, nullable=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class TestPlan(Base):
     """测试计划：将若干接口用例按顺序组合，共享变量上下文，生成步骤级报告。"""
     __tablename__ = "test_plans"
@@ -333,6 +364,8 @@ class TestPlan(Base):
     hosts_map = Column(Text, nullable=True, default="")
     created_by = Column(String(100), nullable=True, index=True)
     webhook_token = Column(String(128), nullable=True, index=True)
+    cron_expr = Column(String(100), nullable=True)     # Cron 表达式，如 "0 9 * * 1-5"
+    cron_enabled = Column(Boolean, default=False)      # 是否启用定时执行
     workspace_id = Column(Integer, nullable=True, index=True)  # 所属工作空间
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -508,6 +541,21 @@ async def init_database():
         "ALTER TABLE test_reports ADD COLUMN browser VARCHAR(50) DEFAULT 'chromium'",
         "ALTER TABLE test_reports ADD COLUMN script_path VARCHAR(512)",
         "ALTER TABLE test_reports ADD COLUMN finished_at DATETIME",
+        # 多环境支持
+        "ALTER TABLE api_projects ADD COLUMN environments JSON",
+        # global_headers（已在模型定义，兼容旧库）
+        "ALTER TABLE api_projects ADD COLUMN global_headers JSON",
+        # 测试计划定时执行
+        "ALTER TABLE test_plans ADD COLUMN cron_expr VARCHAR(100)",
+        "ALTER TABLE test_plans ADD COLUMN cron_enabled BOOLEAN DEFAULT 0",
+        # 用例级超时
+        "ALTER TABLE api_cases ADD COLUMN timeout_ms INTEGER",
+        # Mock 规则请求参数匹配
+        "ALTER TABLE mock_rules ADD COLUMN match_params JSON",
+        # 用例来源标记
+        "ALTER TABLE test_cases ADD COLUMN source VARCHAR(20) DEFAULT 'manual'",
+        # 任务级 AI 场景规划结果持久化
+        "ALTER TABLE test_tasks ADD COLUMN scene_plan JSON",
     ]:
         try:
             async with engine.begin() as conn:

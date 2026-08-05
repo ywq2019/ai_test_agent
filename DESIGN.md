@@ -283,9 +283,152 @@ JWT 中间件统一验证所有 `/api/` 请求，白名单（登录、健康检�
 | 限流 | slowapi | 按真实 IP，支持反向代理 |
 | 反向代理 | Nginx（可选） | WebSocket 升级，HTTPS，静态资源缓存 |
 | 并发控制 | asyncio.Semaphore + set | 进程内轻量，无外部依赖 |
+| 任务队列 | ARQ + Redis（可选） | 多 Worker 持久化，不配置降级 BackgroundTasks |
+| 定时调度 | APScheduler | Cron 定时计划，重启自动恢复 |
+
+---
+
+## 十七、WebUI 场景规划：AI 只做"测什么"，人来做"怎么点"
+
+### 17.1 根本问题：AI 生成的 selector 是猜的
+
+AI 看到的是静态元素元数据，它在推断 `[data-testid="login-btn"]` 能否点到。SPA 动态 id、条件渲染、弹窗时序，任何细节偏差就失败。录制器则是从真实 DOM 里提取 selector，亲测能用。
+
+**结论：AI 应该只做"测什么"（场景规划），不做"怎么点"（steps_json 生成）。**
+
+### 17.2 场景规划接口设计
+
+`POST /cases/plan-scenes/{task_id}` 接受可选的功能描述，输入：
+
+1. **页面关键元素**（按功能区分组：表单输入/操作按钮/导航链接/下拉选择，去重取前 8）
+2. **已有用例名称**（注入 Prompt，防止生成重复场景）
+3. **需求文档摘要**（task.doc_snapshot 前 800 字，截断到最近句号）
+4. **场景数量**：有文档 → 8-10，有元素 → 6-8，无信息 → 5-6
+
+输出 5 个落地维度的场景列表，每个场景含名称、优先级、操作步骤描述（无 selector）、预期结果。结果持久化到 `TestTask.scene_plan`，支持追加规划（保留已录制场景）。
+
+**5 个落地维度**（对应录制器能捕捉的操作）：
+- **核心业务流程**（P0）：页面主要功能的 happy path
+- **表单验证**（P1）：必填/格式/联动/提交拦截
+- **数据增删改**（P1）：创建→列表出现，编辑→内容更新，删除→确认弹窗→消失
+- **列表与筛选**（P1）：搜索/条件筛选/分页/排序/清空/空态
+- **异常与错误反馈**（P1）：错误提示/空状态/加载态
+
+不选"权限控制"和"并发"，因为这两个在单 session 录制里无法实现。
+
+### 17.3 场景 → 录制联动
+
+```
+AI 规划 → 场景列表（抽屉）
+           → 点「开始录制」
+              → 关抽屉，启动有头浏览器
+              → 用户录制操作
+              → 停止录制 → AI 健壮化 → 保存用例
+              → 场景标记 recorded=true（同步持久化后端）
+              → 重新打开抽屉，继续下一个场景
+```
+
+场景卡片支持行内编辑名称/描述，步骤预览默认折叠，减少视觉噪音。"重新规划"时保留已录制场景，只清空未录制的。
+
+---
+
+## 十八、录制步骤健壮化：step_hardener
+
+录制器已有多 selector 候选（按 data-testid > id > name > aria-label > :has-text > class > tag 优先级生成），但原始候选质量参差不齐——动态数字 id、哈希 class 混在其中，执行时仍会失败。
+
+`skills/step_hardener.py` 在录制保存时自动运行：
+
+### 18.1 Selector 评级（A/B/C/D）
+
+| 等级 | Selector 特征 | 示例 |
+| --- | --- | --- |
+| A | data-testid / aria-label / name / placeholder | `[data-testid="login-btn"]` |
+| B | :has-text() / role / type=submit | `button:has-text("登录")` |
+| C | .className / 普通 #id | `.submit-btn`, `#login-form` |
+| D | 动态数字 id / 哈希 class / 纯 tag | `#btn-20241105`, `.abc123def` |
+
+### 18.2 候选 selector 推导规则
+
+从已有 selector + description + value 规则推导更多候选，自动排序：
+- 从 `#id` 推导 `[name=id]` / `[aria-label=id]`
+- 从 description 提取关键词生成 `:has-text("...")`
+- fill/type 步骤：value 作为 `[placeholder=value]` 候选
+- 合并已有候选，按 A→B→C→D 重新排序
+
+### 18.3 关键操作后自动插入断言
+
+检测"登录/提交/确认/删除"等关键操作（click 动作 + 语义关键词），若下一步不是 assert/wait，自动插入：
+```
+wait { timeout: 3000, optional: true }
+assert_visible { selector: "[role='alert'],.el-message,.toast", optional: true }
+```
+
+### 18.4 前端步骤编辑器
+
+用例编辑弹窗升级为双 Tab：
+- **基本信息**：原有文本表单
+- **步骤编辑器**：步骤表格，每行显示健壮度评级（A/B/C/D 彩色标签）、action 下拉、selector（D 级标红，点击展开所有备选一键切换）、value/expected、超时/optional
+
+步骤编辑保存时同步生成 `steps` 可读文本（向后兼容报告显示）。
+
+---
+
+## 十九、接口自动化 WebSocket 隔离
+
+原来接口生成/执行/压测用固定 client_id（`"api_gen"` / `"api_exec"` / `"api_load"`），多用户同时操作不同项目时进度互串。
+
+改为按 project_id 动态路由：
+
+```
+api_gen_{project_id}   → 该项目的 AI 生成进度
+api_exec_{project_id}  → 该项目的执行进度
+api_load_{project_id}  → 该项目的压测实时指标
+```
+
+前端在发起请求前先 `connectWs(`api_gen_${project.id}`)` 订阅正确频道，后端 background task 里用相同 client_id broadcast。项目 A 和项目 B 的进度完全隔离。
+
+---
+
+## 二十、覆盖度优化耗时控制
+
+原设计：每模块两轮 LLM（第一轮 90s + 第二轮 60s），并发 Semaphore(2)。  
+8 个模块最坏耗时 = ceil(8/2) × 150s = **600s**，超出 axios 420s 超时。
+
+优化后：
+- 两轮合并为单轮（8维度简化为5维度，关键维度保留），单模块 LLM timeout = 60s
+- 并发 Semaphore(2) → **Semaphore(4)**
+- 模块数量上限 **MAX_MODULES = 8**，超出按用例数降序取前 8
+- 最坏耗时 = ceil(8/4) × 60s = **120s**
+
+质量损失：第二轮"盲区确认"的额外补充场景（平均 1-2 条/模块）换取 5× 速度提升，可接受。
+
+---
+
+## 二十一、Mock 服务
+
+轻量内置 Mock，路由注册在 `/mock/*`，不经过 JWT 中间件（前端联调不需要 token）。
+
+规则匹配优先级：method + path 精确匹配 → path 通配符匹配 → 404。请求参数匹配（`match_params` JSON 字段）支持对请求体或查询参数做子集匹配。每次命中记录请求日志，便于调试。
+
+---
+
+## 二十二、定时执行调度器
+
+测试计划支持 Cron 定时触发，`api/scheduler.py` 使用 APScheduler：
+
+```python
+scheduler = AsyncIOScheduler()
+
+async def init_scheduler():
+    # 扫描所有 cron_enabled=True 的计划，注册到 scheduler
+    # 服务重启时自动恢复，不依赖外部存储
+    ...
+```
+
+Cron 表达式存在 `TestPlan.cron_expr`，启用/禁用切换时动态 add_job / remove_job，不需要重启服务。
 
 ---
 
 ## 一句话总结
 
-> 平台的设计主线是**把 AI 能力嵌入测试生命周期的每个环节**——用录制回放降低 WebUI 脚本编写门槛，用 ActionStep 统一录制/执行/导出的数据格式，用增量更新避免旧用例丢失，用工作空间支持团队协作，用三层变量池打通接口链路，用 RAG 替代硬截断，用多级兜底保证各种场景下都能生成——整体目标是让测试工程师从重复劳动中解放出来，专注于测试策略和质量判断。
+> 平台的设计主线是**把 AI 能力嵌入测试生命周期的每个环节**——场景规划让 AI 决定"测什么"，录制让人负责"怎么点"，健壮化保证录制结果的执行可靠性，可视化步骤编辑器让调整有据可查，工作空间支持团队协作，三层变量池打通接口链路，RAG 替代硬截断，多级兜底保证各种场景下都能生成——整体目标是让测试工程师从重复劳动中解放出来，专注于测试策略和质量判断。

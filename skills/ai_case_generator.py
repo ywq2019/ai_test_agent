@@ -1697,8 +1697,16 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
         if not has_compat:
             extra_tasks.append("compatibility")
 
+        # 模块数量过多时只取前 8 个（按模块用例数降序，优先覆盖大模块）
+        MAX_MODULES = 8
+        if len(existing_modules) > MAX_MODULES:
+            sorted_modules = sorted(existing_modules, key=lambda m: len(m.get("cases", [])), reverse=True)
+            skipped = len(existing_modules) - MAX_MODULES
+            existing_modules = sorted_modules[:MAX_MODULES]
+            logger.info(f"模块过多，跳过 {skipped} 个小模块，只优化前 {MAX_MODULES} 个")
+
         total_tasks = len(existing_modules) + len(extra_tasks)
-        sem = asyncio.Semaphore(2)
+        sem = asyncio.Semaphore(4)   # 提升并发：模块间互不依赖
         completed = [0]
 
         async def _progress_done(label: str):
@@ -1799,10 +1807,7 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
     async def _optimize_one_module(
         self, module_name: str, existing_cases: list
     ) -> list:
-        """分析单模块现有用例的覆盖盲区，分两轮输出新增用例。
-        第一轮：多维度系统检查（8大维度）
-        第二轮：对第一轮结果做盲区确认，防止「自认为已覆盖」遗漏
-        """
+        """分析单模块现有用例的覆盖盲区，补充缺失场景（单轮，控制耗时）。"""
         # 展示全部已有用例（最多 40 条），让 LLM 充分了解已有覆盖
         case_summary = "\n".join(
             f"  [{c.get('id','')}] {c.get('name','')} "
@@ -1816,23 +1821,21 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
             "Never repeat or copy existing cases. Output ONLY valid JSON."
         )
 
-        # ── 第一轮：8 大维度全面检查 ──────────────────────────────────────
-        prompt_round1 = f"""深度分析「{module_name}」模块现有用例的覆盖盲区，补充缺失场景（3-8条新用例）。
+        prompt = f"""深度分析「{module_name}」模块现有用例的覆盖盲区，补充缺失场景（3-6条新用例）。
 
 已有用例（{len(existing_cases)}条）：
 {case_summary}
 
-请逐项检查以下8个维度，找出还没有被覆盖的场景：
-1. **等价类**：有效/无效输入的所有代表值是否都有？
-2. **边界值**：最大值、最小值、临界值±1、空值、超长字符串是否测试？
-3. **异常分支**：网络超时/断开、接口报错、数据库异常、文件上传失败是否覆盖？
-4. **权限控制**：未登录访问、越权访问、不同角色操作差异是否测试？
-5. **并发/重复**：重复提交、连续快速点击、多用户同时操作是否覆盖？
-6. **状态转换**：功能的合法/非法状态流转（如订单状态机、审批流）是否完整？
-7. **数据完整性**：脏数据、特殊字符（`<>'"&`）、SQL注入关键字输入是否验证？
-8. **UI/交互**：分页加载、排序、筛选、搜索关键词高亮是否覆盖？
+请逐项检查以下维度，找出还没有被覆盖的场景：
+1. **等价类/边界值**：无效输入、空值、超长字符串、最大/最小值是否覆盖？
+2. **异常分支**：操作失败、接口报错、数据缺失是否有对应用例？
+3. **权限/状态**：不同角色、状态流转（如未登录/已登录）是否区分？
+4. **数据完整性**：特殊字符（`<>'"&`）、重复提交、并发操作是否验证？
+5. **UI交互**：分页、排序、筛选、搜索等交互操作是否覆盖？
 
-只输出纯JSON，只包含新增用例（不重复已有用例）：
+只在真正发现盲区时才补充，已覆盖充分则返回空列表（最多6条）。
+
+只输出纯JSON：
 {{
   "new_cases": [
     {{
@@ -1848,65 +1851,18 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
   ]
 }}"""
 
-        round1_cases = []
         try:
-            raw1 = await self._run_claude_subprocess(system_prompt, prompt_round1, timeout_secs=90)
-            data1 = json.loads(raw1)
-            round1_cases = data1.get("new_cases", [])
-            logger.info(f"模块「{module_name}」第一轮优化: 新增 {len(round1_cases)} 条")
+            raw = await self._run_claude_subprocess(system_prompt, prompt, timeout_secs=60)
+            data = json.loads(raw)
+            new_cases = data.get("new_cases", [])
+            logger.info(f"模块「{module_name}」优化: 新增 {len(new_cases)} 条")
+            return new_cases
         except json.JSONDecodeError as e:
-            logger.error(f"模块「{module_name}」第一轮优化返回非法 JSON: {e}")
-        except Exception as e:
-            logger.warning(f"模块「{module_name}」第一轮优化失败: {e}")
-
-        if not round1_cases:
+            logger.error(f"模块「{module_name}」优化返回非法 JSON: {e}")
             return []
-
-        # ── 第二轮：盲区确认——让另一视角判断第一轮是否还有遗漏 ──────────
-        all_cases_summary = case_summary + "\n" + "\n".join(
-            f"  [NEW{i+1:03d}] {c.get('name','')} | {c.get('test_method','')}"
-            for i, c in enumerate(round1_cases)
-        )
-        prompt_round2 = f"""你是一位严格的QA审核员。针对「{module_name}」模块，第一轮已有如下测试用例：
-
-{all_cases_summary}
-
-请以批判性视角审视：**以上用例还缺少哪些场景？**
-重点关注容易被忽视的盲区：
-- 异常恢复：操作失败后重试、回滚是否有用例？
-- 跨模块联动：本模块操作影响其他模块数据是否有断言？
-- 极端数据：emoji、全角字符、超大文件（>100MB）、0/负数/小数输入？
-- 定时/异步：延迟执行、后台任务完成通知是否验证？
-
-如果已经覆盖充分，返回空列表。只在真正发现盲区时才补充（最多3条）。
-
-只输出纯JSON：
-{{
-  "new_cases": [
-    {{
-      "id": "NEW001",
-      "name": "用例名称",
-      "priority": "P2",
-      "type": "功能测试",
-      "test_method": "错误推测",
-      "preconditions": "前置条件",
-      "steps": ["1. 操作"],
-      "expected": "预期结果"
-    }}
-  ]
-}}"""
-
-        round2_cases = []
-        try:
-            raw2 = await self._run_claude_subprocess(system_prompt, prompt_round2, timeout_secs=60)
-            data2 = json.loads(raw2)
-            round2_cases = data2.get("new_cases", [])
-            if round2_cases:
-                logger.info(f"模块「{module_name}」第二轮盲区确认: 补充 {len(round2_cases)} 条")
         except Exception as e:
-            logger.debug(f"模块「{module_name}」第二轮盲区确认跳过: {e}")
-
-        return round1_cases + round2_cases
+            logger.warning(f"模块「{module_name}」优化失败: {e}")
+            return []
 
     # ------------------------------------------------------------------
     # 全文分段索引：覆盖任意长度文档，供精准上下文定位使用

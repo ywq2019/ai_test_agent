@@ -260,12 +260,14 @@ class RecordingSession:
 
 async def start_recording(task_id: int, url: str,
                           browser_type: str = "chromium",
-                          ws_callback: Optional[Callable] = None) -> str:
+                          ws_callback: Optional[Callable] = None,
+                          session_id: Optional[str] = None) -> str:
     """启动有头浏览器，注入录制脚本，开始轮询事件。返回 session_id。"""
     if not _PLAYWRIGHT_AVAILABLE:
         raise RuntimeError("playwright 未安装，请运行 pip install playwright && playwright install")
 
-    session_id = str(uuid.uuid4())[:8]
+    if not session_id:
+        session_id = str(uuid.uuid4())[:8]
     session = RecordingSession(session_id, task_id, url, browser_type, ws_callback)
     _sessions[session_id] = session
     logger.info(f"[Recorder] session={session_id} 会话已创建")

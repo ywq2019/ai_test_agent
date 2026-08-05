@@ -47,6 +47,17 @@
             <el-button type="warning" plain @click="showCodeAnalyzeDialog">
               <el-icon style="margin-right:4px"><Document /></el-icon>代码可行性分析
             </el-button>
+            <!-- 导入按钮 -->
+            <el-upload
+              :show-file-list="false"
+              accept=".json,.har"
+              :before-upload="handleImportFile"
+              style="display:inline-block"
+            >
+              <el-button :loading="importing">
+                <el-icon style="margin-right:4px"><Upload /></el-icon>导入
+              </el-button>
+            </el-upload>
             <el-button type="danger" :icon="Delete" @click="() => deleteCases()"
               :disabled="selectedCases.length === 0">删除选中({{ selectedCases.length }})</el-button>
             <el-button :icon="Refresh" @click="loadCases" :loading="refreshing">刷新</el-button>
@@ -107,30 +118,24 @@
             @row-click="(row, col, e) => handleRowClick(row, col, e, caseTableRef)"
             stripe style="margin-top:12px">
             <el-table-column type="selection" width="45" />
-            <el-table-column label="接口" min-width="360">
+            <el-table-column label="用例" min-width="360">
               <template #default="{ row }">
                 <template v-if="row._isGroup">
                   <div class="group-cell">
                     <div class="group-cell-header">
                       <el-icon class="group-expand-icon" :class="{ expanded: expandedGroups[row.id] }"><ArrowRight /></el-icon>
-                      <span class="group-cell-path">{{ row.path }}</span>
+                      <span class="group-cell-path">{{ row.module }}</span>
                       <el-tag type="primary" size="small" effect="plain" style="margin-left:10px;flex-shrink:0">{{ row._count }} 个用例</el-tag>
                     </div>
-                    <el-input v-model="row.description" placeholder="点击添加接口描述..."
-                      class="group-desc-field" @blur="saveGroupDescription(row)" />
                   </div>
                 </template>
                 <template v-else>
                   <div class="case-cell">
                     <el-tag :type="methodColor(row.method)" size="small" class="method-tag">{{ row.method }}</el-tag>
                     <span class="case-name">{{ row.name }}</span>
+                    <span style="font-size:11px;color:#c0c4cc;margin-left:6px">{{ row.path }}</span>
                   </div>
                 </template>
-              </template>
-            </el-table-column>
-            <el-table-column label="模块" width="90">
-              <template #default="{ row }">
-                <el-tag v-if="!row._isGroup && row.module" type="info" size="small" effect="plain">{{ row.module }}</el-tag>
               </template>
             </el-table-column>
             <el-table-column label="优先级" width="76">
@@ -143,7 +148,7 @@
                 <el-switch v-if="!row._isGroup" v-model="row.enabled" @change="toggleCase(row)" />
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="80" fixed="right" align="center">
+            <el-table-column label="操作" width="120" fixed="right" align="center">
               <template #default="{ row }">
                 <div v-if="!row._isGroup" class="table-action-btns">
                   <el-tooltip content="编辑" placement="top" :show-after="400">
@@ -156,6 +161,25 @@
                       <el-icon><Delete /></el-icon>
                     </el-button>
                   </el-tooltip>
+                  <el-dropdown trigger="click" placement="bottom-end">
+                    <el-button size="small" plain circle>
+                      <el-icon><More /></el-icon>
+                    </el-button>
+                    <template #dropdown>
+                      <el-dropdown-menu>
+                        <el-dropdown-item>
+                          <el-upload :show-file-list="false" accept=".csv"
+                            :before-upload="(f) => handleDataDrivenFile(f, row)"
+                            style="display:block;width:100%">
+                            <div style="display:flex;align-items:center;gap:6px;padding:0 2px">
+                              <el-icon><List /></el-icon>
+                              <span>CSV 数据驱动</span>
+                            </div>
+                          </el-upload>
+                        </el-dropdown-item>
+                      </el-dropdown-menu>
+                    </template>
+                  </el-dropdown>
                 </div>
               </template>
             </el-table-column>
@@ -209,6 +233,14 @@
                   </el-table-column>
                 </el-table>
                 <div class="exec-btn-wrap">
+                  <!-- 环境切换（有多环境配置时显示） -->
+                  <el-select v-if="currentProject?.environments?.length"
+                    v-model="selectedEnv" clearable placeholder="默认环境"
+                    size="small" style="width:100%;margin-bottom:8px">
+                    <el-option label="默认环境" value="" />
+                    <el-option v-for="env in currentProject.environments" :key="env.name"
+                      :label="`${env.name}：${env.base_url}`" :value="env.name" />
+                  </el-select>
                   <el-button type="success" :icon="VideoPlay" style="width:100%;height:38px;font-size:14px"
                     @click="executeSelected" :disabled="selectedUnitCases.length === 0" :loading="executing">
                     {{ executing ? '执行中...' : `执行选中 (${selectedUnitCases.length})` }}
@@ -516,6 +548,30 @@
         <el-form-item label="描述">
           <el-input v-model="projectForm.description" type="textarea" :rows="2" />
         </el-form-item>
+
+        <!-- 多环境配置 -->
+        <el-divider content-position="left" style="margin:8px 0">
+          <span style="font-size:12px;color:#909399">多环境（可选）</span>
+        </el-divider>
+        <el-form-item label="环境列表">
+          <div style="width:100%">
+            <div style="font-size:12px;color:#909399;margin-bottom:6px">
+              配置 dev/staging/prod 等环境，执行时可切换 Base URL，不影响主配置
+            </div>
+            <div v-for="(env, i) in projectForm.environments" :key="i"
+              style="display:flex;gap:6px;margin-bottom:6px;align-items:center">
+              <el-input v-model="env.name" placeholder="环境名（如 dev）" style="width:120px;flex-shrink:0" size="small" />
+              <el-input v-model="env.base_url" placeholder="https://dev-api.example.com" style="flex:1" size="small" />
+              <el-button size="small" text type="danger" @click="projectForm.environments.splice(i,1)">
+                <el-icon><Delete /></el-icon>
+              </el-button>
+            </div>
+            <el-button size="small" :icon="Plus"
+              @click="projectForm.environments.push({ name: '', base_url: '' })">
+              添加环境
+            </el-button>
+          </div>
+        </el-form-item>
         <el-form-item label="代理地址">
           <el-input v-model="projectForm.proxy_url"
             placeholder="留空直连，例：http://proxy:8080 或 socks5://user:pass@host:1080" />
@@ -597,6 +653,32 @@
             </el-button>
           </div>
         </el-form-item>
+
+        <!-- 全局 Headers -->
+        <el-divider content-position="left" style="margin:12px 0 8px">
+          <span style="font-size:12px;color:#909399">全局 Headers</span>
+        </el-divider>
+        <el-form-item label="全局 Headers">
+          <div style="width:100%">
+            <div style="font-size:12px;color:#909399;margin-bottom:6px">
+              每次请求自动附加，优先级低于用例自身的 Headers
+            </div>
+            <div v-for="(row, i) in projectForm.globalHeadersRows" :key="i"
+              style="display:flex;gap:6px;margin-bottom:6px;align-items:center">
+              <el-input v-model="row.key" placeholder="Header 名（如 X-App-Id）"
+                style="flex:1.5" size="small" />
+              <el-input v-model="row.value" placeholder="值"
+                style="flex:2" size="small" />
+              <el-button size="small" text type="danger" @click="projectForm.globalHeadersRows.splice(i,1)">
+                <el-icon><Delete /></el-icon>
+              </el-button>
+            </div>
+            <el-button size="small" :icon="Plus"
+              @click="projectForm.globalHeadersRows.push({ key: '', value: '' })">
+              添加 Header
+            </el-button>
+          </div>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="projectDialogVisible = false">取消</el-button>
@@ -664,190 +746,6 @@ async def create_order(user_id: int, product_id: int, quantity: int):
       :saving-cases="savingAnalyzeCases"
       @save-cases="handleSaveAnalyzeCases"
     />
-
-    <!-- 脚本函数管理 Dialog（抽离为独立组件） -->
-    <ScriptDialog
-      v-model="scriptDialogVisible"
-      <!-- Step 1：输入区 -->
-      <div v-if="analyzeStep === 1">
-        <el-alert
-          title="粘贴需求文档 + 接口实现代码，AI 将对比两者，识别缺失实现、行为不一致、代码额外限制和潜在风险。"
-          type="info" show-icon :closable="false" style="margin-bottom:16px"
-        />
-        <el-row :gutter="16">
-          <el-col :span="12">
-            <div style="font-size:13px;font-weight:600;color:#303133;margin-bottom:8px">
-              📄 需求文档 / 功能描述
-            </div>
-            <el-input
-              v-model="analyzeRequirement"
-              type="textarea"
-              :rows="14"
-              placeholder="粘贴需求文档内容，或者用自然语言描述接口的预期行为...
-
-例如：
-1. 创建订单接口，用户必须已登录
-2. 商品库存不足时返回 error_code=1001
-3. 单次购买数量上限为 999
-4. 超时返回 504，错误码 5001"
-            />
-          </el-col>
-          <el-col :span="12">
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-              <span style="font-size:13px;font-weight:600;color:#303133">💻 接口实现代码</span>
-              <el-select v-model="analyzeCodeLang" size="small" style="width:160px">
-                <el-option label="Python" value="python" />
-                <el-option label="Java" value="java" />
-                <el-option label="Go" value="go" />
-                <el-option label="Node.js" value="node" />
-                <el-option label="PHP" value="php" />
-                <el-option label="其他" value="other" />
-              </el-select>
-            </div>
-            <el-input
-              v-model="analyzeCode"
-              type="textarea"
-              :rows="14"
-              placeholder="粘贴 Controller / Handler / Service 代码..."
-            />
-          </el-col>
-        </el-row>
-      </div>
-
-      <!-- Step 2：分析中 -->
-      <div v-else-if="analyzeStep === 2" style="padding:40px 0;text-align:center">
-        <el-icon class="is-loading" style="font-size:40px;color:#409eff"><Loading /></el-icon>
-        <div style="margin-top:16px;font-size:15px;color:#409eff;font-weight:600">{{ analyzeStage }}</div>
-        <el-progress
-          :percentage="analyzeProgress"
-          :stroke-width="8"
-          :show-text="false"
-          status="striped"
-          striped striped-flow :duration="6"
-          style="margin:16px 40px 0"
-        />
-        <div style="font-size:12px;color:#909399;margin-top:8px">AI 正在对比需求与代码实现，约需 30-60 秒...</div>
-      </div>
-
-      <!-- Step 3：分析结果 -->
-      <div v-else-if="analyzeStep === 3 && analyzeReport">
-        <!-- 整体评估横幅 -->
-        <div class="analyze-summary-bar" :class="`risk-${analyzeReport.risk_level}`">
-          <el-icon style="font-size:18px">
-            <WarningFilled v-if="analyzeReport.risk_level==='high'" />
-            <Warning v-else-if="analyzeReport.risk_level==='medium'" />
-            <SuccessFilled v-else />
-          </el-icon>
-          <span class="analyze-risk-label">
-            风险等级：{{ {high:'高', medium:'中', low:'低'}[analyzeReport.risk_level] || analyzeReport.risk_level }}
-          </span>
-          <span class="analyze-summary-text">{{ analyzeReport.summary }}</span>
-          <el-tag size="small" type="info" effect="plain" style="margin-left:auto;flex-shrink:0">
-            发现 {{ analyzeReport.items?.length || 0 }} 个问题
-          </el-tag>
-        </div>
-
-        <!-- 差异条目列表 -->
-        <div v-if="analyzeReport.items?.length" class="analyze-items">
-          <!-- 按 type 分组展示 -->
-          <template v-for="typeKey in ['missing','mismatch','extra','risk']" :key="typeKey">
-            <div v-if="analyzeReport.items.filter(i=>i.type===typeKey).length">
-              <div class="analyze-type-header" :class="`type-${typeKey}`">
-                <span class="type-icon">{{ {missing:'🔴',mismatch:'🟡',extra:'🔵',risk:'⚠️'}[typeKey] }}</span>
-                <span class="type-label">{{ {missing:'缺失实现',mismatch:'行为不一致',extra:'代码额外限制',risk:'潜在风险'}[typeKey] }}</span>
-                <el-badge :value="analyzeReport.items.filter(i=>i.type===typeKey).length" type="info" />
-              </div>
-              <div
-                v-for="(item, idx) in analyzeReport.items.filter(i=>i.type===typeKey)"
-                :key="idx"
-                class="analyze-item"
-                :class="`severity-${item.severity}`"
-              >
-                <div class="analyze-item-title">
-                  <el-tag :type="{high:'danger',medium:'warning',low:'info'}[item.severity]" size="small" effect="plain">
-                    {{ {high:'严重',medium:'中等',low:'低'}[item.severity] }}
-                  </el-tag>
-                  <span style="font-weight:600;margin-left:8px">{{ item.title }}</span>
-                </div>
-                <div class="analyze-item-body">
-                  <div v-if="item.requirement && item.requirement!=='N/A'" class="analyze-row">
-                    <span class="analyze-row-label">需求描述</span>
-                    <span class="analyze-row-val">{{ item.requirement }}</span>
-                  </div>
-                  <div class="analyze-row">
-                    <span class="analyze-row-label">代码行为</span>
-                    <span class="analyze-row-val">{{ item.code_behavior }}</span>
-                  </div>
-                  <div class="analyze-row">
-                    <span class="analyze-row-label">测试重点</span>
-                    <span class="analyze-row-val" style="color:#409eff">{{ item.test_focus }}</span>
-                  </div>
-                  <div class="analyze-row">
-                    <span class="analyze-row-label">修复建议</span>
-                    <span class="analyze-row-val" style="color:#67c23a">{{ item.suggestion }}</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </template>
-        </div>
-        <el-empty v-else description="未发现明显差异，需求与实现基本一致 🎉" :image-size="80" style="margin:20px 0" />
-
-        <!-- 自动生成的差异验证用例预览 -->
-        <div v-if="analyzeReport.auto_cases?.length" style="margin-top:16px">
-          <div style="font-size:13px;font-weight:600;color:#303133;margin-bottom:8px;display:flex;align-items:center;gap:8px">
-            <el-icon color="#409eff"><Document /></el-icon>
-            已自动生成 {{ analyzeReport.auto_cases.length }} 条差异验证用例
-          </div>
-          <el-table :data="analyzeReport.auto_cases" size="small" border max-height="200" style="width:100%">
-            <el-table-column prop="name" label="用例名称" min-width="200" show-overflow-tooltip />
-            <el-table-column prop="method" label="方法" width="70" align="center">
-              <template #default="{ row }">
-                <el-tag size="small" :type="{GET:'success',POST:'primary',PUT:'warning',DELETE:'danger'}[row.method]||'info'">
-                  {{ row.method }}
-                </el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column prop="path" label="路径" width="160" show-overflow-tooltip />
-            <el-table-column prop="priority" label="优先级" width="70" align="center">
-              <template #default="{ row }">
-                <el-tag size="small" :type="{P0:'danger',P1:'warning',P2:'info'}[row.priority]||'info'">{{ row.priority }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column prop="_diff_ref" label="对应差异" min-width="140" show-overflow-tooltip />
-          </el-table>
-        </div>
-      </div>
-
-      <template #footer>
-        <!-- Step 1 -->
-        <template v-if="analyzeStep === 1">
-          <el-button @click="codeAnalyzeVisible = false">取消</el-button>
-          <el-button type="primary" @click="startCodeAnalyze"
-            :disabled="!analyzeRequirement.trim() || !analyzeCode.trim()">
-            开始分析
-          </el-button>
-        </template>
-        <!-- Step 2 -->
-        <template v-else-if="analyzeStep === 2">
-          <el-button @click="codeAnalyzeVisible = false">关闭</el-button>
-        </template>
-        <!-- Step 3 -->
-        <template v-else-if="analyzeStep === 3">
-          <el-button @click="analyzeStep = 1">重新分析</el-button>
-          <el-button @click="codeAnalyzeVisible = false">关闭</el-button>
-          <el-button
-            v-if="analyzeReport?.auto_cases?.length"
-            type="primary"
-            @click="saveAnalyzeCases"
-            :loading="savingAnalyzeCases"
-          >
-            <el-icon><DocumentAdd /></el-icon>
-            保存 {{ analyzeReport.auto_cases.length }} 条差异验证用例到用例库
-          </el-button>
-        </template>
-      </template>
-    </el-dialog>
 
     <!-- 脚本函数管理 Dialog（抽离为独立组件） -->
     <ScriptDialog
@@ -1110,6 +1008,7 @@ async def create_order(user_id: int, product_id: int, quantity: int):
       :editing-case="editingCase"
       :project-id="currentProject?.id"
       :fn-list="builtinFnList"
+      :module-list="existingModules"
       @saved="onCaseSaved"
     />
 
@@ -1170,7 +1069,7 @@ async def create_order(user_id: int, product_id: int, quantity: int):
 <script setup>
 import { ref, reactive, computed, onMounted, nextTick, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Edit, Delete, MagicStick, VideoPlay, Refresh, Loading, View, Document, DocumentAdd, WarningFilled, Warning, SuccessFilled, ArrowRight } from '@element-plus/icons-vue'
+import { Plus, Edit, Delete, MagicStick, VideoPlay, Refresh, Loading, View, Document, DocumentAdd, WarningFilled, Warning, SuccessFilled, ArrowRight, Upload, List, More } from '@element-plus/icons-vue'
 import { apiTestApi, scriptApi, gvarApi, downloadPdf } from '../api'
 import { marked } from 'marked'
 import ScriptDialog from './ApiTest/ScriptDialog.vue'
@@ -1195,10 +1094,12 @@ const projectForm = reactive({
   name: '', base_url: '', description: '',
   auth_type: 'none',
   auth_config: { token: '', key: 'X-API-Key', value: '', username: '', password: '' },
-  setup_cases: [],           // [{project_id, case_id, label, key}]
-  auth_error_patterns: [],   // [{field, value}]
-  proxy_url: '',             // HTTP/HTTPS/SOCKS5 代理，留空直连
-  hosts_map: '',             // hosts 映射，格式同 /etc/hosts
+  setup_cases: [],
+  auth_error_patterns: [],
+  proxy_url: '',
+  hosts_map: '',
+  globalHeadersRows: [],
+  environments: [],          // [{name, base_url}]
 })
 
 const loadAllCasesForSetup = async (visible) => {
@@ -1231,9 +1132,17 @@ const formatBodyPreview = (c) => {
 const casesGrouped = computed(() => {
   const groups = new Map()
   for (const c of cases.value) {
-    const key = c.path || '/'
+    const key = c.module || '通用'
     if (!groups.has(key)) {
-      groups.set(key, { id: `__g__${key}`, path: key, _isGroup: true, _count: 0, description: c.description || '', children: [] })
+      groups.set(key, {
+        id: `__g__${key}`,
+        module: key,
+        path: key,          // 兼容 group-cell 里的 row.path 显示
+        _isGroup: true,
+        _count: 0,
+        description: '',
+        children: [],
+      })
     }
     const g = groups.get(key)
     g.children.push(c)
@@ -1360,13 +1269,56 @@ const genStepDefs = [
   { label: '识别接口', start: 10, end: 25  },
   { label: '探测接口', start: 25, end: 40  },
   { label: '生成用例', start: 40, end: 85  },
-  { label: '校验断言', start: 85, end: 92  },
-  { label: '补全描述', start: 92, end: 99  },
+  { label: '校验断言', start: 85, end: 88  },
+  { label: 'AI自检',   start: 88, end: 95  },
+  { label: '补全描述', start: 95, end: 99  },
   { label: '完成',     start: 99, end: 100 },
 ]
 
 // ── 单测执行 ──
 const executing = ref(false)
+const selectedEnv = ref('')  // 执行时选择的环境名，空=使用项目默认 Base URL
+const importing = ref(false)
+
+const handleImportFile = async (file) => {
+  if (!currentProject.value) {
+    ElMessage.warning('请先选择项目')
+    return false
+  }
+  importing.value = true
+  try {
+    const formData = new FormData()
+    formData.append('file', file)
+    const res = await apiTestApi.importCases(currentProject.value.id, formData)
+    ElMessage.success(res.message || `成功导入 ${res.imported} 条用例`)
+    await loadCases()
+  } catch (e) {
+    ElMessage.error('导入失败：' + (e?.response?.data?.detail || e?.message || ''))
+  } finally {
+    importing.value = false
+  }
+  return false  // 阻止 el-upload 自动上传
+}
+
+const handleDataDrivenFile = async (file, caseRow) => {
+  if (!currentProject.value) return false
+  try {
+    const formData = new FormData()
+    formData.append('file', file)
+    connectWs(`api_exec_${currentProject.value.id}`)
+    executing.value = true
+    execProgress.value = 0
+    execResults.value = []
+    activeTab.value = 'unit'
+    await apiTestApi.dataDrivenExecute(currentProject.value.id, caseRow.id, formData)
+    ElMessage.success('数据驱动执行已启动，请查看执行结果')
+  } catch (e) {
+    executing.value = false
+    disconnectWs()
+    ElMessage.error('启动失败：' + (e?.response?.data?.detail || e?.message || ''))
+  }
+  return false
+}
 const execProgress = ref(0)
 const execStage = ref('')
 const lastExecStatus = ref('')
@@ -1536,6 +1488,8 @@ const showProjectDialog = async (p) => {
       auth_error_patterns: (p.auth_error_patterns || []).map(r => ({ ...r })),
       proxy_url: p.proxy_url || '',
       hosts_map: p.hosts_map || '',
+      globalHeadersRows: Object.entries(p.global_headers || {}).map(([k, v]) => ({ key: k, value: v })),
+      environments: (p.environments || []).map(e => ({ ...e })),
     })
   } else {
     Object.assign(projectForm, {
@@ -1545,6 +1499,8 @@ const showProjectDialog = async (p) => {
       auth_error_patterns: [],
       proxy_url: '',
       hosts_map: '',
+      globalHeadersRows: [],
+      environments: [],
     })
   }
   projectDialogVisible.value = true
@@ -1566,6 +1522,10 @@ const saveProject = async () => {
       auth_error_patterns: projectForm.auth_error_patterns.filter(r => r.field && r.value),
       proxy_url: projectForm.proxy_url || '',
       hosts_map: projectForm.hosts_map || '',
+      global_headers: Object.fromEntries(
+        projectForm.globalHeadersRows.filter(r => r.key.trim()).map(r => [r.key.trim(), r.value])
+      ),
+      environments: projectForm.environments.filter(e => e.name.trim() && e.base_url.trim()),
       workspace_id: wsStore.currentId || null,
     }
     if (editingProject.value) {
@@ -1862,6 +1822,12 @@ const toggleCase = async (c) => {
 }
 
 // ── CaseFormDialog 桥接 ──
+// 当前项目已有的模块列表（去重，供新建/编辑用例时选择）
+const existingModules = computed(() => {
+  const modules = cases.value.map(c => c.module).filter(Boolean)
+  return [...new Set(modules)]
+})
+
 // 子组件 saved 事件：(result, isEdit) → 更新本地 cases 列表
 const onCaseSaved = (result, isEdit) => {
   if (isEdit) {
@@ -1918,11 +1884,11 @@ const startGenerate = async () => {
   generating.value = true
   genProgress.value = 0
   genStage.value = '准备生成...'
-  connectWs('api_gen')
+  const wsGenId = `api_gen_${currentProject.value.id}`
+  connectWs(wsGenId)
 
   try {
     if (genTab.value === 'code') {
-      // 走代码分析路径
       await apiTestApi.generateFromCode(currentProject.value.id, {
         code: code,
         lang: genCodeLang.value,
@@ -1945,9 +1911,15 @@ const executeSelected = async () => {
   executing.value = true
   execProgress.value = 0
   execResults.value = []
-  connectWs('api_exec')
+  connectWs(`api_exec_${currentProject.value.id}`)
   try {
-    await apiTestApi.executeCases(currentProject.value.id, { case_ids: ids })
+    // 若选择了非默认环境，传入 env_base_url 覆盖项目 Base URL
+    const envObj = selectedEnv.value
+      ? (currentProject.value.environments || []).find(e => e.name === selectedEnv.value)
+      : null
+    const payload = { case_ids: ids }
+    if (envObj?.base_url) payload.env_base_url = envObj.base_url
+    await apiTestApi.executeCases(currentProject.value.id, payload)
   } catch (e) {
     executing.value = false
     disconnectWs()
@@ -1987,7 +1959,7 @@ const startLoad = async () => {
   chartData.elapsed = []; chartData.tps = []; chartData.avg_ms = []
   chartData.p95_ms = []; chartData.error_rate = []
   initChart()
-  connectWs('api_load')
+  connectWs(`api_load_${currentProject.value.id}`)
   try {
     await apiTestApi.startLoad(currentProject.value.id, { ...loadConfig, case_ids: ids })
   } catch (e) {

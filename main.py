@@ -215,7 +215,15 @@ async def lifespan(app: FastAPI):
     await _watchdog_reset_stale_tasks()
     logger.info("渗透测试 watchdog 检查完成")
 
+    # 初始化定时执行调度器（APScheduler）
+    from api.scheduler import init_scheduler
+    await init_scheduler()
+
     yield
+
+    # 关闭调度器
+    from api.scheduler import shutdown_scheduler
+    await shutdown_scheduler()
 
     # 关闭 ARQ 连接池
     from worker.arq_worker import close_arq_pool
@@ -408,6 +416,11 @@ os.makedirs(_reports_dir, exist_ok=True)
 app.mount("/reports", StaticFiles(directory=_reports_dir), name="reports")
 
 app.include_router(api_router, prefix="/api/v1")   # 聚合所有子路由
+
+# Mock 匹配器：/mock/* 不需要 JWT，放在 /api/v1 之外
+from api.routes import mock_catch_router
+app.include_router(mock_catch_router)
+
 app.websocket("/ws")(websocket_endpoint)
 
 

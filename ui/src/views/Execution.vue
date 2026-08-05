@@ -34,11 +34,15 @@
                     <el-icon><Download /></el-icon>导出 pytest 脚本
                   </el-dropdown-item>
                   <el-dropdown-item divided @click="toggleRecording">
-                    <el-icon><VideoCamera /></el-icon>{{ isRecording ? '停止录制' : '录制操作' }}
+                    <el-icon><VideoCamera /></el-icon>{{ isRecording ? '停止录制' : recordingStarting ? '启动中...' : '录制操作' }}
                   </el-dropdown-item>
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
+            <el-button type="success" size="default" @click="openScenePlanner" :disabled="!selectedTaskId">
+              <el-icon><MagicStick /></el-icon>
+              AI 规划场景
+            </el-button>
             <el-button type="primary" size="default" @click="executeAll" :loading="taskStore.isExecuting" :disabled="!selectedTaskId">
               <el-icon><VideoPlay /></el-icon>
               执行全部
@@ -227,10 +231,18 @@
 
     <!-- 录制 dialog -->
     <el-dialog v-model="recordingDialogVisible" title="录制操作" width="520px" :close-on-click-modal="false">
-      <el-alert v-if="isRecording" type="warning" show-icon :closable="false" style="margin-bottom:12px;">
+      <!-- 启动中状态 -->
+      <el-alert v-if="recordingStarting" type="info" show-icon :closable="false" style="margin-bottom:12px;">
+        <template #title>
+          <el-icon class="is-loading" style="margin-right:6px"><Loading /></el-icon>
+          浏览器启动中，请稍候（约 15-20 秒）...
+        </template>
+      </el-alert>
+      <!-- 录制中状态 -->
+      <el-alert v-else-if="isRecording" type="warning" show-icon :closable="false" style="margin-bottom:12px;">
         浏览器已弹出，请在页面中操作，步骤会实时预览。完成后点击「停止录制」。
       </el-alert>
-      <template v-if="!isRecording && recordedSteps.length">
+      <template v-if="!isRecording && !recordingStarting && recordedSteps.length">
         <el-alert type="success" show-icon :closable="false" style="margin-bottom:12px;">
           录制完成，共 {{ recordedSteps.length }} 个步骤
         </el-alert>
@@ -244,13 +256,203 @@
           </div>
         </div>
       </el-scrollbar>
-      <el-empty v-else-if="!isRecording" description="暂无步骤" />
+      <el-empty v-else-if="!isRecording && !recordingStarting" description="暂无步骤" />
       <template #footer>
         <el-button v-if="isRecording" type="danger" @click="stopRecording" :loading="recordingLoading">停止录制</el-button>
-        <el-button v-if="!isRecording && recordedSteps.length" type="primary" @click="saveRecording" :loading="recordingLoading">保存为用例</el-button>
+        <el-button v-if="!isRecording && !recordingStarting && recordedSteps.length" type="primary" @click="saveRecording" :loading="recordingLoading">保存为用例</el-button>
         <el-button @click="recordingDialogVisible = false">关闭</el-button>
       </template>
     </el-dialog>
+
+    <!-- ══ AI 场景规划侧抽屉 ══ -->
+    <el-drawer
+      v-model="scenePlannerVisible"
+      direction="rtl"
+      size="500px"
+      :close-on-click-modal="false"
+    >
+      <template #header>
+        <div style="display:flex;align-items:center;gap:10px;flex:1">
+          <el-icon size="20" color="#409eff"><MagicStick /></el-icon>
+          <span style="font-size:16px;font-weight:600">AI 场景规划</span>
+          <!-- 进度 -->
+          <template v-if="scenes.length">
+            <el-tag size="small" type="info" effect="plain">
+              {{ scenes.filter(s=>s.recorded).length }}/{{ scenes.length }} 已录制
+            </el-tag>
+            <el-progress
+              v-if="scenes.length"
+              :percentage="Math.round(scenes.filter(s=>s.recorded).length/scenes.length*100)"
+              :stroke-width="6"
+              style="width:80px;margin-left:4px"
+              :status="scenes.every(s=>s.recorded) ? 'success' : ''"
+            />
+          </template>
+        </div>
+      </template>
+
+      <!-- ── 输入区（未生成 / 需重新规划） ── -->
+      <div v-if="!scenes.length" class="scene-input-area">
+        <div class="scene-intro">
+          <p>AI 会从 <strong>5 个落地维度</strong>分析页面，自动规划场景列表：</p>
+          <div class="scene-dimensions">
+            <el-tag v-for="d in sceneDimensions" :key="d.name" size="small"
+              :type="d.type" effect="plain" class="dim-tag">
+              {{ d.name }}
+            </el-tag>
+          </div>
+        </div>
+
+        <!-- 无页面元素提示 -->
+        <el-alert v-if="!hasPageElements" type="warning" show-icon :closable="false"
+          style="margin-bottom:14px">
+          <template #title>尚未抓取页面元素</template>
+          <template #default>
+            <div style="margin-top:6px">
+              <div style="color:#606266;font-size:13px;margin-bottom:8px">
+                抓取后 AI 可根据页面实际结构规划场景，准确度更高。也可以跳过，在下方补充功能描述后直接生成。
+              </div>
+              <el-button size="small" type="warning" plain
+                :loading="parsingPage" @click="parseCurrentPage">
+                <el-icon><Connection /></el-icon>
+                {{ parsingPage ? '抓取中...' : '抓取页面元素' }}
+              </el-button>
+            </div>
+          </template>
+        </el-alert>
+        <!-- 已有元素时显示简要信息 -->
+        <div v-else class="page-elements-hint">
+          <el-icon size="13" color="#67c23a"><SuccessFilled /></el-icon>
+          已抓取页面元素
+          <el-button size="small" link @click="parseCurrentPage" :loading="parsingPage"
+            style="margin-left:4px">重新抓取</el-button>
+        </div>
+
+        <el-form label-position="top" size="small">
+          <el-form-item>
+            <template #label>
+              <span>页面功能描述
+                <span style="color:#909399;font-weight:400">（补充后 AI 更精准）</span>
+              </span>
+            </template>
+            <el-input
+              v-model="sceneDescription"
+              type="textarea" :rows="3"
+              placeholder="例：登录页，支持账号密码登录和短信验证码登录，登录失败提示错误原因，支持记住密码"
+            />
+          </el-form-item>
+        </el-form>
+
+        <el-button type="primary" style="width:100%;height:40px;font-size:14px"
+          :loading="scenePlanning" @click="planScenes(false)">
+          <el-icon style="margin-right:6px"><MagicStick /></el-icon>
+          {{ scenePlanning ? 'AI 分析中...' : '开始分析，生成场景' }}
+        </el-button>
+        <div v-if="scenePlanning" class="scene-planning-hint">
+          <el-icon class="is-loading"><Loading /></el-icon>
+          正在从 6 个测试维度分析页面，约需 15-30 秒...
+        </div>
+      </div>
+
+      <!-- ── 场景列表 ── -->
+      <div v-else class="scene-list-area">
+        <!-- 操作栏 -->
+        <div class="scene-toolbar">
+          <span style="font-size:13px;color:#606266">
+            点击场景卡片的「录制」按钮，录完自动保存为用例
+          </span>
+          <div style="display:flex;gap:6px">
+            <el-button size="small" :loading="scenePlanning" @click="planScenes(true)">
+              <el-icon><Plus /></el-icon>追加场景
+            </el-button>
+            <el-button size="small" text type="danger" @click="resetScenes">
+              重新规划
+            </el-button>
+          </div>
+        </div>
+
+        <div class="scene-list">
+          <div v-for="scene in scenes" :key="scene.id"
+            class="scene-card" :class="{ 'scene-recorded': scene.recorded }">
+
+            <!-- 卡片头部 -->
+            <div class="scene-card-header">
+              <div style="display:flex;align-items:center;gap:6px;flex:1;min-width:0">
+                <el-tag size="small"
+                  :type="scene.priority==='P0'?'danger':scene.priority==='P1'?'warning':'info'"
+                  effect="plain">{{ scene.priority }}</el-tag>
+                <el-tag v-if="scene.dimension" size="small" type="info" effect="plain"
+                  style="font-size:11px">{{ scene.dimension }}</el-tag>
+                <!-- 场景名行内编辑 -->
+                <template v-if="editingSceneId === scene.id">
+                  <el-input v-model="scene.name" size="small" style="flex:1"
+                    @blur="editingSceneId = null"
+                    @keyup.enter="editingSceneId = null"
+                    @keyup.esc="editingSceneId = null"
+                    autofocus />
+                </template>
+                <span v-else class="scene-name" @click="editingSceneId = scene.id"
+                  title="点击编辑名称">{{ scene.name }}</span>
+              </div>
+              <el-tag v-if="scene.recorded" size="small" type="success" effect="dark">✓ 已录制</el-tag>
+              <el-button v-else link size="small" type="danger" style="padding:0;margin-left:4px"
+                @click="removeScene(scene.id)" title="删除此场景">
+                <el-icon><Close /></el-icon>
+              </el-button>
+            </div>
+
+            <!-- 描述（可行内编辑） -->
+            <div v-if="editingSceneId === scene.id">
+              <el-input v-model="scene.description" size="small" type="textarea" :rows="2"
+                style="margin-top:6px" placeholder="场景描述" />
+            </div>
+            <div v-else class="scene-desc" @click="editingSceneId = scene.id"
+              title="点击编辑描述">{{ scene.description }}</div>
+
+            <!-- 步骤预览（折叠） -->
+            <el-collapse-transition>
+              <div v-if="expandedSceneId === scene.id" class="scene-steps">
+                <div v-for="(step, i) in scene.steps_desc" :key="i" class="scene-step-item">
+                  <span class="step-num">{{ i + 1 }}</span>
+                  <span>{{ step }}</span>
+                </div>
+                <div v-if="scene.expected" class="scene-expected" style="margin-top:6px">
+                  <el-icon size="12" color="#67c23a"><SuccessFilled /></el-icon>
+                  {{ scene.expected }}
+                </div>
+              </div>
+            </el-collapse-transition>
+
+            <!-- 展开/收起步骤 -->
+            <div v-if="scene.steps_desc && scene.steps_desc.length"
+              class="scene-expand-btn" @click="toggleExpandScene(scene.id)">
+              <el-icon size="12"><ArrowDown v-if="expandedSceneId !== scene.id" /><ArrowUp v-else /></el-icon>
+              {{ expandedSceneId === scene.id ? '收起' : `查看 ${scene.steps_desc.length} 步` }}
+            </div>
+
+            <!-- 操作按钮 -->
+            <div class="scene-actions">
+              <el-button v-if="!scene.recorded" type="primary" size="small"
+                @click="startSceneRecording(scene)"
+                :loading="scene.id === recordingSceneId">
+                <el-icon><VideoCamera /></el-icon>开始录制
+              </el-button>
+              <el-button v-else size="small" plain @click="startSceneRecording(scene)">
+                <el-icon><Refresh /></el-icon>重新录制
+              </el-button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 全部完成提示 -->
+        <div v-if="scenes.length && scenes.every(s => s.recorded)" class="scene-done-banner">
+          <div style="font-size:15px;color:#27ae60;font-weight:600;margin-bottom:4px">
+            🎉 所有场景已录制完成
+          </div>
+          <div style="font-size:13px;color:#606266">用例已保存，可在「用例管理」页查看并执行</div>
+        </div>
+      </div>
+    </el-drawer>
 
     </template>
   </div>
@@ -267,9 +469,10 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   VideoCamera, VideoPause, Setting, Download, VideoPlay, Timer,
   RefreshRight, MagicStick, Refresh, Delete, Connection, MoreFilled, DocumentChecked,
+  Loading, SuccessFilled, Plus, Close, ArrowDown, ArrowUp,
 } from '@element-plus/icons-vue'
 import { useWebSocket } from '../composables/useWebSocket'
-import { recordingApi, envVarApi, multiBrowserApi, pytestExportApi, reportApi } from '../api/index'
+import { recordingApi, envVarApi, multiBrowserApi, pytestExportApi, reportApi, caseApi } from '../api/index'
 
 const route = useRoute()
 const router = useRouter()
@@ -307,10 +510,34 @@ const historySelected = ref([])
 // ── 录制 ──
 const isRecording = ref(false)
 const recordingLoading = ref(false)
+const recordingStarting = ref(false)   // Chrome 正在启动中
 const recordingDialogVisible = ref(false)
 const recordedSteps = ref([])
 const recordingCaseName = ref('')
 let _recordingSessionId = null
+let _recWsDisconnect = null  // 录制专用 WS 连接的断开函数
+
+// 录制专用 WebSocket（监听 rec_{task_id} 频道）
+const { connect: _recWsConnect, disconnect: _recWsDisconnectFn } = useWebSocket((msg) => {
+  if (msg.type === 'recording_ready') {
+    // Chrome 启动完成，切换到录制状态
+    _recordingSessionId = msg.session_id
+    isRecording.value = true
+    recordingStarting.value = false
+    recordingLoading.value = false
+    ElMessage.success('浏览器已就绪，请在浏览器中操作')
+  } else if (msg.type === 'recording_failed') {
+    // 启动失败
+    recordingStarting.value = false
+    recordingLoading.value = false
+    isRecording.value = false
+    ElMessage.error('录制启动失败：' + (msg.error || '未知错误'))
+    _recWsDisconnectFn()
+  } else if (msg.type === 'rec_step') {
+    // 实时步骤推送（已有逻辑）
+    if (msg.step) recordedSteps.value.push(msg.step)
+  }
+})
 
 // ── 环境变量 ──
 const envVarDialogVisible = ref(false)
@@ -320,6 +547,128 @@ const newEnvVar = ref({ key: '', value: '', is_secret: false })
 
 // ── pytest ──
 const exportLoading = ref(false)
+
+// ── AI 场景规划 ──────────────────────────────────────────────────────────────
+const scenePlannerVisible = ref(false)
+const scenePlanning = ref(false)
+const sceneDescription = ref('')
+const scenes = ref([])
+const recordingSceneId = ref(null)
+const editingSceneId = ref(null)     // 行内编辑中的场景 id
+const expandedSceneId = ref(null)    // 展开步骤预览的场景 id
+
+// 5 个测试维度标签
+const sceneDimensions = [
+  { name: '核心业务流程', type: 'success' },
+  { name: '表单验证',     type: 'warning' },
+  { name: '数据增删改',   type: 'primary' },
+  { name: '列表与筛选',   type: 'info'    },
+  { name: '异常与错误反馈', type: 'danger' },
+]
+
+// 当前任务是否已抓取页面元素
+const hasPageElements = computed(() => {
+  const task = taskStore.tasks.find(t => t.id === selectedTaskId.value)
+  return task?.page_elements?.length > 0
+})
+
+// 抓取当前任务页面元素
+const parsingPage = ref(false)
+const parseCurrentPage = async () => {
+  if (!selectedTaskId.value) return
+  const task = taskStore.tasks.find(t => t.id === selectedTaskId.value)
+  if (!task?.url) { ElMessage.warning('任务没有配置 URL，无法抓取页面元素'); return }
+  parsingPage.value = true
+  try {
+    await taskStore.parsePage(task.url, task.browser || 'chromium', selectedTaskId.value)
+    // 刷新 tasks 列表让 hasPageElements computed 更新
+    await taskStore.fetchTasks(wsStore.currentId)
+    ElMessage.success('页面元素抓取完成，AI 规划将更加精准')
+  } catch (e) {
+    ElMessage.error('抓取失败：' + (e?.response?.data?.detail || e?.message || ''))
+  } finally {
+    parsingPage.value = false
+  }
+}
+
+const openScenePlanner = () => {
+  scenePlannerVisible.value = true
+}
+
+// 从后端加载持久化的场景规划（从 Cases 页跳转过来时调用）
+const loadPersistedScenes = async () => {
+  if (!selectedTaskId.value) return
+  try {
+    const res = await caseApi.getScenePlan(selectedTaskId.value)
+    if (res.scenes && res.scenes.length) {
+      scenes.value = res.scenes
+    }
+  } catch { /* 无场景规划时静默忽略 */ }
+}
+
+// append=false → 重新规划；append=true → 追加规划（保留已录制）
+const planScenes = async (append = false) => {
+  if (!selectedTaskId.value) return
+  scenePlanning.value = true
+  try {
+    const res = await caseApi.planScenes(selectedTaskId.value, {
+      description: sceneDescription.value,
+      append,
+    })
+    scenes.value = res.scenes || []
+    if (!scenes.value.length) {
+      ElMessage.warning('未能生成场景，请补充页面功能描述后重试')
+    } else {
+      ElMessage.success(append ? `已追加 ${res.scenes.length} 个场景` : `已生成 ${res.scenes.length} 个场景`)
+    }
+  } catch (e) {
+    ElMessage.error('场景规划失败：' + (e?.response?.data?.detail || e?.message || ''))
+  } finally {
+    scenePlanning.value = false
+  }
+}
+
+// 重新规划：清空本地列表，让用户重新输入描述后生成
+const resetScenes = async () => {
+  try {
+    await ElMessageBox.confirm(
+      '重新规划会清空所有未录制的场景（已录制的会保留），确认继续？',
+      '重新规划', { type: 'warning', confirmButtonText: '确认', cancelButtonText: '取消' }
+    )
+    scenes.value = scenes.value.filter(s => s.recorded)
+    if (!scenes.value.length) scenes.value = []
+    sceneDescription.value = ''
+  } catch { /* 取消 */ }
+}
+
+// 删除单个未录制场景
+const removeScene = (sceneId) => {
+  scenes.value = scenes.value.filter(s => s.id !== sceneId)
+  // 同步持久化（静默）
+  if (selectedTaskId.value) {
+    caseApi.markSceneRecorded(selectedTaskId.value, sceneId, false).catch(() => {})
+  }
+}
+
+// 展开/收起步骤预览
+const toggleExpandScene = (sceneId) => {
+  expandedSceneId.value = expandedSceneId.value === sceneId ? null : sceneId
+}
+
+const startSceneRecording = async (scene) => {
+  // 先关闭抽屉，跳转到录制流程
+  recordingSceneId.value = scene.id
+  scenePlannerVisible.value = false
+
+  // 设置录制完成后自动保存的场景名
+  _pendingSceneName.value = scene.name
+
+  // 触发录制（复用现有 startRecording 逻辑）
+  await startRecording()
+}
+
+// 待保存的场景名（录制完成后自动填入用例名）
+const _pendingSceneName = ref('')
 
 // ── WebSocket ──
 const { connect: _wsConnect, disconnect: _wsDisconnect, isConnected: wsIsConnected } = useWebSocket((msg) => {
@@ -534,31 +883,55 @@ const viewHistoryReport = (row) => {
 }
 
 // ── 录制 ──
-const toggleRecording = () => { isRecording.value ? stopRecording() : startRecording() }
+const toggleRecording = () => {
+  if (recordingStarting.value) return  // 启动中禁止重复点击
+  isRecording.value ? stopRecording() : startRecording()
+}
 
 const startRecording = async () => {
   if (!selectedTaskId.value) return
   recordingLoading.value = true
+  recordingStarting.value = true
   try {
     const task = taskStore.tasks.find(t => t.id === selectedTaskId.value)
+    // 先连上录制专用 WS 频道，再发起启动请求
+    _recWsConnect(`rec_${selectedTaskId.value}`)
     const res = await recordingApi.start(selectedTaskId.value, task?.url || '', selectedBrowser.value)
-    _recordingSessionId = res.session_id
-    isRecording.value = true
+    // 立即返回 status=starting，等 recording_ready WS 消息
+    _recordingSessionId = res.session_id  // 预生成的 session_id
     recordedSteps.value = []
     recordingDialogVisible.value = true
-    ElMessage.info('浏览器已启动，请在浏览器中操作')
+    ElMessage.info('浏览器启动中，请稍候...')
+    // loading 状态由 WS recording_ready 消息关闭
   } catch (e) {
-    ElMessage.error('启动录制失败：' + (e.response?.data?.detail || e.message))
-  } finally { recordingLoading.value = false }
+    const status = e.response?.status
+    const detail = e.response?.data?.detail || e.message
+    if (status === 409) {
+      ElMessage.warning('该任务已有录制会话在运行，请直接在已打开的浏览器中操作，或停止后重新录制')
+      isRecording.value = true
+    } else {
+      ElMessage.error('启动录制失败：' + detail)
+    }
+    recordingStarting.value = false
+    recordingLoading.value = false
+    _recWsDisconnectFn()
+  }
 }
 
 const stopRecording = async () => {
-  if (!_recordingSessionId) return
+  if (!_recordingSessionId && !selectedTaskId.value) return
   recordingLoading.value = true
   try {
-    const res = await recordingApi.stop(_recordingSessionId)
+    const res = await recordingApi.stop(_recordingSessionId, selectedTaskId.value)
     recordedSteps.value = res.steps || []
     isRecording.value = false
+    recordingStarting.value = false
+    _recordingSessionId = null
+    _recWsDisconnectFn()  // 断开录制专用 WS
+    // 如果是场景录制，自动填入场景名
+    if (_pendingSceneName.value) {
+      recordingCaseName.value = _pendingSceneName.value
+    }
     ElMessage.success(`录制完成，共 ${recordedSteps.value.length} 个步骤`)
   } catch (e) { ElMessage.error('停止录制失败：' + e.message) }
   finally { recordingLoading.value = false }
@@ -576,6 +949,29 @@ const saveRecording = async () => {
     recordedSteps.value = []
     recordingCaseName.value = ''
     _recordingSessionId = null
+
+    // 如果是场景录制，同步标记后端 + 本地，重新打开场景抽屉
+    if (recordingSceneId.value) {
+      const sceneId = recordingSceneId.value
+      const scene = scenes.value.find(s => s.id === sceneId)
+      if (scene) scene.recorded = true
+      // 持久化标记到后端
+      try { await caseApi.markSceneRecorded(selectedTaskId.value, sceneId, true) } catch {}
+      recordingSceneId.value = null
+      _pendingSceneName.value = ''
+      setTimeout(() => { scenePlannerVisible.value = true }, 300)
+    }
+
+    // T7：从 Cases 页跳过来的，保存完成后提示返回
+    if (route.query.from === 'cases') {
+      ElMessage({
+        type: 'success',
+        message: '用例已保存，点击返回用例管理',
+        duration: 5000,
+        showClose: true,
+        onClick: () => router.push({ name: 'Cases', query: { taskId: selectedTaskId.value, refresh: '1' } }),
+      })
+    }
   } catch (e) { ElMessage.error('保存失败：' + e.message) }
   finally { recordingLoading.value = false }
 }
@@ -623,7 +1019,17 @@ onMounted(async () => {
   if (route.query.taskId) {
     selectedTaskId.value = parseInt(route.query.taskId)
     await taskStore.fetchCases(selectedTaskId.value)
+    // 来自 Cases 页的重录：预填用例名
+    if (route.query.replaceCaseName) {
+      _pendingSceneName.value = route.query.replaceCaseName
+    }
     if (route.query.startRecord === '1') { await startRecording(); return }
+    if (route.query.openScenePlanner === '1') {
+      // 先加载持久化的场景规划
+      await loadPersistedScenes()
+      scenePlannerVisible.value = true
+      return
+    }
     if (route.query.caseIds) {
       const ids = route.query.caseIds.split(',').map(Number)
       liveResults.value = []; liveProgress.value = 0; currentCaseName.value = ''; currentReportId.value = null; liveTotal.value = ids.length
@@ -702,4 +1108,94 @@ onUnmounted(() => {
 .rec-step-list { display: flex; flex-direction: column; gap: 4px; }
 .rec-step-item { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 6px; background: #f8fafc; font-size: 12px; }
 .rec-step-desc { flex: 1; color: #606266; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ── AI 场景规划抽屉 ── */
+/* 输入区 */
+.scene-input-area { padding: 0 2px; }
+.scene-intro { margin-bottom: 16px; font-size: 13px; color: #606266; line-height: 1.7; }
+.scene-intro p { margin: 0 0 10px; }
+.scene-dimensions { display: flex; flex-wrap: wrap; gap: 6px; }
+.dim-tag { cursor: default; }
+.scene-planning-hint {
+  display: flex; align-items: center; gap: 6px; justify-content: center;
+  margin-top: 14px; color: #909399; font-size: 13px;
+}
+
+/* 场景列表区 */
+.scene-list-area { padding: 0 2px; }
+.scene-toolbar {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 14px; gap: 8px; flex-wrap: wrap;
+}
+.scene-list { display: flex; flex-direction: column; gap: 10px; }
+
+/* 场景卡片 */
+.scene-card {
+  border: 1px solid #e4e7ed; border-radius: 10px;
+  padding: 12px 14px; background: #fff;
+  transition: box-shadow .2s, border-color .2s;
+}
+.scene-card:hover { box-shadow: 0 2px 12px rgba(0,0,0,.07); border-color: #c6d8f5; }
+.scene-recorded { border-color: #b7ebc8; background: #f6fff9; }
+
+.scene-card-header {
+  display: flex; align-items: center; gap: 6px;
+  margin-bottom: 6px; flex-wrap: wrap;
+}
+.scene-name {
+  flex: 1; font-size: 14px; font-weight: 600; color: #303133;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  cursor: text; border-bottom: 1px dashed transparent;
+  transition: border-color .2s;
+}
+.scene-name:hover { border-bottom-color: #c0c4cc; }
+
+.scene-desc {
+  font-size: 13px; color: #606266; line-height: 1.5; margin-bottom: 8px;
+  cursor: text; border-bottom: 1px dashed transparent; transition: border-color .2s;
+}
+.scene-desc:hover { border-bottom-color: #c0c4cc; }
+
+/* 展开步骤 */
+.scene-expand-btn {
+  display: flex; align-items: center; gap: 4px;
+  font-size: 12px; color: #909399; cursor: pointer;
+  margin-bottom: 8px; transition: color .2s;
+}
+.scene-expand-btn:hover { color: #409eff; }
+
+.scene-steps {
+  display: flex; flex-direction: column; gap: 4px;
+  background: #f8fafc; border-radius: 6px;
+  padding: 8px 10px; margin-bottom: 8px;
+}
+.scene-step-item {
+  display: flex; align-items: flex-start; gap: 8px;
+  font-size: 12px; color: #606266; line-height: 1.5;
+}
+.step-num {
+  flex-shrink: 0; width: 18px; height: 18px; border-radius: 50%;
+  background: #409eff; color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 600; margin-top: 1px;
+}
+.scene-expected {
+  display: flex; align-items: flex-start; gap: 5px;
+  font-size: 12px; color: #67c23a; background: #f0fff4;
+  border-radius: 5px; padding: 5px 8px; line-height: 1.5;
+}
+
+.scene-actions { display: flex; justify-content: flex-end; }
+
+.scene-done-banner {
+  margin-top: 16px; background: #f0fff4;
+  border: 1px solid #b7ebc8; border-radius: 8px;
+  padding: 14px; text-align: center;
+}
+
+.page-elements-hint {
+  display: flex; align-items: center; gap: 4px;
+  font-size: 12px; color: #67c23a;
+  margin-bottom: 12px;
+}
 </style>

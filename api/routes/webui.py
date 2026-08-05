@@ -127,6 +127,7 @@ async def list_tasks(skip: int = 0, limit: int = 100, workspace_id: int = None, 
             id=t.id, name=t.name, url=t.url, status=t.status,
             browser=t.browser, environment=t.environment,
             document_path=t.document_path,
+            page_elements=t.page_elements or [],
             created_at=t.created_at.isoformat(),
             updated_at=t.updated_at.isoformat() if t.updated_at else None,
         )
@@ -386,6 +387,7 @@ async def list_cases(task_id: int, db: AsyncSession = Depends(get_db), current_u
             element_selector=getattr(c, "element_selector", "") or "",
             enabled=c.enabled,
             deprecated=getattr(c, "deprecated", False) or False,
+            source=getattr(c, "source", "manual") or "manual",
         )
         for c in cases
     ]
@@ -413,6 +415,7 @@ async def create_case(request: CaseCreateRequest, db: AsyncSession = Depends(get
         steps=case.steps, expected_results=case.expected_results,
         enabled=case.enabled,
         deprecated=getattr(case, "deprecated", False) or False,
+        source="manual",
     )
 
 
@@ -510,6 +513,7 @@ async def generate_cases(task_id: int, request: dict = None, db: AsyncSession = 
                 steps_json=case.get("steps_json") or [],
                 expected_results=case.get("expected_results", ""),
                 element_selector=case.get("element_selector", ""),
+                source="ai_generated",
                 enabled=True,
             ))
         await db.commit()
@@ -522,6 +526,7 @@ async def generate_cases(task_id: int, request: dict = None, db: AsyncSession = 
                 steps=c.steps, expected_results=c.expected_results,
                 element_selector=getattr(c, "element_selector", "") or "",
                 enabled=c.enabled,
+                source=getattr(c, "source", "ai_generated") or "ai_generated",
             )
             for c in all_cases
         ]
@@ -530,6 +535,271 @@ async def generate_cases(task_id: int, request: dict = None, db: AsyncSession = 
     except Exception as e:
         logger.error(f"Error generating cases: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="用例生成失败，请稍后重试")
+
+
+@router.post("/cases/plan-scenes/{task_id}")
+async def plan_scenes(task_id: int, request: dict = None,
+                      db: AsyncSession = Depends(get_db),
+                      current_user: User = Depends(get_current_user)):
+    """
+    AI 场景规划：分析页面元素 + 已有用例 + 文档摘要，生成测试场景列表。
+    支持 append=true 追加规划（保留已录制场景），默认重新规划。
+    """
+    if request is None:
+        request = {}
+    description = request.get("description", "")
+    append_mode = request.get("append", False)   # True=追加，False=重新规划
+
+    result = await db.execute(select(TestTask).where(TestTask.id == task_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    await check_access(db, task, current_user, "任务")
+
+    url = task.url or ""
+    page_elements = task.page_elements or []
+
+    # ── 1. 构建分组元素摘要（按功能区分类，信息密度更高）──────────────────────
+    def _build_elements_summary(elements: list) -> str:
+        if not elements:
+            return "（页面元素未抓取，建议先在「任务设置」中解析页面，以获得更精准的场景规划）"
+
+        groups: dict[str, list[str]] = {
+            "表单输入": [],
+            "操作按钮": [],
+            "导航链接": [],
+            "下拉选择": [],
+            "其他元素": [],
+        }
+        for e in elements[:60]:
+            etype = e.get("type", "")
+            tag   = e.get("tag", "")
+            text  = (e.get("text") or e.get("placeholder") or e.get("selector", ""))[:40]
+            if not text:
+                continue
+            if etype == "input" or tag == "input":
+                groups["表单输入"].append(text)
+            elif etype == "button" or tag == "button" or etype == "submit":
+                groups["操作按钮"].append(text)
+            elif etype == "a" or tag == "a":
+                groups["导航链接"].append(text)
+            elif etype == "select" or tag == "select":
+                groups["下拉选择"].append(text)
+            elif text:
+                groups["其他元素"].append(text)
+
+        lines = []
+        for group, items in groups.items():
+            unique = list(dict.fromkeys(items))[:8]  # 去重取前8
+            if unique:
+                lines.append(f"  [{group}] {' / '.join(unique)}")
+        return "\n".join(lines) if lines else "（未识别到关键交互元素）"
+
+    elements_summary = _build_elements_summary(page_elements)
+
+    # ── 2. 已有用例名称（避免重复规划）────────────────────────────────────────
+    existing_cases_result = await db.execute(
+        select(TestCase.name).where(
+            TestCase.task_id == task_id,
+            TestCase.deprecated == False,
+        )
+    )
+    existing_names = [r[0] for r in existing_cases_result.fetchall()]
+    existing_cases_text = (
+        "\n".join(f"  - {n}" for n in existing_names[:20])
+        if existing_names else "（暂无已有用例）"
+    )
+
+    # ── 3. 文档摘要（取前 800 字，聚焦功能描述）──────────────────────────────
+    doc_snippet = "（无需求文档）"
+    if task.doc_snapshot:
+        snippet = task.doc_snapshot[:800].strip()
+        # 截断到最近的句号/换行，避免截断到半句
+        for sep in ["。", "\n", ".", "；"]:
+            idx = snippet.rfind(sep, 200)
+            if idx > 200:
+                snippet = snippet[:idx + 1]
+                break
+        doc_snippet = snippet
+
+    # ── 4. 计算建议场景数量 ──────────────────────────────────────────────────
+    # 有文档 → 最多 10 个；仅有元素 → 6-8 个；无信息 → 5 个
+    if task.doc_snapshot:
+        scene_count = "8-10"
+    elif page_elements:
+        scene_count = "6-8"
+    else:
+        scene_count = "5-6"
+
+    try:
+        from tools.llm_client import call_llm
+        from skills.prompt_loader import get_system, render_user
+        import json as _json, re as _re
+
+        system_prompt = get_system("ui_case_gen.yaml", "plan_scenes")
+        user_prompt = render_user("ui_case_gen.yaml", "plan_scenes",
+            url=url,
+            description=description or f"对 {url} 页面进行完整测试",
+            elements_summary=elements_summary,
+            existing_cases=existing_cases_text,
+            doc_snippet=doc_snippet,
+            scene_count=scene_count,
+        )
+
+        raw = await call_llm(system_prompt, user_prompt, max_tokens=4000, timeout_secs=120)
+
+        # 提取 JSON，多级修复保障：
+        # 1. 去掉首尾 markdown 代码块
+        # 2. 提取最外层 { } 对象
+        # 3. _sanitize_json_string：修复裸引号/控制字符
+        # 4. 若仍失败：强制替换所有裸换行（Unterminated string 的根因）
+        # 5. 若仍失败：_repair_truncated_json 截断修复
+        from skills.ai_case_generator import _sanitize_json_string, _repair_truncated_json
+
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```", 2)[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+            raw = raw.split("```")[0].strip()
+
+        m = _re.search(r'\{[\s\S]*\}', raw)
+        json_str = m.group(0) if m else raw
+
+        def _try_parse(s: str):
+            """依次尝试多种修复策略，返回解析后的 dict，全部失败抛异常。"""
+            import json as __json
+
+            # 策略1：直接解析
+            try:
+                return __json.loads(s)
+            except __json.JSONDecodeError:
+                pass
+
+            # 策略2：sanitize（裸引号/控制字符）
+            s2 = _sanitize_json_string(s)
+            try:
+                return __json.loads(s2)
+            except __json.JSONDecodeError:
+                pass
+
+            # 策略3：强制把字符串值内的裸换行/回车替换为空格
+            # 原理：在 in_string 状态下把 \n \r 换成空格，比 sanitize 更激进
+            result = []
+            in_str = False
+            esc = False
+            for ch in s2:
+                if esc:
+                    result.append(ch); esc = False
+                elif ch == '\\' and in_str:
+                    result.append(ch); esc = True
+                elif ch == '"':
+                    result.append(ch); in_str = not in_str
+                elif in_str and ch in ('\n', '\r'):
+                    result.append(' ')   # 裸换行替换为空格
+                else:
+                    result.append(ch)
+            s3 = ''.join(result)
+            try:
+                return __json.loads(s3)
+            except __json.JSONDecodeError:
+                pass
+
+            # 策略4：截断修复
+            s4 = _repair_truncated_json(s3)
+            return __json.loads(s4)   # 若仍失败则抛出，外层捕获
+
+        data = _try_parse(json_str)
+
+        # LLM 有时直接返回数组 [{...}, {...}] 而不是 {"scenes": [...]}
+        if isinstance(data, list):
+            new_scenes = data
+        elif isinstance(data, dict):
+            new_scenes = data.get("scenes", [])
+        else:
+            new_scenes = []
+
+        # 过滤掉非 dict 的项（防御性处理）
+        new_scenes = [s for s in new_scenes if isinstance(s, dict)]
+
+        # ── 5. 标准化字段 ────────────────────────────────────────────────────
+        for i, s in enumerate(new_scenes):
+            s.setdefault("id", f"scene_{i+1:02d}")
+            s.setdefault("priority", "P1")
+            s.setdefault("dimension", "")
+            s.setdefault("steps_desc", [])
+            s.setdefault("expected", "")
+            s["recorded"] = False
+
+        # ── 6. 追加模式：保留已录制场景，合并新场景 ──────────────────────────
+        if append_mode:
+            existing_plan = list(getattr(task, "scene_plan", None) or [])
+            recorded_scenes = [s for s in existing_plan if s.get("recorded")]
+            # 去重：新场景名与已有场景名相同则跳过
+            existing_names_set = {s["name"] for s in existing_plan}
+            fresh = [s for s in new_scenes if s["name"] not in existing_names_set]
+            # 重新编号
+            merged = recorded_scenes + fresh
+            for i, s in enumerate(merged, 1):
+                s["id"] = f"scene_{i:02d}"
+            scenes = merged
+        else:
+            scenes = new_scenes
+
+        # ── 7. 持久化 ────────────────────────────────────────────────────────
+        task.scene_plan = scenes
+        await db.commit()
+
+        logger.info(
+            f"[plan_scenes] task={task_id} {'追加' if append_mode else '生成'} "
+            f"{len(scenes)} 个场景，已持久化"
+        )
+        return {"task_id": task_id, "url": url, "scenes": scenes, "append": append_mode}
+
+    except Exception as e:
+        logger.error(f"[plan_scenes] 场景规划失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"场景规划失败：{e}")
+
+
+@router.get("/cases/scene-plan/{task_id}")
+async def get_scene_plan(task_id: int,
+                         db: AsyncSession = Depends(get_db),
+                         current_user: User = Depends(get_current_user)):
+    """读取任务的 AI 场景规划结果（持久化版本）。"""
+    result = await db.execute(select(TestTask).where(TestTask.id == task_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    await check_access(db, task, current_user, "任务")
+    scenes = getattr(task, "scene_plan", None) or []
+    return {"task_id": task_id, "url": task.url or "", "scenes": scenes}
+
+
+@router.patch("/cases/scene-plan/{task_id}/mark-recorded")
+async def mark_scene_recorded(task_id: int, body: dict,
+                               db: AsyncSession = Depends(get_db),
+                               current_user: User = Depends(get_current_user)):
+    """标记某个场景已录制（scene_id + recorded=True/False）。"""
+    scene_id = body.get("scene_id")
+    recorded = body.get("recorded", True)
+    if not scene_id:
+        raise HTTPException(status_code=400, detail="scene_id 不能为空")
+
+    result = await db.execute(select(TestTask).where(TestTask.id == task_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    await check_access(db, task, current_user, "任务")
+
+    scenes = list(getattr(task, "scene_plan", None) or [])
+    for s in scenes:
+        if s.get("id") == scene_id:
+            s["recorded"] = recorded
+            break
+    task.scene_plan = scenes
+    await db.commit()
+    return {"task_id": task_id, "scene_id": scene_id, "recorded": recorded}
+
 
 
 @router.post("/cases/optimize/{task_id}")
@@ -582,7 +852,8 @@ async def optimize_cases(task_id: int, request: dict = None, db: AsyncSession = 
                 preconditions=case.get("preconditions", ""), steps=case.get("steps", ""),
                 steps_json=case.get("steps_json") or [],
                 expected_results=case.get("expected_results", ""),
-                element_selector=case.get("element_selector", ""), enabled=True,
+                element_selector=case.get("element_selector", ""),
+                source="ai_generated", enabled=True,
             ))
         await db.commit()
         return {"added": len(new_cases), "message": f"新增 {len(new_cases)} 条补充用例"}
@@ -745,6 +1016,7 @@ async def webui_incremental_update(
             expected_results=case.get("expected_results", ""),
             element_selector=case.get("element_selector", ""), enabled=True,
             deprecated=(case.get("status") == "deprecated"),
+            source=case.get("source", "ai_generated"),
         ))
     task.doc_snapshot = new_content[:20000]
     task.doc_hash = cg.compute_doc_hash(new_content)
@@ -758,6 +1030,22 @@ async def webui_incremental_update(
             "message": f"增量更新成功！有效用例 {active_count} 条，废弃 {deprecated_count} 条"}
 
 
+@router.get("/cases/{case_id}/steps")
+async def get_case_steps(case_id: int, db: AsyncSession = Depends(get_db),
+                         current_user: User = Depends(get_current_user)):
+    """返回单条用例的 steps_json（可视化步骤编辑器加载用）。"""
+    result = await db.execute(select(TestCase).where(TestCase.id == case_id))
+    case = result.scalar_one_or_none()
+    if not case:
+        raise HTTPException(status_code=404, detail="用例不存在")
+    return {
+        "id": case.id,
+        "name": case.name,
+        "steps_json": case.steps_json or [],
+        "source": getattr(case, "source", "manual") or "manual",
+    }
+
+
 @router.put("/cases/{case_id}", response_model=CaseResponse)
 async def update_case(case_id: int, request: CaseUpdateRequest, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     result = await db.execute(select(TestCase).where(TestCase.id == case_id))
@@ -769,7 +1057,15 @@ async def update_case(case_id: int, request: CaseUpdateRequest, db: AsyncSession
     task = task_result.scalar_one_or_none()
     if task:
         await check_access(db, task, current_user, "任务")
-    for key, value in request.model_dump(exclude_unset=True).items():
+
+    update_data = request.model_dump(exclude_unset=True)
+
+    # 如果更新了 steps_json，同步生成 steps 可读文本
+    if "steps_json" in update_data and update_data["steps_json"]:
+        from tools.action_schema import steps_to_description
+        update_data["steps"] = steps_to_description(update_data["steps_json"])
+
+    for key, value in update_data.items():
         setattr(case, key, value)
     await db.commit()
     await db.refresh(case)
@@ -778,6 +1074,7 @@ async def update_case(case_id: int, request: CaseUpdateRequest, db: AsyncSession
         priority=case.priority, preconditions=case.preconditions,
         steps=case.steps, expected_results=case.expected_results,
         enabled=case.enabled, deprecated=getattr(case, "deprecated", False) or False,
+        source=getattr(case, "source", "manual") or "manual",
     )
 
 
@@ -2032,9 +2329,13 @@ _active_recording_lock = asyncio.Lock()
 async def recording_start(body: dict,
                            db: AsyncSession = Depends(get_db),
                            current_user: User = Depends(get_current_user)):
-    """启动有头浏览器开始录制，返回 session_id。"""
+    """
+    异步启动录制：立即返回 session_id，Chrome 在后台启动。
+    启动完成后通过 WebSocket rec_{task_id} 推送 recording_ready 消息。
+    """
     from skills.recorder import start_recording
     from api.websocket_manager import ws_manager as _ws
+    import secrets as _secrets
 
     task_id      = int(body.get("task_id", 0))
     url          = body.get("url", "")
@@ -2056,30 +2357,56 @@ async def recording_start(body: dict,
         if task_id:
             _active_recording_tasks.add(task_id)
 
+    # 预生成 session_id，立即返回给前端，不等 Chrome 启动
+    session_id = _secrets.token_hex(8)
+
     async def _push(msg: dict):
         await _ws.broadcast(msg, client_id=f"rec_{task_id}")
 
-    try:
-        session_id = await start_recording(task_id, url, browser_type, _push)
-        return {"session_id": session_id, "status": "recording"}
-    except Exception as e:
-        # 启动失败，释放录制锁
-        async with _active_recording_lock:
-            _active_recording_tasks.discard(task_id)
-        import traceback
-        full_tb = traceback.format_exc()
-        logger.error(f"[Recording] 录制启动失败: {type(e).__name__}: {e}\n{full_tb}")
-        raise HTTPException(status_code=500, detail=f"录制启动失败: {type(e).__name__}: {e}")
+    async def _start_bg():
+        """后台异步启动 Chrome，就绪后推送 recording_ready。"""
+        try:
+            real_session_id = await start_recording(task_id, url, browser_type, _push, session_id=session_id)
+            # 启动成功，通知前端
+            await _ws.broadcast(
+                {"type": "recording_ready", "session_id": real_session_id, "task_id": task_id},
+                client_id=f"rec_{task_id}",
+            )
+        except Exception as e:
+            import traceback
+            full_tb = traceback.format_exc()
+            logger.error(f"[Recording] 录制启动失败: {type(e).__name__}: {e}\n{full_tb}")
+            # 启动失败，通知前端并释放锁
+            await _ws.broadcast(
+                {"type": "recording_failed", "task_id": task_id, "error": str(e)},
+                client_id=f"rec_{task_id}",
+            )
+            async with _active_recording_lock:
+                _active_recording_tasks.discard(task_id)
+
+    import asyncio as _asyncio
+    _asyncio.create_task(_start_bg())
+
+    return {"session_id": session_id, "status": "starting", "task_id": task_id}
 
 
 @router.post("/recording/stop")
 async def recording_stop(body: dict,
                           current_user: User = Depends(get_current_user)):
-    """停止录制，返回 ActionStep 列表。"""
+    """停止录制，返回 ActionStep 列表。支持 session_id 或 task_id 两种方式定位会话。"""
     from skills.recorder import stop_recording, _sessions
     session_id = body.get("session_id", "")
+
+    # 如果没有 session_id，尝试通过 task_id 查找当前会话
     if not session_id:
-        raise HTTPException(status_code=400, detail="session_id 不能为空")
+        task_id = body.get("task_id")
+        if task_id:
+            for sid, sess in list(_sessions.items()):
+                if sess.task_id == int(task_id):
+                    session_id = sid
+                    break
+        if not session_id:
+            raise HTTPException(status_code=400, detail="session_id 不能为空，或找不到对应 task_id 的录制会话")
     # 停止前先记录 task_id，用于释放锁
     task_id_to_release = None
     if session_id in _sessions:
@@ -2117,10 +2444,11 @@ async def recording_save(body: dict,
 
     前端传 task_id + steps；后端自动在该任务下新建一条用例，
     steps 同时写入 steps_json（结构化执行引擎用）和 steps（可读文本）。
-    录制步骤会经过智能补全：断言、wait、预期结果自动生成。
+    录制步骤会经过智能补全（断言/wait）和 AI 健壮化（selector 多候选 + 评级）。
     """
     from tools.action_schema import steps_to_description
     from skills.recorder import enrich_recorded_steps, generate_case_name, generate_expected_results
+    from skills.step_hardener import harden_and_enrich
     task_id = int(body.get("task_id", 0))
     steps   = body.get("steps", [])
     page_title = body.get("page_title", "")
@@ -2137,11 +2465,18 @@ async def recording_save(body: dict,
         raise HTTPException(status_code=404, detail="任务不存在")
     await check_access(db, task, current_user, "任务")
 
-    # ── 智能补全：断言 + wait + 预期结果 + 名称 ──
+    # ── 步骤处理流水线 ──
+    # 1. 智能补全：断言 + wait + 名称 + 预期结果（原有逻辑）
     enriched_steps = enrich_recorded_steps(steps, page_title)
     if not name:
         name = generate_case_name(enriched_steps, page_title)
     expected = generate_expected_results(enriched_steps)
+
+    # 2. AI 健壮化：selector 多候选推导 + 评级 + 关键操作后断言插入
+    try:
+        enriched_steps = await harden_and_enrich(enriched_steps, use_ai=True)
+    except Exception as _he:
+        logger.warning(f"[recording/save] 健壮化失败（静默跳过）: {_he}")
 
     # 将 ActionStep 列表转换为可读文本，存入 steps 字段（兼容旧版报告显示）
     steps_text = steps_to_description(enriched_steps)
@@ -2155,6 +2490,7 @@ async def recording_save(body: dict,
         steps_json=enriched_steps,
         expected_results=expected,
         enabled=True,
+        source="recorded",
         created_by=current_user.username,
         project_id=task.project_id,
     )
