@@ -76,7 +76,7 @@ from api.schemas import (
     WebUIDiffCheckRequest, WebUIIncrementalUpdateRequest,
 )
 from tools.database import (
-    get_db, TestTask, TestCase, TestResult, TestReport, User, TaskEnvVar,
+    get_db, TestTask, TestCase, TestResult, TestReport, User, TaskEnvVar, ElementAlias,
 )
 from agent.core import uitest_agent
 from api.websocket_manager import ws_manager
@@ -558,6 +558,20 @@ async def plan_scenes(task_id: int, request: dict = None,
 
     url = task.url or ""
     page_elements = task.page_elements or []
+
+    # ── 0. 如果有需求文档但 doc_snapshot 为空，自动解析一次 ─────────────────────
+    if task.document_path and not task.doc_snapshot:
+        try:
+            doc_path = _resolve_doc_path(task.document_path)
+            if doc_path:
+                document_data = await uitest_agent.parse_document(str(doc_path), task_id=task_id)
+                snap = (document_data or {}).get("content", "")
+                if snap:
+                    task.doc_snapshot = snap[:20000]
+                    await db.commit()
+                    await db.refresh(task)
+        except Exception as _e:
+            logger.warning(f"[plan_scenes] 自动解析需求文档失败: {_e}")
 
     # ── 1. 构建分组元素摘要（按功能区分类，信息密度更高）──────────────────────
     def _build_elements_summary(elements: list) -> str:
@@ -2323,6 +2337,92 @@ async def delete_env_var_by_id(var_id: int,
 # 每个 task_id 同时只允许一个录制 session，防止多 session 互相收到对方步骤事件
 _active_recording_tasks: set = set()
 _active_recording_lock = asyncio.Lock()
+
+
+# ── 元素别名库 CRUD ───────────────────────────────────────────────────────────
+
+@router.get("/tasks/{task_id}/element-aliases")
+async def list_element_aliases(task_id: int,
+                                db: AsyncSession = Depends(get_db),
+                                current_user: User = Depends(get_current_user)):
+    """列出任务下所有元素别名。"""
+    result = await db.execute(select(TestTask).where(TestTask.id == task_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    await check_access(db, task, current_user, "任务")
+    rows = (await db.execute(
+        select(ElementAlias).where(ElementAlias.task_id == task_id)
+        .order_by(ElementAlias.created_at)
+    )).scalars().all()
+    return [{"id": r.id, "name": r.name, "selectors": r.selectors or [],
+             "description": r.description or ""} for r in rows]
+
+
+@router.post("/tasks/{task_id}/element-aliases")
+async def create_element_alias(task_id: int, body: dict,
+                                db: AsyncSession = Depends(get_db),
+                                current_user: User = Depends(get_current_user)):
+    """新建元素别名。"""
+    result = await db.execute(select(TestTask).where(TestTask.id == task_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    await check_access(db, task, current_user, "任务")
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="别名名称不能为空")
+    selectors = body.get("selectors") or []
+    if not selectors:
+        raise HTTPException(status_code=400, detail="至少填写一个 selector")
+    alias = ElementAlias(
+        task_id=task_id, name=name,
+        selectors=selectors,
+        description=body.get("description", ""),
+        created_by=current_user.username,
+    )
+    db.add(alias)
+    await db.commit()
+    await db.refresh(alias)
+    return {"id": alias.id, "name": alias.name, "selectors": alias.selectors,
+            "description": alias.description or ""}
+
+
+@router.put("/tasks/{task_id}/element-aliases/{alias_id}")
+async def update_element_alias(task_id: int, alias_id: int, body: dict,
+                                db: AsyncSession = Depends(get_db),
+                                current_user: User = Depends(get_current_user)):
+    """更新元素别名。"""
+    result = await db.execute(
+        select(ElementAlias).where(ElementAlias.id == alias_id,
+                                    ElementAlias.task_id == task_id)
+    )
+    alias = result.scalar_one_or_none()
+    if not alias:
+        raise HTTPException(status_code=404, detail="别名不存在")
+    if "name" in body and body["name"]:
+        alias.name = body["name"].strip()
+    if "selectors" in body:
+        alias.selectors = body["selectors"] or []
+    if "description" in body:
+        alias.description = body.get("description", "")
+    await db.commit()
+    return {"id": alias.id, "name": alias.name, "selectors": alias.selectors,
+            "description": alias.description or ""}
+
+
+@router.delete("/tasks/{task_id}/element-aliases/{alias_id}")
+async def delete_element_alias(task_id: int, alias_id: int,
+                                db: AsyncSession = Depends(get_db),
+                                current_user: User = Depends(get_current_user)):
+    """删除元素别名。"""
+    from sqlalchemy import delete as sql_delete
+    await db.execute(
+        sql_delete(ElementAlias).where(ElementAlias.id == alias_id,
+                                        ElementAlias.task_id == task_id)
+    )
+    await db.commit()
+    return {"message": "已删除"}
 
 
 @router.post("/recording/start")

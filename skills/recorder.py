@@ -25,10 +25,11 @@ except ImportError:
 
 from tools.action_schema import make_step
 
-# ── 注入到页面的录制脚本 ──────────────────────────────────────────────────────
+# ── 注入到页面的录制脚本（模板，注入时替换 __FRAME_PATH__） ─────────────────────
 # 监听 click / input / change / submit 事件，生成最优 selector，存入 window.__recEvents
-_RECORD_JS = """
-(function() {
+# frame_path 格式：JSON 数组，如 ["iframe#payment", "iframe.card-form"]，主页面为 []
+_RECORD_JS_TPL = """
+(function(framePath) {
   if (window.__recInited) return;
   window.__recInited = true;
   window.__recEvents = [];
@@ -37,34 +38,64 @@ _RECORD_JS = """
   function bestSelectors(el) {
     if (!el || el === document.body) return ['body'];
     var list = [];
+
+    // ── 第一梯队：Playwright 语义 locator（最稳定，跨重构有效） ──
     // data-testid
     if (el.dataset && el.dataset.testid) list.push('[data-testid="' + el.dataset.testid + '"]');
-    // id
-    if (el.id && !/^\\d/.test(el.id)) list.push('#' + CSS.escape(el.id));
-    // name
+
+    // getByRole: role + accessible name（aria-label > 关联 label > textContent）
+    var role = el.getAttribute('role') ||
+               ({'button':'button','a':'link','input':'textbox','select':'combobox',
+                 'textarea':'textbox','checkbox':'checkbox','radio':'radio',
+                 'img':'img','h1':'heading','h2':'heading','h3':'heading'}[el.tagName.toLowerCase()]);
+    if (role) {
+      var accName = el.getAttribute('aria-label') || el.getAttribute('aria-labelledby') && '' ||
+                    (el.tagName.toLowerCase()==='input' && el.id &&
+                      (document.querySelector('label[for="'+el.id+'"]') || {}).textContent || '') ||
+                    (el.textContent||'').trim().slice(0,60);
+      if (accName) list.push('role=' + role + '[name="' + accName.replace(/"/g,'\\"') + '"]');
+    }
+
+    // getByLabel: 通过关联 <label> 定位 input（比 placeholder 稳定）
+    if (el.id) {
+      var lbl = document.querySelector('label[for="' + el.id + '"]');
+      if (lbl) list.push('label=' + lbl.textContent.trim().replace(/"/g,'\\"'));
+    }
+    if (el.closest && el.closest('label')) {
+      var parentLbl = el.closest('label');
+      if (parentLbl) list.push('label=' + parentLbl.textContent.trim().replace(/"/g,'\\"'));
+    }
+
+    // getByAltText: img
+    if (el.tagName.toLowerCase()==='img' && el.alt) list.push('alt=' + el.alt);
+
+    // ── 第二梯队：稳定属性（跟业务语义绑定） ──
+    if (el.id && !/^\d/.test(el.id)) list.push('#' + CSS.escape(el.id));
     if (el.name) list.push('[name="' + el.name + '"]');
-    // aria-label
     if (el.getAttribute('aria-label')) list.push('[aria-label="' + el.getAttribute('aria-label') + '"]');
-    // placeholder
+
+    // ── 第三梯队：内容/属性（文案可能变化） ──
     if (el.placeholder) list.push(el.tagName.toLowerCase() + '[placeholder="' + el.placeholder + '"]');
-    // type=submit/button
-    if (el.type && ['submit','button','reset'].indexOf(el.type)>=0) list.push(el.tagName.toLowerCase()+'[type="'+el.type+'"]');
-    // text content
-    var text = (el.textContent || el.value || '').trim().slice(0,50).replace(/"/g,'\\\\"');
+    if (el.type && ['submit','button','reset'].indexOf(el.type)>=0)
+      list.push(el.tagName.toLowerCase()+'[type="'+el.type+'"]');
+    var text = (el.textContent || el.value || '').trim().slice(0,50).replace(/"/g,'\\"');
     if (text) {
       var tag = el.tagName.toLowerCase();
-      if (tag==='a'||tag==='button'||el.getAttribute('role')==='button'||el.getAttribute('role')==='link') {
+      if (tag==='a'||tag==='button'||el.getAttribute('role')==='button'||el.getAttribute('role')==='link')
         list.push(tag+':has-text("'+text+'")');
-      }
     }
-    // semantic class
+
+    // ── 第四梯队：结构类（最脆，兜底） ──
     if (el.className && typeof el.className==='string') {
-      var cls = el.className.trim().split(/\\s+/).filter(function(c){ return c && !/^[a-f0-9]{6,}$/i.test(c) && !/^[a-z]+-[a-f0-9]{4,}$/i.test(c); });
+      var cls = el.className.trim().split(/\s+/).filter(function(c){
+        return c && !/^[a-f0-9]{6,}$/i.test(c) && !/^[a-z]+-[a-f0-9]{4,}$/i.test(c);
+      });
       if (cls.length>0) list.push(el.tagName.toLowerCase()+'.'+cls[0]);
     }
-    // tag fallback
-    if (list.length===0) list.push(el.tagName.toLowerCase());
-    return list.length>0 ? list : [el.tagName.toLowerCase()];
+
+    // 裸 tag 只在没有任何其他候选时才兜底，且加 :first-of-type 约束避免多元素匹配
+    if (list.length===0) list.push(el.tagName.toLowerCase() + ':first-of-type');
+    return list;
   }
   
   function bestSelector(el) {
@@ -75,6 +106,7 @@ _RECORD_JS = """
     var sel = bestSelector(data.el || null);
     var sels = data.el ? bestSelectors(data.el) : [sel];
     var entry = { action: action, selector: sel, selectors: sels, description: data.description || '', value: data.value || '', url: window.location.href, timestamp: Date.now() };
+    if (framePath && framePath.length > 0) entry.frame_path = framePath;
     if (action==='fill' || action==='select') entry.value = data.value || '';
     if (data.optional) entry.optional = true;
     if (data.key) entry.key = data.key;
@@ -234,8 +266,18 @@ _RECORD_JS = """
       _lastUrl = location.href;
     }
   });
-})();
+})(__FRAME_PATH__);
 """
+
+# 主页面注入：frame_path 为空数组
+_RECORD_JS = _RECORD_JS_TPL.replace("__FRAME_PATH__", "[]")
+
+
+def _make_frame_record_js(frame_path: list) -> str:
+    """生成带 frame_path 的录制脚本（用于 iframe 注入）。"""
+    import json as _json
+    return _RECORD_JS_TPL.replace("__FRAME_PATH__", _json.dumps(frame_path))
+
 
 # ── 会话管理 ──────────────────────────────────────────────────────────────────
 _sessions: dict = {}   # session_id → RecordingSession
@@ -356,6 +398,7 @@ def _event_to_step(ev: dict, current_len: int) -> Optional[dict]:
     step_id = ev.get("id") or f"s{str(current_len + 1).zfill(3)}"
     # keydown 事件的按键名存在 ev["key"]，需要映射到 value 字段
     value = ev.get("key") if action == "keydown" else ev.get("value", "")
+    frame_path = ev.get("frame_path") or []
     return make_step(
         action,
         step_id=step_id,
@@ -364,8 +407,167 @@ def _event_to_step(ev: dict, current_len: int) -> Optional[dict]:
         url=ev.get("url", ""),
         expected=ev.get("expected", ""),
         description=ev.get("description", ""),
+        frame_selectors=frame_path if frame_path else None,
     )
 
+
+
+def _src_keyword(src: str) -> str:
+    """从 iframe src 中提取最有辨识度的路径片段，用于 src*= 匹配。
+    例：https://pay.example.com/checkout?v=1 → "checkout"
+         /embed/player.html                 → "player"
+    """
+    try:
+        # 去掉 query 和 hash，取最后一段非空路径节点
+        path = src.split("?")[0].split("#")[0]
+        parts = [p for p in path.replace("\\", "/").split("/") if p]
+        if not parts:
+            return ""
+        last = parts[-1].split(".")[0]   # 去掉扩展名
+        # 过滤掉无意义的通用词
+        if last.lower() in ("index", "main", "app", "frame", "iframe", "embed", ""):
+            # 往前找一个更有意义的
+            for p in reversed(parts[:-1]):
+                clean = p.split(".")[0]
+                if clean.lower() not in ("index", "main", "app", "frame", "iframe", "embed", "www"):
+                    return clean
+            return ""
+        return last
+    except Exception:
+        return ""
+
+
+def _is_hashed_class(cls: str) -> bool:
+    """判断 class 名是否是框架生成的哈希（如 _abc123、vue-abc12345）。
+    含连续 4+ 个十六进制字符视为哈希。
+    """
+    import re
+    return bool(re.search(r'[0-9a-f]{4,}', cls, re.IGNORECASE))
+
+
+async def _get_frame_selector(frame, siblings: list) -> Optional[str]:
+    """获取 frame 对应的 DOM 元素 selector。跨域 frame 返回 None。
+    siblings: 同级所有 frame 列表，用于在无稳定属性时按 nth-of-type 兜底。
+    优先级：id > name > src 关键词 > class（同级唯一且非哈希）> nth-of-type 兜底
+    """
+    try:
+        frame_element = await frame.frame_element()
+        attrs = await frame_element.evaluate("""el => ({
+            id:   el.id || '',
+            name: el.getAttribute('name') || '',
+            src:  el.getAttribute('src') || '',
+            cls:  el.className || '',
+            tag:  el.tagName.toLowerCase(),
+        })""")
+        tag = attrs.get("tag", "iframe")
+
+        # 1. id —— 最稳定
+        if attrs.get("id"):
+            return f"{tag}#{attrs['id']}"
+
+        # 2. name
+        if attrs.get("name"):
+            return f'{tag}[name="{attrs["name"]}"]'
+
+        # 3. src 关键词 —— Playwright 官方推荐方式，比 DOM 位置稳定得多
+        #    取 path 中最后一段有意义的词（去掉协议/域名/hash/query）
+        src = attrs.get("src", "")
+        if src and not src.startswith("about:") and not src.startswith("javascript:"):
+            keyword = _src_keyword(src)
+            if keyword:
+                return f'{tag}[src*="{keyword}"]'
+
+        # 4. class —— 仅在同级中唯一时使用，跳过明显的框架生成 class（含数字哈希）
+        if attrs.get("cls"):
+            first_cls = attrs["cls"].strip().split()[0]
+            if not _is_hashed_class(first_cls):
+                clash = False
+                for sib in siblings:
+                    if sib is frame:
+                        continue
+                    try:
+                        sib_el = await sib.frame_element()
+                        sib_cls = await sib_el.evaluate("el => el.className || ''")
+                        if first_cls in sib_cls.strip().split():
+                            clash = True
+                            break
+                    except Exception:
+                        pass
+                if not clash:
+                    return f"{tag}.{first_cls}"
+
+        # 5. 兜底：nth-of-type（1-based），仅统计同 tag 的前驱
+        idx = 1
+        for sib in siblings:
+            if sib is frame:
+                break
+            try:
+                sib_el = await sib.frame_element()
+                sib_tag = await sib_el.evaluate("el => el.tagName.toLowerCase()")
+                if sib_tag == tag:
+                    idx += 1
+            except Exception:
+                pass
+        return f"{tag}:nth-of-type({idx})"
+    except Exception:
+        return None   # 跨域 frame 无法访问
+
+
+async def _inject_to_frame(frame, frame_path: list) -> None:
+    """向单个 frame 注入录制脚本（带 frame_path）。跨域静默失败。"""
+    try:
+        if frame.url in ("about:blank", ""):
+            return
+        js = _make_frame_record_js(frame_path)
+        await frame.evaluate(js)
+    except Exception:
+        pass
+
+
+async def _poll_frames(session: RecordingSession) -> None:
+    """遍历所有子 frame，注入录制脚本并拉取事件。递归处理多层嵌套。"""
+    async def _process_frame(frame, parent_path: list, siblings: list):
+        try:
+            if frame.url in ("about:blank", ""):
+                return
+            sel = await _get_frame_selector(frame, siblings)
+            if sel is None:
+                return   # 跨域 frame，跳过
+
+            current_path = parent_path + [sel]
+            await _inject_to_frame(frame, current_path)
+
+            new_events = await frame.evaluate("""
+                () => {
+                    var evs = window.__recEvents || [];
+                    window.__recEvents = [];
+                    return evs;
+                }
+            """)
+            for ev in new_events:
+                ev["frame_path"] = current_path
+                step = _event_to_step(ev, len(session.steps))
+                if step:
+                    session.steps.append(step)
+                    if session.ws_callback:
+                        try:
+                            await session.ws_callback({
+                                "type": "rec_step",
+                                "step": step,
+                                "total": len(session.steps),
+                            })
+                        except Exception:
+                            pass
+
+            children = frame.child_frames
+            for child in children:
+                await _process_frame(child, current_path, children)
+        except Exception as e:
+            logger.debug(f"[Recorder] frame 处理异常: {e}")
+
+    top_children = session._page.main_frame.child_frames
+    for child_frame in top_children:
+        await _process_frame(child_frame, [], top_children)
 
 
 async def _poll_events(session: RecordingSession) -> None:
@@ -405,7 +607,7 @@ async def _poll_events(session: RecordingSession) -> None:
                 except Exception as nav_e:
                     logger.debug(f"[Recorder] URL 检测异常: {nav_e}")
 
-                # ── 拉取 JS 侧事件 ──
+                # ── 拉取 JS 侧事件（主页面） ──
                 try:
                     new_events = await session._page.evaluate("""
                         () => {
@@ -430,6 +632,12 @@ async def _poll_events(session: RecordingSession) -> None:
                 except Exception as poll_e:
                     # 页面关闭或正在导航中，属正常情况，debug 级别记录
                     logger.debug(f"[Recorder] 拉取事件异常（页面可能正在跳转）: {poll_e}")
+
+                # ── 遍历所有 iframe，注入+拉取事件 ──
+                try:
+                    await _poll_frames(session)
+                except Exception as frame_e:
+                    logger.debug(f"[Recorder] frame 轮询异常: {frame_e}")
 
             except Exception as outer_e:
                 logger.warning(f"[Recorder] 轮询外层异常: {outer_e}")

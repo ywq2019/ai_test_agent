@@ -73,7 +73,7 @@ ACTION_FIELD_DOCS: dict = {
 #   "url":         str,     # navigate/wait_for_url 时的目标 URL
 #   "expected":    str,     # assert_* 时的期望值
 #   "description": str,     # 步骤描述，供报告展示和 pytest 注释
-#   "timeout":     int,     # 超时毫秒，默认 10000
+#   "timeout":     int,     # 超时毫秒，默认 30000
 #   "optional":    bool,    # True = 失败不中断整条用例
 # }
 
@@ -87,21 +87,25 @@ def make_step(
     url: str = "",
     expected: str = "",
     description: str = "",
-    timeout: int = 10000,
+    timeout: int = 30000,
     optional: bool = False,
+    frame_selectors: Optional[list] = None,
 ) -> dict:
     """构造一个 ActionStep 字典，用于录制器和 AI 生成时统一创建步骤。"""
-    return {
-        "id":          step_id or "",
-        "action":      action,
-        "selector":    selector,
-        "value":       value,
-        "url":         url,
-        "expected":    expected,
-        "description": description,
-        "timeout":     timeout,
-        "optional":    optional,
+    step = {
+        "id":              step_id or "",
+        "action":          action,
+        "selector":        selector,
+        "value":           value,
+        "url":             url,
+        "expected":        expected,
+        "description":     description,
+        "timeout":         timeout,
+        "optional":        optional,
     }
+    if frame_selectors:
+        step["frame_selectors"] = frame_selectors
+    return step
 
 
 def validate_step(step: dict) -> tuple[bool, str]:
@@ -153,15 +157,18 @@ def steps_to_description(steps: list) -> str:
         desc = step.get("description", "")
         sel = step.get("selector", "")
         val = step.get("value", "")
+        # frame 前缀（有 frame_selectors 时加标注）
+        frames = step.get("frame_selectors") or []
+        frame_prefix = f"[iframe: {' > '.join(frames)}] " if frames else ""
         # fill / type / select 即使有 description 也要补齐 value
         if desc and action in ("fill", "type", "select"):
             # 如果 desc 里已经有 " = " 就不再追加
             if " = " not in desc and val:
                 desc = f"{desc} = {val}"
-            lines.append(f"{i}. {desc}")
+            lines.append(f"{i}. {frame_prefix}{desc}")
             continue
         if desc:
-            lines.append(f"{i}. {desc}")
+            lines.append(f"{i}. {frame_prefix}{desc}")
             continue
         # 自动生成描述
         sel = step.get("selector", "")
@@ -192,5 +199,5 @@ def steps_to_description(steps: list) -> str:
             "screenshot":     f"截图 {val or '自动命名'}",
             "evaluate":       f"执行 JS: {val[:40]}{'...' if len(val) > 40 else ''}",
         }
-        lines.append(f"{i}. {mapping.get(action, action)}")
+        lines.append(f"{i}. {frame_prefix}{mapping.get(action, action)}")
     return "\n".join(lines)

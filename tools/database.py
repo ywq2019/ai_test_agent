@@ -150,6 +150,25 @@ class TaskEnvVar(Base):
     )
 
 
+class ElementAlias(Base):
+    """WebUI 元素别名库：将语义名称映射到候选 selector 列表。
+    步骤里用 @别名名称 引用，执行时展开为 selectors[] 多候选回退。
+    """
+    __tablename__ = "element_aliases"
+
+    id          = Column(Integer, primary_key=True, index=True)
+    task_id     = Column(Integer, nullable=False, index=True)
+    name        = Column(String(100), nullable=False)           # 别名，如"登录按钮"
+    selectors   = Column(JSON, nullable=False, default=list)    # 候选 selector 列表（按优先级）
+    description = Column(String(255), nullable=True, default="")
+    created_by  = Column(String(100), nullable=True)
+    created_at  = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_element_aliases_task", "task_id"),
+    )
+
+
 class AICaseFile(Base):
     __tablename__ = "ai_case_files"
 
@@ -556,6 +575,7 @@ async def init_database():
         "ALTER TABLE test_cases ADD COLUMN source VARCHAR(20) DEFAULT 'manual'",
         # 任务级 AI 场景规划结果持久化
         "ALTER TABLE test_tasks ADD COLUMN scene_plan JSON",
+        # 元素别名库（create_all 自动建表，无需 ALTER）
     ]:
         try:
             async with engine.begin() as conn:

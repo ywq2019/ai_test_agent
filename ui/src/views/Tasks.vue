@@ -480,7 +480,7 @@ const onEditDialogClose = () => {
 // ── 跳转 ──────────────────────────────────────────────────────────────────────
 const goCases     = (t) => router.push({ name: 'Cases',     query: { taskId: t.id } })
 const goExecution = (t) => router.push({ name: 'Execution', query: { taskId: t.id } })
-const goRecord    = (t) => router.push({ name: 'Execution', query: { taskId: t.id, startRecord: '1' } })
+const goRecord    = (t) => router.push({ name: 'Cases', query: { taskId: t.id, startRecord: '1' } })
 const goReports   = (t) => router.push({ name: 'Reports' })
 
 // ── 生命周期 ───────────────────────────────────────────────────────────────────

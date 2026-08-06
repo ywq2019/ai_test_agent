@@ -26,14 +26,15 @@ def _snake(name: str) -> str:
 
 
 def _step_to_code(step: dict, indent: str = "    ") -> str:
-    """将单个 ActionStep 转换为 Python Playwright 代码行。"""
-    action   = step.get("action", "")
-    selector = step.get("selector", "")
-    value    = step.get("value", "")
-    url      = step.get("url", "")
-    expected = step.get("expected", "")
-    timeout  = int(step.get("timeout", 10000))
-    desc     = step.get("description", "")
+    """将单个 ActionStep 转换为 Python Playwright 代码行。支持 frame_selectors。"""
+    action          = step.get("action", "")
+    selector        = step.get("selector", "")
+    value           = step.get("value", "")
+    url             = step.get("url", "")
+    expected        = step.get("expected", "")
+    timeout         = int(step.get("timeout", 10000))
+    desc            = step.get("description", "")
+    frame_selectors = step.get("frame_selectors") or []
 
     # 转义单引号
     def q(s):
@@ -41,26 +42,56 @@ def _step_to_code(step: dict, indent: str = "    ") -> str:
 
     comment = f"{indent}# {desc}\n" if desc else ""
 
+    # 构建执行上下文变量表达式
+    # 主页面：ctx = page
+    # 有 frame：ctx = page.frame_locator('sel1').frame_locator('sel2')
+    _page_only_actions = {"navigate", "assert_url", "assert_title", "press",
+                          "screenshot", "evaluate", "wait", "keydown"}
+    if frame_selectors and action not in _page_only_actions:
+        ctx_expr = "page"
+        for fs in frame_selectors:
+            ctx_expr += f".frame_locator('{q(fs)}')"
+    else:
+        ctx_expr = "page"
+
+    # 根据 ctx_expr 构建 locator 前缀，支持语义前缀
+    import re as _re
+    def loc(sel):
+        if sel.startswith("role="):
+            m = _re.match(r'^role=([^\[]+)(?:\[name="([^"]+)"\])?$', sel)
+            if m:
+                rname, aname = m.group(1).strip(), m.group(2)
+                if aname:
+                    return f"{ctx_expr}.get_by_role('{q(rname)}', name='{q(aname)}')"
+                return f"{ctx_expr}.get_by_role('{q(rname)}')"
+        if sel.startswith("label="):
+            return f"{ctx_expr}.get_by_label('{q(sel[6:])}')"
+        if sel.startswith("alt="):
+            return f"{ctx_expr}.get_by_alt_text('{q(sel[4:])}')"
+        return f"{ctx_expr}.locator('{q(sel)}')"
+
     _shot_name = q(value) if value else "checkpoint.png"
     mapping = {
         "navigate":       f"page.goto('{q(url)}', wait_until='networkidle', timeout={timeout})",
-        "click":          f"page.click('{q(selector)}', timeout={timeout})",
-        "fill":           f"page.fill('{q(selector)}', '{q(value)}', timeout={timeout})",
-        "type":           f"page.locator('{q(selector)}').type('{q(value)}', timeout={timeout})",
-        "select":         f"page.select_option('{q(selector)}', '{q(value)}', timeout={timeout})",
-        "check":          f"page.check('{q(selector)}', timeout={timeout})",
-        "uncheck":        f"page.uncheck('{q(selector)}', timeout={timeout})",
-        "hover":          f"page.hover('{q(selector)}', timeout={timeout})",
+        "click":          f"{loc(selector)}.click(timeout={timeout})",
+        "fill":           f"{loc(selector)}.fill('{q(value)}', timeout={timeout})",
+        "type":           f"{loc(selector)}.type('{q(value)}', timeout={timeout})",
+        "select":         f"{loc(selector)}.select_option('{q(value)}', timeout={timeout})",
+        "check":          f"{loc(selector)}.check(timeout={timeout})",
+        "uncheck":        f"{loc(selector)}.uncheck(timeout={timeout})",
+        "hover":          f"{loc(selector)}.hover(timeout={timeout})",
+        "dblclick":       f"{loc(selector)}.dblclick(timeout={timeout})",
+        "rightclick":     f"{loc(selector)}.click(button='right', timeout={timeout})",
         "press":          f"page.keyboard.press('{q(value)}')",
-        "scroll":         f"page.locator('{q(selector)}').scroll_into_view_if_needed(timeout={timeout})" if selector else "page.mouse.wheel(0, 500)",
-        "upload":         f"page.set_input_files('{q(selector)}', '{q(value)}', timeout={timeout})",
-        "wait_for":       f"page.wait_for_url('{q(url)}', timeout={timeout})" if url else f"page.wait_for_selector('{q(selector)}', timeout={timeout})",
-        "assert_text":    f"expect(page.locator('{q(selector)}')).to_have_text('{q(expected)}', timeout={timeout})",
-        "assert_visible": f"expect(page.locator('{q(selector)}')).to_be_visible(timeout={timeout})",
-        "assert_hidden":  f"expect(page.locator('{q(selector)}')).to_be_hidden(timeout={timeout})",
+        "scroll":         f"{loc(selector)}.scroll_into_view_if_needed(timeout={timeout})" if selector else "page.mouse.wheel(0, 500)",
+        "upload":         f"{loc(selector)}.set_input_files('{q(value)}', timeout={timeout})",
+        "wait_for":       f"page.wait_for_url('{q(url)}', timeout={timeout})" if url else f"{loc(selector)}.wait_for(state='visible', timeout={timeout})",
+        "assert_text":    f"expect({loc(selector)}).to_have_text('{q(expected)}', timeout={timeout})",
+        "assert_visible": f"expect({loc(selector)}).to_be_visible(timeout={timeout})",
+        "assert_hidden":  f"expect({loc(selector)}).to_be_hidden(timeout={timeout})",
         "assert_url":     f"expect(page).to_have_url('{q(expected)}', timeout={timeout})",
         "assert_title":   f"expect(page).to_have_title('{q(expected)}', timeout={timeout})",
-        "assert_count":   f"expect(page.locator('{q(selector)}')).to_have_count({expected}, timeout={timeout})",
+        "assert_count":   f"expect({loc(selector)}).to_have_count({expected}, timeout={timeout})",
         "screenshot":     f"page.screenshot(path='reports/screenshots/{_shot_name}')",
         "evaluate":       f"page.evaluate('{q(value)}')",
     }

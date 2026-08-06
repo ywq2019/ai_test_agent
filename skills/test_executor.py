@@ -167,7 +167,9 @@ class TestExecutor:
                     break
 
                 result = await self.execute_case(
-                    case, url, browser_type, screenshots_dir, task_id=_task_id
+                    case, url, browser_type, screenshots_dir,
+                    task_id=_task_id,
+                    step_callback=progress_callback,
                 )
                 results.append(result)
                 completed_cases += 1
@@ -198,6 +200,7 @@ class TestExecutor:
         browser_type: str = "chromium",
         screenshots_dir: str = None,
         task_id: int = None,
+        step_callback: Optional[Callable] = None,
     ) -> Dict[str, Any]:
         """
         执行单条用例，优先使用 ActionRunner 执行结构化 steps_json，
@@ -217,335 +220,63 @@ class TestExecutor:
             steps_json = case.get("steps_json")
             if steps_json:
                 try:
-                    # 解析步骤列表
                     if isinstance(steps_json, str):
                         steps_json = json.loads(steps_json)
 
                     if steps_json and isinstance(steps_json, list):
                         from skills.action_runner import ActionRunner
-                        runner = ActionRunner(task_id=None, browser=browser_type)
-                        # Load task environment variables
-                        env_vars = {}
+                        from tools.database import TaskEnvVar, async_session_maker
+                        from sqlalchemy import select as _sa_select
+
+                        runner = ActionRunner(task_id=task_id, browser=browser_type)
+                        if step_callback:
+                            runner.step_callback = step_callback
+
+                        # 加载任务级环境变量 + 元素别名库（共享同一个 session）
                         try:
-                            from tools.database import TaskEnvVar, async_session_maker
-                            from sqlalchemy import select
                             async with async_session_maker() as _ses:
-                                _r = await _ses.execute(select(TaskEnvVar).where(TaskEnvVar.task_id == task_id))
-                                for _ev in _r.scalars().all():
-                                    # Use _ev.value (already decrypted by the model)
-                                    env_vars[_ev.key] = _ev.value
+                                _r = await _ses.execute(
+                                    _sa_select(TaskEnvVar).where(TaskEnvVar.task_id == task_id)
+                                )
+                                runner.env_vars = {ev.key: ev.value for ev in _r.scalars().all()}
+                                # 把 db session 挂上去，让 _load_aliases 能读别名库
+                                runner.db = _ses
+                                await runner._load_aliases()
+                                runner.db = None   # 加载完解绑，避免跨 session 使用
                         except Exception:
                             pass
-                        runner.env_vars = env_vars
 
-                        # ── Handler functions ──
-                        async def _do_navigate(ctx, page, step, sel):
-                            url_target = step.get("url") or step.get("value", "")
-                            if url_target:
-                                await page.goto(url_target, wait_until="domcontentloaded", timeout=20000)
-                            return {"action": "navigate", "url": url_target, "passed": True}
-
-                        async def _do_fill(ctx, page, step, sel):
-                            val = step.get("value", "")
-                            try:
-                                await page.fill(sel, val, timeout=5000)
-                            except Exception:
-                                await page.locator(sel).fill(val, timeout=5000)
-                            return {"action": "fill", "selector": sel, "value": val, "passed": True}
-
-                        async def _do_click(ctx, page, step, sel):
-                            try:
-                                await page.click(sel, timeout=5000)
-                            except Exception:
-                                try:
-                                    await page.locator(sel).click(force=True, timeout=3000)
-                                except Exception:
-                                    await page.locator(sel).dispatch_event("click")
-                            return {"action": "click", "selector": sel, "passed": True}
-
-                        async def _do_dblclick(ctx, page, step, sel):
-                            try:
-                                await page.dblclick(sel, timeout=5000)
-                            except Exception:
-                                await page.locator(sel).dispatch_event("dblclick")
-                            return {"action": "dblclick", "selector": sel, "passed": True}
-
-                        async def _do_rightclick(ctx, page, step, sel):
-                            try:
-                                await page.locator(sel).click(button="right", timeout=5000)
-                            except Exception:
-                                await page.locator(sel).dispatch_event("contextmenu")
-                            return {"action": "rightclick", "selector": sel, "passed": True}
-
-                        async def _do_hover(ctx, page, step, sel):
-                            try:
-                                await page.hover(sel, timeout=5000)
-                            except Exception:
-                                await page.locator(sel).hover(force=True, timeout=3000)
-                            return {"action": "hover", "selector": sel, "passed": True}
-
-                        async def _do_submit(ctx, page, step, sel):
-                            try:
-                                await page.locator(sel).dispatch_event("submit")
-                            except Exception:
-                                pass
-                            # Also try clicking the submit element
-                            try:
-                                await page.click(sel, timeout=3000)
-                            except Exception:
-                                pass
-                            return {"action": "submit", "selector": sel, "passed": True}
-
-                        async def _do_select(ctx, page, step, sel):
-                            val = step.get("value", "")
-                            try:
-                                await page.select_option(sel, val, timeout=5000)
-                            except Exception:
-                                await page.locator(sel).select_option(val, timeout=5000)
-                            return {"action": "select", "selector": sel, "value": val, "passed": True}
-
-                        async def _do_scroll(ctx, page, step, sel):
-                            y = step.get("value", "0")
-                            try:
-                                await page.evaluate(f"window.scrollTo({{top:{y},behavior:'smooth'}})")
-                            except Exception:
-                                pass
-                            return {"action": "scroll", "value": y, "passed": True}
-
-                        async def _do_keydown(ctx, page, step, sel):
-                            key = step.get("key", step.get("value", "Enter"))
-                            try:
-                                if sel != "body":
-                                    await page.locator(sel).press(key)
-                                else:
-                                    await page.keyboard.press(key)
-                            except Exception:
-                                await page.keyboard.press(key)
-                            return {"action": "keydown", "key": key, "passed": True}
-
-                        async def _do_wait(ctx, page, step, sel):
-                            raw = str(step.get("value", "") or "").strip()
-                            ms = int(raw) if raw.isdigit() else int(step.get("timeout", 1000) or 1000)
-                            await asyncio.sleep(ms / 1000)
-                            return {"action": "wait", "duration_ms": ms, "passed": True}
-
-                        async def _do_press(ctx, page, step, sel):
-                            key = step.get("key", step.get("value", "Enter"))
-                            try:
-                                await page.keyboard.press(key)
-                            except Exception:
-                                pass
-                            return {"action": "press", "key": key, "passed": True}
-
-                        async def _do_assert_text(ctx, page, step, sel):
-                            expected = step.get("expected", step.get("value", step.get("description", "")))
-                            if sel:
-                                text = await page.text_content(sel) or ""
-                            else:
-                                text = await page.text_content("body") or ""
-                            if isinstance(expected, str) and expected in text:
-                                return {"action": "assert_text", "passed": True, "found": expected}
-                            return {"action": "assert_text", "passed": False, "error": f"未找到文本「{expected}」"}
-
-                        async def _do_assert_visible(ctx, page, step, sel):
-                            if sel:
-                                try:
-                                    visible = await page.locator(sel).is_visible()
-                                except Exception:
-                                    visible = False
-                            else:
-                                visible = True
-                            if visible:
-                                return {"action": "assert_visible", "passed": True}
-                            return {"action": "assert_visible", "passed": False, "error": f"元素「{sel}」不可见"}
-
-                        async def _do_assert_url(ctx, page, step, sel):
-                            expected = step.get("expected", step.get("value", ""))
-                            current = page.url
-                            if isinstance(expected, str) and expected in current:
-                                return {"action": "assert_url", "passed": True}
-                            return {"action": "assert_url", "passed": False, "error": f"URL 不包含「{expected}」"}
-
-                        async def _do_assert_title(ctx, page, step, sel):
-                            expected = step.get("expected", step.get("value", ""))
-                            title = await page.title()
-                            if isinstance(expected, str) and expected in title:
-                                return {"action": "assert_title", "passed": True}
-                            return {"action": "assert_title", "passed": False, "error": f"标题不包含「{expected}」"}
-
-                        _step_handlers = {
-                            "navigate": _do_navigate,
-                            "fill": _do_fill,
-                            "click": _do_click,
-                            "dblclick": _do_dblclick,
-                            "rightclick": _do_rightclick,
-                            "hover": _do_hover,
-                            "submit": _do_submit,
-                            "select": _do_select,
-                            "scroll": _do_scroll,
-                            "keydown": _do_keydown,
-                            "wait": _do_wait,
-                            "press": _do_press,
-                            "assert_text": _do_assert_text,
-                            "assert_visible": _do_assert_visible,
-                            "assert_url": _do_assert_url,
-                            "assert_title": _do_assert_title,
-                        }
-
-                        step_results = []
-                        case_failed = False
-                        case_error = ""
-                        page_ref = bt.page
-
-                        for step in steps_json:
-                            if not isinstance(step, dict):
-                                continue
-                            action = step.get("action", "click")
-                            description = step.get("description", "")
-                            is_optional = step.get("optional", False)
-
-                            step_start = datetime.utcnow()
-
-                            # ── Smart wait: try all alternate selectors ──
-                            _selectors = step.get("selectors", [])
-                            if not _selectors and step.get("selector"):
-                                _selectors = [step["selector"]]
-
-                            _found = False
-                            _used_sel = step.get("selector", "")
-                            if action in ("fill", "click", "dblclick", "rightclick", "hover", "submit", "select", "scroll", "keydown"):
-                                for _sel in _selectors:
-                                    try:
-                                        await page_ref.wait_for_selector(_sel, state="attached", timeout=3000)
-                                        _found = True
-                                        _used_sel = _sel
-                                        break
-                                    except Exception:
-                                        continue
-                                if not _found:
-                                    # last resort: force wait and hope element appears
-                                    await asyncio.sleep(1)
-
-                            try:
-                                handler = _step_handlers.get(action)
-                                if handler:
-                                    result = await handler(runner, page_ref, step, _used_sel)
-                                    step_duration = (datetime.utcnow() - step_start).total_seconds()
-                                    result["description"] = description
-                                    result["duration_ms"] = round(step_duration * 1000, 1)
-                                    step_results.append(result)
-                                    if not result.get("passed") and not is_optional:
-                                        case_failed = True
-                                        case_error = f"步骤「{description or action}」失败: {result.get('error', '')}"
-                                        if not error_message:
-                                            error_message = case_error
-                                        # 截图失败步骤
-                                        if screenshots_dir:
-                                            try:
-                                                screenshot_filename = (
-                                                    f"case_{case.get('id', 'unknown')}_"
-                                                    f"step_{step.get('id', '')}_"
-                                                    f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.png"
-                                                )
-                                                screenshot_path = str(Path(screenshots_dir) / screenshot_filename)
-                                                await bt.take_screenshot(screenshot_path)
-                                            except Exception:
-                                                pass
-                                        break  # 非可选步骤失败 → 终止该用例
-                                    elif not result.get("passed") and is_optional:
-                                        logger.warning(f"可选步骤失败（跳过）: {result.get('error', '')}")
-                                else:
-                                    # 未知动作：尝试通用 click
-                                    try:
-                                        if _used_sel:
-                                            await page_ref.wait_for_selector(_used_sel, timeout=5000)
-                                            await page_ref.click(_used_sel)
-                                        step_duration = (datetime.utcnow() - step_start).total_seconds()
-                                        step_results.append({
-                                            "action": action, "description": description,
-                                            "passed": True,
-                                            "duration_ms": round(step_duration * 1000, 1),
-                                        })
-                                    except Exception as fallback_e:
-                                        step_duration = (datetime.utcnow() - step_start).total_seconds()
-                                        if is_optional:
-                                            logger.warning(f"未知动作可选步骤失败（跳过）: {fallback_e}")
-                                            step_results.append({
-                                                "action": action, "description": description,
-                                                "passed": True,
-                                                "duration_ms": round(step_duration * 1000, 1),
-                                                "warning": str(fallback_e)[:200],
-                                            })
-                                        else:
-                                            case_failed = True
-                                            case_error = f"未知动作「{action}」失败: {str(fallback_e)[:200]}"
-                                            if not error_message:
-                                                error_message = case_error
-                                            step_results.append({
-                                                "action": action, "description": description,
-                                                "passed": False,
-                                                "duration_ms": round(step_duration * 1000, 1),
-                                                "error": str(fallback_e)[:300],
-                                            })
-                                            break
-
-                            except Exception as step_e:
-                                step_duration = (datetime.utcnow() - step_start).total_seconds()
-                                if is_optional:
-                                    logger.warning(f"可选步骤失败（跳过）: {step_e}")
-                                    step_results.append({
-                                        "action": action, "description": description,
-                                        "passed": True,
-                                        "duration_ms": round(step_duration * 1000, 1),
-                                        "warning": str(step_e)[:200],
-                                    })
-                                else:
-                                    case_failed = True
-                                    case_error = f"步骤「{description or action}」失败: {str(step_e)[:200]}"
-                                    if not error_message:
-                                        error_message = case_error
-                                    logger.error(f"Step failed: {step_e}")
-                                    step_results.append({
-                                        "action": action, "description": description,
-                                        "passed": False,
-                                        "duration_ms": round(step_duration * 1000, 1),
-                                        "error": str(step_e)[:300],
-                                    })
-                                    # 截图失败步骤
-                                    if screenshots_dir:
-                                        try:
-                                            screenshot_filename = (
-                                                f"case_{case.get('id', 'unknown')}_"
-                                                f"step_{step.get('id', '')}_"
-                                                f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.png"
-                                            )
-                                            screenshot_path = str(Path(screenshots_dir) / screenshot_filename)
-                                            await bt.take_screenshot(screenshot_path)
-                                        except Exception:
-                                            pass
-                                    break  # 非可选步骤失败 → 终止该用例
-
-                        # 未失败且无错误 → 通过
-                        if not case_failed and not error_message:
-                            status = "passed"
-                        else:
-                            status = "failed"
+                        # 直接委托给 ActionRunner.run_case，所有新特性（别名解析、
+                        # 语义 locator、strict mode 降级、AI 修复）在这里统一处理
+                        case_payload = dict(case)
+                        case_payload["steps_json"] = steps_json
+                        result = await runner.run_case(case_payload, bt.page)
 
                         end_time = datetime.utcnow()
+                        step_results = result.get("steps", [])   # _case_result 用 "steps" 字段
+                        case_passed = result.get("status") == "passed"
+                        # 从失败步骤里提取错误信息
+                        failed_steps = [s for s in step_results if not s.get("passed")]
+                        err = failed_steps[0].get("error", "") if failed_steps else ""
+                        # 失败步骤截图（ActionRunner 已在 step_result 里记录路径）
+                        failed_shot = next(
+                            (s.get("screenshot") for s in step_results if s.get("screenshot")),
+                            screenshot_path,
+                        )
                         return {
                             "case_id": case.get("id"),
                             "case_name": case.get("name", ""),
-                            "status": status,
+                            "status": "passed" if case_passed else "failed",
                             "start_time": start_time.isoformat(),
                             "end_time": end_time.isoformat(),
                             "duration": (end_time - start_time).total_seconds(),
-                            "error_message": error_message,
-                            "screenshot_path": screenshot_path,
-                            "logs": json.dumps(step_results, ensure_ascii=False) if step_results else "",
+                            "error_message": err,
+                            "screenshot_path": failed_shot or "",
+                            "logs": json.dumps(step_results, ensure_ascii=False),
                         }
                 except Exception as e:
                     logger.warning(f"ActionRunner 执行失败，回退到简单执行: {e}")
-                    error_message = str(e)
+
             # ── 回退：简单 element_selector 执行（旧逻辑） ──
             if error_message or not case.get("steps_json"):
                 if case.get("element_selector"):

@@ -156,16 +156,17 @@ cd ui && npm run dev    # 终端2：前端 8090（代理到后端）
 
 ### WebUI 自动化
 
-Playwright 驱动浏览器，以「AI 场景规划 → 录制 → 健壮化 → 执行」为主线，降低脚本维护成本。
+Playwright 驱动浏览器，以「AI 场景规划 → 录制 → 健壮化 → 可视化编辑 → 执行」为主线，降低脚本维护成本。
 
 | 功能 | 说明 |
 | --- | --- |
-| **AI 场景规划** | 抓取页面元素 + 注入已有用例 + 需求文档，从 5 个落地维度（核心流程/表单验证/增删改/筛选/异常反馈）自动规划录制场景，结果持久化到任务 |
+| **AI 场景规划** | 抓取页面元素 + 注入已有用例 + 需求文档，从 5 个落地维度（核心流程/表单验证/增删改/筛选/异常反馈）自动规划录制场景，结果持久化到任务；支持追加场景、重新规划 |
 | **场景 → 录制联动** | 场景规划结果展示在抽屉里，点击「开始录制」一键启动有头浏览器；录制完成自动标记场景为已录制、重新打开抽屉继续下一个 |
 | **录制健壮化** | 保存时自动运行 `step_hardener`：推导多候选 selector（A/B/C/D 稳定性评级）、关键操作后自动插入 wait + assert（optional），显著降低执行失败率 |
-| **可视化步骤编辑器** | 用例编辑弹窗双 Tab：基本信息 + 步骤编辑器；步骤表格每行显示健壮度评级，D 级标红；点击 selector 胶囊展开所有备选，一键切换 |
+| **可视化步骤编辑器** | 用例编辑弹窗双 Tab：基本信息 + 步骤编辑器；步骤表格每行显示健壮度评级，D 级标红；点击 selector 胶囊展开所有备选，一键切换；支持行内编辑 action/selector/value/expected |
 | **来源标签** | 用例列表显示来源（🎬录制 / 🤖AI / ✏️手动），AI 生成且失败的用例旁出现「重录」快捷按钮 |
 | **场景覆盖视图** | 用例管理新增「场景覆盖」Tab：按规划场景分组，显示覆盖进度，未覆盖场景一键跳去录制 |
+| **元素别名库** | 常用元素 selector 命名为别名，步骤编辑器输入 `@` 触发补全，selector 变更只改别名库一处即全部生效 |
 | **录制异步化** | 启动录制立即返回，Chrome 后台启动，就绪后 WebSocket 推送 `recording_ready`，前端自动切换状态 |
 | **多 Selector 回退** | 执行时按 selector 候选列表逐一尝试，找到可用元素即执行，应对动态 id / 框架重构 |
 | **多浏览器并行** | 同一批用例同时在 Chromium / Firefox / WebKit 执行，各出一份报告 |
@@ -175,6 +176,9 @@ Playwright 驱动浏览器，以「AI 场景规划 → 录制 → 健壮化 → 
 | **pytest 导出** | 将 ActionStep 列表导出为标准 Python Playwright 测试脚本（zip 包） |
 | **页面元素抓取** | 场景规划前可一键抓取页面元素（`domcontentloaded` 策略，5 屏滚动，约 15s 完成） |
 | **分页加载** | 用例列表默认每页 20 条，支持 20/50/100 切换，筛选/搜索自动重置到第 1 页 |
+| **变量替换** | value / url / expected 等字段支持 `{{变量名}}` 语法，从任务环境变量表替换，支持多环境参数化 |
+
+> 📖 步骤编辑详细说明（action 类型、selector 写法、expected 断言、稳定性评级等）请参阅 [WebUI 步骤编辑操作手册](./docs/webui-step-editor-guide.md)
 
 ### 接口自动化
 
@@ -364,10 +368,10 @@ Prompt 统一管理在 `skills/prompts/*.yaml`，**无需重启**即可生效（
 | AI 用例 | POST | `/api/v1/ai-cases/{id}/incremental-update` | 需求变更增量更新 |
 | AI 用例 | GET | `/api/v1/ai-cases/{id}/traceability` | 需求追踪矩阵 |
 | WebUI | POST | `/api/v1/parse/page` | 抓取页面元素（供场景规划使用） |
-| WebUI | POST | `/api/v1/cases/plan-scenes/{task_id}` | AI 场景规划（5 维度，持久化到任务） |
+| WebUI | POST | `/api/v1/cases/plan-scenes/{task_id}` | AI 场景规划（5 维度，持久化到任务；`append=true` 追加） |
 | WebUI | GET | `/api/v1/cases/scene-plan/{task_id}` | 读取持久化场景规划 |
 | WebUI | PATCH | `/api/v1/cases/scene-plan/{task_id}/mark-recorded` | 标记场景已录制 |
-| WebUI | GET | `/api/v1/cases/{case_id}/steps` | 获取用例 steps_json（步骤编辑器加载） |
+| WebUI | GET | `/api/v1/cases/{case_id}/steps` | 获取用例 steps_json（步骤编辑器加载）|
 | WebUI | POST | `/api/v1/execute` | 执行测试（单浏览器） |
 | WebUI | POST | `/api/v1/execute/multi-browser` | 多浏览器并行执行 |
 | WebUI | POST | `/api/v1/recording/start` | 启动录制（异步，立即返回 session_id） |
@@ -473,7 +477,7 @@ ai_test_agent/
 │   ├── views/
 │   │   ├── AiCases.vue          # AI 用例生成（生成/优化/增量/追踪矩阵/Excel导出）
 │   │   ├── Execution.vue        # WebUI 执行（AI场景规划/录制/健壮化/执行/多浏览器）
-│   │   ├── Cases.vue            # WebUI 用例管理（来源标签/步骤编辑器/场景覆盖/分页）
+│   │   ├── Cases.vue            # WebUI 用例管理（来源标签/可视化步骤编辑器/备选Selector/场景覆盖/分页）
 │   │   ├── Tasks.vue            # 任务管理
 │   │   ├── Reports.vue          # 执行报告
 │   │   ├── ApiTest.vue          # 接口测试（含CSV数据驱动/Postman导入）
@@ -484,7 +488,9 @@ ai_test_agent/
 │   │   ├── LLM.vue              # 大模型配置
 │   │   └── Skills.vue           # 技能管理
 │   └── api/index.js             # Axios 封装 + 401 拦截器
-└── tests/                       # 单元测试
+├── tests/                       # 单元测试
+└── docs/
+    └── webui-step-editor-guide.md  # WebUI 步骤编辑操作手册（action/selector/expected 详解）
 ```
 
 ---

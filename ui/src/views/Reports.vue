@@ -103,7 +103,13 @@
                         <span class="step-num">{{ si + 1 }}</span>
                         <span class="step-icon">{{ s.passed ? '✅' : '❌' }}</span>
                         <span class="step-action">{{ s.action }}</span>
-                        <span class="step-desc">{{ s.description || '-' }}</span>
+                        <span class="step-desc">{{
+                          s.description ||
+                          (s.action === 'navigate' ? s.url :
+                           s.action === 'assert_url' || s.action === 'assert_title' ? s.expected :
+                           s.selector ? s.selector + (s.value ? ' = ' + s.value : '') :
+                           s.value || '-')
+                        }}</span>
                         <span class="step-dur">{{ s.duration_ms }}ms</span>
                         <span v-if="s.warning" class="step-msg step-warn-text">⚠ {{ s.warning }}</span>
                         <span v-if="s.error" class="step-msg step-err-text">{{ s.error }}</span>

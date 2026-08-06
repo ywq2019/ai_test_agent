@@ -27,22 +27,9 @@
                   <el-dropdown-item @click="; multiBrowserMode = true">
                     <el-icon><Connection /></el-icon>多浏览器并行执行
                   </el-dropdown-item>
-                  <el-dropdown-item @click="envVarDialogVisible = true">
-                    <el-icon><Setting /></el-icon>环境变量
-                  </el-dropdown-item>
-                  <el-dropdown-item @click="exportPytest" :disabled="exportLoading">
-                    <el-icon><Download /></el-icon>导出 pytest 脚本
-                  </el-dropdown-item>
-                  <el-dropdown-item divided @click="toggleRecording">
-                    <el-icon><VideoCamera /></el-icon>{{ isRecording ? '停止录制' : recordingStarting ? '启动中...' : '录制操作' }}
-                  </el-dropdown-item>
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
-            <el-button type="success" size="default" @click="openScenePlanner" :disabled="!selectedTaskId">
-              <el-icon><MagicStick /></el-icon>
-              AI 规划场景
-            </el-button>
             <el-button type="primary" size="default" @click="executeAll" :loading="taskStore.isExecuting" :disabled="!selectedTaskId">
               <el-icon><VideoPlay /></el-icon>
               执行全部
@@ -92,12 +79,22 @@
               :stroke-width="16"
               :striped="taskStore.isExecuting"
               :striped-flow="taskStore.isExecuting"
-              style="margin: 10px 0 6px;"
+              style="margin: 10px 0 4px;"
             />
 
-            <div v-if="taskStore.isExecuting && currentCaseName" class="current-case-bar">
-              <el-icon class="spin-icon"><Loading /></el-icon>
-              <span>正在执行：<strong>{{ currentCaseName }}</strong></span>
+            <!-- 用例 + 步骤实时状态 -->
+            <div v-if="taskStore.isExecuting" class="live-status-bar">
+              <div class="live-case-row">
+                <el-icon class="spin-icon"><Loading /></el-icon>
+                <span class="live-case-name">{{ currentCaseName || '准备中...' }}</span>
+                <span v-if="currentStepTotal > 0" class="live-step-badge">
+                  步骤 {{ currentStepIdx }}/{{ currentStepTotal }}
+                </span>
+              </div>
+              <div v-if="currentStepDesc" class="live-step-row">
+                <span class="live-step-dot"></span>
+                <span class="live-step-desc">{{ currentStepDesc }}</span>
+              </div>
             </div>
 
             <div class="progress-mini-stats">
@@ -118,7 +115,7 @@
           </el-empty>
 
           <!-- 执行结果表格 -->
-          <el-table v-if="liveResults.length > 0" :data="liveResults" stripe style="width: 100%; margin-top: 12px;" max-height="460">
+          <el-table v-show="liveResults.length > 0" :data="liveResults" stripe style="width: 100%; margin-top: 12px;" max-height="460">
             <el-table-column prop="case_name" label="用例名称" min-width="160" show-overflow-tooltip />
             <el-table-column prop="status" label="状态" width="85" align="center">
               <template #default="{ row }">
@@ -146,7 +143,7 @@
             </el-table-column>
           </el-table>
 
-          <div v-if="liveResults.length > 0 && !taskStore.isExecuting" style="margin-top: 12px; display: flex; gap: 8px;">
+          <div v-show="liveResults.length > 0 && !taskStore.isExecuting" style="margin-top: 12px; display: flex; gap: 8px;">
             <el-button size="small" type="primary" @click="executeAll" :disabled="!selectedTaskId">
               <el-icon><RefreshRight /></el-icon>重新执行
             </el-button>
@@ -206,260 +203,13 @@
       <img v-if="screenshotUrl" :src="screenshotUrl" style="width: 100%;" />
     </el-dialog>
 
-    <!-- 环境变量 dialog -->
-    <el-dialog v-model="envVarDialogVisible" title="任务环境变量" width="560px" destroy-on-close>
-      <el-table :data="envVars" size="small">
-        <el-table-column prop="key" label="Key" min-width="120" />
-        <el-table-column label="Value" min-width="140">
-          <template #default="{ row }">{{ row.is_secret ? '******' : row.value }}</template>
-        </el-table-column>
-        <el-table-column label="Secret" width="70">
-          <template #default="{ row }"><el-tag size="small" :type="row.is_secret ? 'danger' : 'info'">{{ row.is_secret ? '是' : '否' }}</el-tag></template>
-        </el-table-column>
-        <el-table-column label="操作" width="60">
-          <template #default="{ row }"><el-button type="danger" size="small" text @click="deleteEnvVar(row.id)">删除</el-button></template>
-        </el-table-column>
-      </el-table>
-      <el-divider>新增</el-divider>
-      <el-form :model="newEnvVar" inline>
-        <el-form-item label="Key"><el-input v-model="newEnvVar.key" placeholder="KEY" style="width:120px;" size="small" /></el-form-item>
-        <el-form-item label="Value"><el-input v-model="newEnvVar.value" placeholder="value" style="width:140px;" size="small" /></el-form-item>
-        <el-form-item label="Secret"><el-switch v-model="newEnvVar.is_secret" size="small" /></el-form-item>
-        <el-form-item><el-button type="primary" size="small" @click="saveEnvVar" :loading="envVarLoading">保存</el-button></el-form-item>
-      </el-form>
-    </el-dialog>
-
-    <!-- 录制 dialog -->
-    <el-dialog v-model="recordingDialogVisible" title="录制操作" width="520px" :close-on-click-modal="false">
-      <!-- 启动中状态 -->
-      <el-alert v-if="recordingStarting" type="info" show-icon :closable="false" style="margin-bottom:12px;">
-        <template #title>
-          <el-icon class="is-loading" style="margin-right:6px"><Loading /></el-icon>
-          浏览器启动中，请稍候（约 15-20 秒）...
-        </template>
-      </el-alert>
-      <!-- 录制中状态 -->
-      <el-alert v-else-if="isRecording" type="warning" show-icon :closable="false" style="margin-bottom:12px;">
-        浏览器已弹出，请在页面中操作，步骤会实时预览。完成后点击「停止录制」。
-      </el-alert>
-      <template v-if="!isRecording && !recordingStarting && recordedSteps.length">
-        <el-alert type="success" show-icon :closable="false" style="margin-bottom:12px;">
-          录制完成，共 {{ recordedSteps.length }} 个步骤
-        </el-alert>
-        <el-input v-model="recordingCaseName" placeholder="用例名称" style="margin-bottom:10px;" />
-      </template>
-      <el-scrollbar max-height="260px" v-if="recordedSteps.length">
-        <div class="rec-step-list">
-          <div v-for="(s, i) in recordedSteps" :key="i" class="rec-step-item">
-            <el-tag size="small" :type="actionTagType(s.action)" effect="plain">{{ s.action }}</el-tag>
-            <span class="rec-step-desc">{{ s.description || s.selector || s.url || s.value || '' }}</span>
-          </div>
-        </div>
-      </el-scrollbar>
-      <el-empty v-else-if="!isRecording && !recordingStarting" description="暂无步骤" />
-      <template #footer>
-        <el-button v-if="isRecording" type="danger" @click="stopRecording" :loading="recordingLoading">停止录制</el-button>
-        <el-button v-if="!isRecording && !recordingStarting && recordedSteps.length" type="primary" @click="saveRecording" :loading="recordingLoading">保存为用例</el-button>
-        <el-button @click="recordingDialogVisible = false">关闭</el-button>
-      </template>
-    </el-dialog>
-
-    <!-- ══ AI 场景规划侧抽屉 ══ -->
-    <el-drawer
-      v-model="scenePlannerVisible"
-      direction="rtl"
-      size="500px"
-      :close-on-click-modal="false"
-    >
-      <template #header>
-        <div style="display:flex;align-items:center;gap:10px;flex:1">
-          <el-icon size="20" color="#409eff"><MagicStick /></el-icon>
-          <span style="font-size:16px;font-weight:600">AI 场景规划</span>
-          <!-- 进度 -->
-          <template v-if="scenes.length">
-            <el-tag size="small" type="info" effect="plain">
-              {{ scenes.filter(s=>s.recorded).length }}/{{ scenes.length }} 已录制
-            </el-tag>
-            <el-progress
-              v-if="scenes.length"
-              :percentage="Math.round(scenes.filter(s=>s.recorded).length/scenes.length*100)"
-              :stroke-width="6"
-              style="width:80px;margin-left:4px"
-              :status="scenes.every(s=>s.recorded) ? 'success' : ''"
-            />
-          </template>
-        </div>
-      </template>
-
-      <!-- ── 输入区（未生成 / 需重新规划） ── -->
-      <div v-if="!scenes.length" class="scene-input-area">
-        <div class="scene-intro">
-          <p>AI 会从 <strong>5 个落地维度</strong>分析页面，自动规划场景列表：</p>
-          <div class="scene-dimensions">
-            <el-tag v-for="d in sceneDimensions" :key="d.name" size="small"
-              :type="d.type" effect="plain" class="dim-tag">
-              {{ d.name }}
-            </el-tag>
-          </div>
-        </div>
-
-        <!-- 无页面元素提示 -->
-        <el-alert v-if="!hasPageElements" type="warning" show-icon :closable="false"
-          style="margin-bottom:14px">
-          <template #title>尚未抓取页面元素</template>
-          <template #default>
-            <div style="margin-top:6px">
-              <div style="color:#606266;font-size:13px;margin-bottom:8px">
-                抓取后 AI 可根据页面实际结构规划场景，准确度更高。也可以跳过，在下方补充功能描述后直接生成。
-              </div>
-              <el-button size="small" type="warning" plain
-                :loading="parsingPage" @click="parseCurrentPage">
-                <el-icon><Connection /></el-icon>
-                {{ parsingPage ? '抓取中...' : '抓取页面元素' }}
-              </el-button>
-            </div>
-          </template>
-        </el-alert>
-        <!-- 已有元素时显示简要信息 -->
-        <div v-else class="page-elements-hint">
-          <el-icon size="13" color="#67c23a"><SuccessFilled /></el-icon>
-          已抓取页面元素
-          <el-button size="small" link @click="parseCurrentPage" :loading="parsingPage"
-            style="margin-left:4px">重新抓取</el-button>
-        </div>
-
-        <el-form label-position="top" size="small">
-          <el-form-item>
-            <template #label>
-              <span>页面功能描述
-                <span style="color:#909399;font-weight:400">（补充后 AI 更精准）</span>
-              </span>
-            </template>
-            <el-input
-              v-model="sceneDescription"
-              type="textarea" :rows="3"
-              placeholder="例：登录页，支持账号密码登录和短信验证码登录，登录失败提示错误原因，支持记住密码"
-            />
-          </el-form-item>
-        </el-form>
-
-        <el-button type="primary" style="width:100%;height:40px;font-size:14px"
-          :loading="scenePlanning" @click="planScenes(false)">
-          <el-icon style="margin-right:6px"><MagicStick /></el-icon>
-          {{ scenePlanning ? 'AI 分析中...' : '开始分析，生成场景' }}
-        </el-button>
-        <div v-if="scenePlanning" class="scene-planning-hint">
-          <el-icon class="is-loading"><Loading /></el-icon>
-          正在从 6 个测试维度分析页面，约需 15-30 秒...
-        </div>
-      </div>
-
-      <!-- ── 场景列表 ── -->
-      <div v-else class="scene-list-area">
-        <!-- 操作栏 -->
-        <div class="scene-toolbar">
-          <span style="font-size:13px;color:#606266">
-            点击场景卡片的「录制」按钮，录完自动保存为用例
-          </span>
-          <div style="display:flex;gap:6px">
-            <el-button size="small" :loading="scenePlanning" @click="planScenes(true)">
-              <el-icon><Plus /></el-icon>追加场景
-            </el-button>
-            <el-button size="small" text type="danger" @click="resetScenes">
-              重新规划
-            </el-button>
-          </div>
-        </div>
-
-        <div class="scene-list">
-          <div v-for="scene in scenes" :key="scene.id"
-            class="scene-card" :class="{ 'scene-recorded': scene.recorded }">
-
-            <!-- 卡片头部 -->
-            <div class="scene-card-header">
-              <div style="display:flex;align-items:center;gap:6px;flex:1;min-width:0">
-                <el-tag size="small"
-                  :type="scene.priority==='P0'?'danger':scene.priority==='P1'?'warning':'info'"
-                  effect="plain">{{ scene.priority }}</el-tag>
-                <el-tag v-if="scene.dimension" size="small" type="info" effect="plain"
-                  style="font-size:11px">{{ scene.dimension }}</el-tag>
-                <!-- 场景名行内编辑 -->
-                <template v-if="editingSceneId === scene.id">
-                  <el-input v-model="scene.name" size="small" style="flex:1"
-                    @blur="editingSceneId = null"
-                    @keyup.enter="editingSceneId = null"
-                    @keyup.esc="editingSceneId = null"
-                    autofocus />
-                </template>
-                <span v-else class="scene-name" @click="editingSceneId = scene.id"
-                  title="点击编辑名称">{{ scene.name }}</span>
-              </div>
-              <el-tag v-if="scene.recorded" size="small" type="success" effect="dark">✓ 已录制</el-tag>
-              <el-button v-else link size="small" type="danger" style="padding:0;margin-left:4px"
-                @click="removeScene(scene.id)" title="删除此场景">
-                <el-icon><Close /></el-icon>
-              </el-button>
-            </div>
-
-            <!-- 描述（可行内编辑） -->
-            <div v-if="editingSceneId === scene.id">
-              <el-input v-model="scene.description" size="small" type="textarea" :rows="2"
-                style="margin-top:6px" placeholder="场景描述" />
-            </div>
-            <div v-else class="scene-desc" @click="editingSceneId = scene.id"
-              title="点击编辑描述">{{ scene.description }}</div>
-
-            <!-- 步骤预览（折叠） -->
-            <el-collapse-transition>
-              <div v-if="expandedSceneId === scene.id" class="scene-steps">
-                <div v-for="(step, i) in scene.steps_desc" :key="i" class="scene-step-item">
-                  <span class="step-num">{{ i + 1 }}</span>
-                  <span>{{ step }}</span>
-                </div>
-                <div v-if="scene.expected" class="scene-expected" style="margin-top:6px">
-                  <el-icon size="12" color="#67c23a"><SuccessFilled /></el-icon>
-                  {{ scene.expected }}
-                </div>
-              </div>
-            </el-collapse-transition>
-
-            <!-- 展开/收起步骤 -->
-            <div v-if="scene.steps_desc && scene.steps_desc.length"
-              class="scene-expand-btn" @click="toggleExpandScene(scene.id)">
-              <el-icon size="12"><ArrowDown v-if="expandedSceneId !== scene.id" /><ArrowUp v-else /></el-icon>
-              {{ expandedSceneId === scene.id ? '收起' : `查看 ${scene.steps_desc.length} 步` }}
-            </div>
-
-            <!-- 操作按钮 -->
-            <div class="scene-actions">
-              <el-button v-if="!scene.recorded" type="primary" size="small"
-                @click="startSceneRecording(scene)"
-                :loading="scene.id === recordingSceneId">
-                <el-icon><VideoCamera /></el-icon>开始录制
-              </el-button>
-              <el-button v-else size="small" plain @click="startSceneRecording(scene)">
-                <el-icon><Refresh /></el-icon>重新录制
-              </el-button>
-            </div>
-          </div>
-        </div>
-
-        <!-- 全部完成提示 -->
-        <div v-if="scenes.length && scenes.every(s => s.recorded)" class="scene-done-banner">
-          <div style="font-size:15px;color:#27ae60;font-weight:600;margin-bottom:4px">
-            🎉 所有场景已录制完成
-          </div>
-          <div style="font-size:13px;color:#606266">用例已保存，可在「用例管理」页查看并执行</div>
-        </div>
-      </div>
-    </el-drawer>
-
     </template>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+defineOptions({ name: 'Execution' })
+import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useTaskStore } from '../stores/task'
 import { useWorkspaceStore } from '../stores/workspace'
@@ -467,12 +217,11 @@ import { useAuthStore } from '../stores/auth'
 import WorkspaceRequired from '../components/WorkspaceRequired.vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  VideoCamera, VideoPause, Setting, Download, VideoPlay, Timer,
+  VideoPause, VideoPlay, Timer,
   RefreshRight, MagicStick, Refresh, Delete, Connection, MoreFilled, DocumentChecked,
-  Loading, SuccessFilled, Plus, Close, ArrowDown, ArrowUp,
 } from '@element-plus/icons-vue'
 import { useWebSocket } from '../composables/useWebSocket'
-import { recordingApi, envVarApi, multiBrowserApi, pytestExportApi, reportApi, caseApi } from '../api/index'
+import { multiBrowserApi, reportApi, caseApi } from '../api/index'
 
 const route = useRoute()
 const router = useRouter()
@@ -488,16 +237,19 @@ const selectedBrowsers = ref(['chromium', 'firefox', 'webkit'])
 const activeTab = ref('live')
 
 // ── 实时执行 ──
-const liveResults = ref([])
-const liveTotal = ref(0)
-const liveProgress = ref(0)
+const liveResults    = ref([])
+const liveTotal      = ref(0)
+const liveProgress   = ref(0)
 const currentCaseName = ref('')
-const elapsedTime = ref(null)
-const wsConnected = ref(false)
-let elapsedTimer = null
-let startTimestamp = null
+const currentStepDesc = ref('')   // 当前执行步骤描述
+const currentStepIdx  = ref(0)    // 当前步骤序号
+const currentStepTotal = ref(0)   // 当前用例总步骤数
+const elapsedTime    = ref(null)
+const wsConnected    = ref(false)
+let elapsedTimer     = null
+let startTimestamp   = null
 let wsReconnectTimer = null
-let currentReportId = ref(null)
+let currentReportId  = ref(null)
 
 const showScreenshotDialog = ref(false)
 const screenshotUrl = ref('')
@@ -507,172 +259,15 @@ const historyList = ref([])
 const historyLoading = ref(false)
 const historySelected = ref([])
 
-// ── 录制 ──
-const isRecording = ref(false)
-const recordingLoading = ref(false)
-const recordingStarting = ref(false)   // Chrome 正在启动中
-const recordingDialogVisible = ref(false)
-const recordedSteps = ref([])
-const recordingCaseName = ref('')
-let _recordingSessionId = null
-let _recWsDisconnect = null  // 录制专用 WS 连接的断开函数
-
-// 录制专用 WebSocket（监听 rec_{task_id} 频道）
-const { connect: _recWsConnect, disconnect: _recWsDisconnectFn } = useWebSocket((msg) => {
-  if (msg.type === 'recording_ready') {
-    // Chrome 启动完成，切换到录制状态
-    _recordingSessionId = msg.session_id
-    isRecording.value = true
-    recordingStarting.value = false
-    recordingLoading.value = false
-    ElMessage.success('浏览器已就绪，请在浏览器中操作')
-  } else if (msg.type === 'recording_failed') {
-    // 启动失败
-    recordingStarting.value = false
-    recordingLoading.value = false
-    isRecording.value = false
-    ElMessage.error('录制启动失败：' + (msg.error || '未知错误'))
-    _recWsDisconnectFn()
-  } else if (msg.type === 'rec_step') {
-    // 实时步骤推送（已有逻辑）
-    if (msg.step) recordedSteps.value.push(msg.step)
-  }
-})
-
-// ── 环境变量 ──
-const envVarDialogVisible = ref(false)
-const envVars = ref([])
-const envVarLoading = ref(false)
-const newEnvVar = ref({ key: '', value: '', is_secret: false })
-
-// ── pytest ──
-const exportLoading = ref(false)
-
-// ── AI 场景规划 ──────────────────────────────────────────────────────────────
-const scenePlannerVisible = ref(false)
-const scenePlanning = ref(false)
-const sceneDescription = ref('')
-const scenes = ref([])
-const recordingSceneId = ref(null)
-const editingSceneId = ref(null)     // 行内编辑中的场景 id
-const expandedSceneId = ref(null)    // 展开步骤预览的场景 id
-
-// 5 个测试维度标签
-const sceneDimensions = [
-  { name: '核心业务流程', type: 'success' },
-  { name: '表单验证',     type: 'warning' },
-  { name: '数据增删改',   type: 'primary' },
-  { name: '列表与筛选',   type: 'info'    },
-  { name: '异常与错误反馈', type: 'danger' },
-]
-
-// 当前任务是否已抓取页面元素
-const hasPageElements = computed(() => {
-  const task = taskStore.tasks.find(t => t.id === selectedTaskId.value)
-  return task?.page_elements?.length > 0
-})
-
-// 抓取当前任务页面元素
-const parsingPage = ref(false)
-const parseCurrentPage = async () => {
-  if (!selectedTaskId.value) return
-  const task = taskStore.tasks.find(t => t.id === selectedTaskId.value)
-  if (!task?.url) { ElMessage.warning('任务没有配置 URL，无法抓取页面元素'); return }
-  parsingPage.value = true
-  try {
-    await taskStore.parsePage(task.url, task.browser || 'chromium', selectedTaskId.value)
-    // 刷新 tasks 列表让 hasPageElements computed 更新
-    await taskStore.fetchTasks(wsStore.currentId)
-    ElMessage.success('页面元素抓取完成，AI 规划将更加精准')
-  } catch (e) {
-    ElMessage.error('抓取失败：' + (e?.response?.data?.detail || e?.message || ''))
-  } finally {
-    parsingPage.value = false
-  }
-}
-
-const openScenePlanner = () => {
-  scenePlannerVisible.value = true
-}
-
-// 从后端加载持久化的场景规划（从 Cases 页跳转过来时调用）
-const loadPersistedScenes = async () => {
-  if (!selectedTaskId.value) return
-  try {
-    const res = await caseApi.getScenePlan(selectedTaskId.value)
-    if (res.scenes && res.scenes.length) {
-      scenes.value = res.scenes
-    }
-  } catch { /* 无场景规划时静默忽略 */ }
-}
-
-// append=false → 重新规划；append=true → 追加规划（保留已录制）
-const planScenes = async (append = false) => {
-  if (!selectedTaskId.value) return
-  scenePlanning.value = true
-  try {
-    const res = await caseApi.planScenes(selectedTaskId.value, {
-      description: sceneDescription.value,
-      append,
-    })
-    scenes.value = res.scenes || []
-    if (!scenes.value.length) {
-      ElMessage.warning('未能生成场景，请补充页面功能描述后重试')
-    } else {
-      ElMessage.success(append ? `已追加 ${res.scenes.length} 个场景` : `已生成 ${res.scenes.length} 个场景`)
-    }
-  } catch (e) {
-    ElMessage.error('场景规划失败：' + (e?.response?.data?.detail || e?.message || ''))
-  } finally {
-    scenePlanning.value = false
-  }
-}
-
-// 重新规划：清空本地列表，让用户重新输入描述后生成
-const resetScenes = async () => {
-  try {
-    await ElMessageBox.confirm(
-      '重新规划会清空所有未录制的场景（已录制的会保留），确认继续？',
-      '重新规划', { type: 'warning', confirmButtonText: '确认', cancelButtonText: '取消' }
-    )
-    scenes.value = scenes.value.filter(s => s.recorded)
-    if (!scenes.value.length) scenes.value = []
-    sceneDescription.value = ''
-  } catch { /* 取消 */ }
-}
-
-// 删除单个未录制场景
-const removeScene = (sceneId) => {
-  scenes.value = scenes.value.filter(s => s.id !== sceneId)
-  // 同步持久化（静默）
-  if (selectedTaskId.value) {
-    caseApi.markSceneRecorded(selectedTaskId.value, sceneId, false).catch(() => {})
-  }
-}
-
-// 展开/收起步骤预览
-const toggleExpandScene = (sceneId) => {
-  expandedSceneId.value = expandedSceneId.value === sceneId ? null : sceneId
-}
-
-const startSceneRecording = async (scene) => {
-  // 先关闭抽屉，跳转到录制流程
-  recordingSceneId.value = scene.id
-  scenePlannerVisible.value = false
-
-  // 设置录制完成后自动保存的场景名
-  _pendingSceneName.value = scene.name
-
-  // 触发录制（复用现有 startRecording 逻辑）
-  await startRecording()
-}
-
-// 待保存的场景名（录制完成后自动填入用例名）
-const _pendingSceneName = ref('')
-
 // ── WebSocket ──
 const { connect: _wsConnect, disconnect: _wsDisconnect, isConnected: wsIsConnected } = useWebSocket((msg) => {
-  if (msg.type === 'case_complete') {
+  if (msg.type === 'step_start') {
+    // 步骤级实时进度
+    currentCaseName.value  = msg.case_name || currentCaseName.value
+    currentStepDesc.value  = msg.description || msg.action || ''
+    currentStepIdx.value   = msg.step_idx   || 0
+    currentStepTotal.value = msg.step_total || 0
+  } else if (msg.type === 'case_complete') {
     if (currentReportId.value && msg.report_id && msg.report_id !== currentReportId.value) return
     liveResults.value.push({
       case_id: msg.case_id,
@@ -685,12 +280,16 @@ const { connect: _wsConnect, disconnect: _wsDisconnect, isConnected: wsIsConnect
     liveTotal.value = msg.total || liveTotal.value
     liveProgress.value = msg.progress || 0
     currentCaseName.value = msg.case_name || ''
+    currentStepDesc.value = ''   // 用例结束，清空步骤状态
+    currentStepIdx.value = 0
   } else if (msg.type === 'execution_started') {
     if (currentReportId.value && msg.report_id && msg.report_id !== currentReportId.value) return
     liveResults.value = []
     liveTotal.value = msg.total_cases || 0
     liveProgress.value = 0
     currentCaseName.value = ''
+    currentStepDesc.value = ''
+    currentStepIdx.value = 0
     taskStore.isExecuting = true
     startElapsedTimer()
   } else if (msg.type === 'execution_completed') {
@@ -698,6 +297,8 @@ const { connect: _wsConnect, disconnect: _wsDisconnect, isConnected: wsIsConnect
     stopElapsedTimer()
     taskStore.isExecuting = false
     currentCaseName.value = ''
+    currentStepDesc.value = ''
+    currentStepIdx.value = 0
     liveProgress.value = 100
     ElMessage.success('执行完成')
   } else if (msg.type === 'execution_saved') {
@@ -756,16 +357,7 @@ const formatDate = (d) => {
   try { return new Date(d).toLocaleString('zh-CN', { hour12: false }) } catch { return d }
 }
 
-// ── 录制标签 ──
-const actionTagType = (a) => {
-  if (!a) return 'info'
-  if (a.startsWith('assert')) return 'success'
-  if (a === 'navigate') return 'primary'
-  if (a === 'fill') return 'warning'
-  return 'info'
-}
-
-// ── 任务切换 ──
+// ── 生命周期 ──
 const onTaskChange = async (taskId) => {
   if (taskId) await taskStore.fetchCases(taskId)
   // 切换到执行历史时自动拉取
@@ -882,136 +474,6 @@ const viewHistoryReport = (row) => {
   router.push({ path: '/reports', query: { reportId: row.report_id } })
 }
 
-// ── 录制 ──
-const toggleRecording = () => {
-  if (recordingStarting.value) return  // 启动中禁止重复点击
-  isRecording.value ? stopRecording() : startRecording()
-}
-
-const startRecording = async () => {
-  if (!selectedTaskId.value) return
-  recordingLoading.value = true
-  recordingStarting.value = true
-  try {
-    const task = taskStore.tasks.find(t => t.id === selectedTaskId.value)
-    // 先连上录制专用 WS 频道，再发起启动请求
-    _recWsConnect(`rec_${selectedTaskId.value}`)
-    const res = await recordingApi.start(selectedTaskId.value, task?.url || '', selectedBrowser.value)
-    // 立即返回 status=starting，等 recording_ready WS 消息
-    _recordingSessionId = res.session_id  // 预生成的 session_id
-    recordedSteps.value = []
-    recordingDialogVisible.value = true
-    ElMessage.info('浏览器启动中，请稍候...')
-    // loading 状态由 WS recording_ready 消息关闭
-  } catch (e) {
-    const status = e.response?.status
-    const detail = e.response?.data?.detail || e.message
-    if (status === 409) {
-      ElMessage.warning('该任务已有录制会话在运行，请直接在已打开的浏览器中操作，或停止后重新录制')
-      isRecording.value = true
-    } else {
-      ElMessage.error('启动录制失败：' + detail)
-    }
-    recordingStarting.value = false
-    recordingLoading.value = false
-    _recWsDisconnectFn()
-  }
-}
-
-const stopRecording = async () => {
-  if (!_recordingSessionId && !selectedTaskId.value) return
-  recordingLoading.value = true
-  try {
-    const res = await recordingApi.stop(_recordingSessionId, selectedTaskId.value)
-    recordedSteps.value = res.steps || []
-    isRecording.value = false
-    recordingStarting.value = false
-    _recordingSessionId = null
-    _recWsDisconnectFn()  // 断开录制专用 WS
-    // 如果是场景录制，自动填入场景名
-    if (_pendingSceneName.value) {
-      recordingCaseName.value = _pendingSceneName.value
-    }
-    ElMessage.success(`录制完成，共 ${recordedSteps.value.length} 个步骤`)
-  } catch (e) { ElMessage.error('停止录制失败：' + e.message) }
-  finally { recordingLoading.value = false }
-}
-
-const saveRecording = async () => {
-  if (!recordedSteps.value.length || !selectedTaskId.value) return
-  recordingLoading.value = true
-  try {
-    const name = recordingCaseName.value.trim() || ''
-    const pageTitle = recordedSteps.value.length > 0 ? (recordedSteps.value[0].url || document.title) : document.title
-    await recordingApi.save(selectedTaskId.value, recordedSteps.value, name, pageTitle)
-    ElMessage.success(`已保存为用例「${name || '自动命名'}」`)
-    recordingDialogVisible.value = false
-    recordedSteps.value = []
-    recordingCaseName.value = ''
-    _recordingSessionId = null
-
-    // 如果是场景录制，同步标记后端 + 本地，重新打开场景抽屉
-    if (recordingSceneId.value) {
-      const sceneId = recordingSceneId.value
-      const scene = scenes.value.find(s => s.id === sceneId)
-      if (scene) scene.recorded = true
-      // 持久化标记到后端
-      try { await caseApi.markSceneRecorded(selectedTaskId.value, sceneId, true) } catch {}
-      recordingSceneId.value = null
-      _pendingSceneName.value = ''
-      setTimeout(() => { scenePlannerVisible.value = true }, 300)
-    }
-
-    // T7：从 Cases 页跳过来的，保存完成后提示返回
-    if (route.query.from === 'cases') {
-      ElMessage({
-        type: 'success',
-        message: '用例已保存，点击返回用例管理',
-        duration: 5000,
-        showClose: true,
-        onClick: () => router.push({ name: 'Cases', query: { taskId: selectedTaskId.value, refresh: '1' } }),
-      })
-    }
-  } catch (e) { ElMessage.error('保存失败：' + e.message) }
-  finally { recordingLoading.value = false }
-}
-
-// ── 环境变量 ──
-const loadEnvVars = async () => {
-  if (!selectedTaskId.value) return
-  try { envVars.value = await envVarApi.list(selectedTaskId.value) } catch {}
-}
-const saveEnvVar = async () => {
-  if (!newEnvVar.value.key.trim()) { ElMessage.warning('Key 不能为空'); return }
-  envVarLoading.value = true
-  try {
-    await envVarApi.create(selectedTaskId.value, newEnvVar.value)
-    newEnvVar.value = { key: '', value: '', is_secret: false }
-    await loadEnvVars()
-    ElMessage.success('已保存')
-  } catch (e) { ElMessage.error('保存失败：' + e.message) }
-  finally { envVarLoading.value = false }
-}
-const deleteEnvVar = async (id) => {
-  try { await envVarApi.delete(id); await loadEnvVars(); ElMessage.success('已删除') }
-  catch (e) { ElMessage.error('删除失败：' + e.message) }
-}
-watch(envVarDialogVisible, (v) => { if (v) loadEnvVars() })
-
-// ── pytest 导出 ──
-const exportPytest = async () => {
-  if (!selectedTaskId.value) return
-  exportLoading.value = true
-  try {
-    const blob = await pytestExportApi.export(selectedTaskId.value)
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url; a.download = `pytest_task_${selectedTaskId.value}.zip`; a.click()
-    URL.revokeObjectURL(url)
-  } catch (e) { ElMessage.error('导出失败：' + e.message) }
-  finally { exportLoading.value = false }
-}
-
 // ── 生命周期 ──
 onMounted(async () => {
   connectWS()
@@ -1019,17 +481,6 @@ onMounted(async () => {
   if (route.query.taskId) {
     selectedTaskId.value = parseInt(route.query.taskId)
     await taskStore.fetchCases(selectedTaskId.value)
-    // 来自 Cases 页的重录：预填用例名
-    if (route.query.replaceCaseName) {
-      _pendingSceneName.value = route.query.replaceCaseName
-    }
-    if (route.query.startRecord === '1') { await startRecording(); return }
-    if (route.query.openScenePlanner === '1') {
-      // 先加载持久化的场景规划
-      await loadPersistedScenes()
-      scenePlannerVisible.value = true
-      return
-    }
     if (route.query.caseIds) {
       const ids = route.query.caseIds.split(',').map(Number)
       liveResults.value = []; liveProgress.value = 0; currentCaseName.value = ''; currentReportId.value = null; liveTotal.value = ids.length
@@ -1040,6 +491,48 @@ onMounted(async () => {
       } catch { ElMessage.error('自动执行失败') }
     }
   }
+})
+
+// keep-alive 激活：切回执行页时确保 WS 已连接，计时器已在跑
+// 同时处理从 Cases 页 router.push 带来的 taskId / caseIds query 参数
+onActivated(async () => {
+  if (!wsIsConnected.value) connectWS()
+  // 如果正在执行但计时器已停，重新启动
+  if (taskStore.isExecuting && !elapsedTimer) {
+    startTimestamp = Date.now() - (elapsedTime.value || 0) * 1000
+    elapsedTimer = setInterval(() => {
+      elapsedTime.value = Math.floor((Date.now() - startTimestamp) / 1000)
+    }, 1000)
+  }
+
+  // 处理 query 参数（keep-alive 时 onMounted 不再执行，需在此补齐）
+  if (route.query.taskId) {
+    const queryTaskId = parseInt(route.query.taskId)
+    // 任务切换：重新加载用例列表
+    if (queryTaskId !== selectedTaskId.value) {
+      selectedTaskId.value = queryTaskId
+      await taskStore.fetchCases(queryTaskId)
+    }
+    // 带了 caseIds 说明是从用例列表点「执行」跳来的，自动触发执行
+    if (route.query.caseIds) {
+      const ids = route.query.caseIds.split(',').map(Number)
+      liveResults.value = []; liveProgress.value = 0; currentCaseName.value = ''; currentReportId.value = null; liveTotal.value = ids.length
+      activeTab.value = 'live'
+      // 清除 caseIds，避免下次切回此页面时重复触发执行；保留 taskId 供页面显示
+      router.replace({ query: { taskId: queryTaskId } })
+      try {
+        const data = await taskStore.executeCases(queryTaskId, ids, selectedBrowser.value)
+        if (data?.report_id) currentReportId.value = data.report_id
+      } catch { ElMessage.error('自动执行失败') }
+    }
+  }
+})
+
+// keep-alive 停用：切走时不断 WS，保留连接接收推送
+onDeactivated(() => {
+  // 不断开 WS，执行中的消息继续在后台接收
+  // 只清掉重连定时器避免重复连接
+  if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null }
 })
 
 watch(() => wsStore.currentId, async (id) => {
@@ -1087,6 +580,65 @@ onUnmounted(() => {
 .progress-controls { display: flex; gap: 6px; }
 .current-case-bar { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #409eff; background: #ecf5ff; border-radius: 6px; padding: 6px 12px; margin-bottom: 8px; }
 .spin-icon { animation: spin 1s linear infinite; }
+
+/* 实时步骤状态 */
+.live-status-bar {
+  background: #f0f7ff;
+  border: 1px solid #d0e8ff;
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.live-case-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #1a6fc4;
+}
+.live-case-name {
+  flex: 1;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.live-step-badge {
+  flex-shrink: 0;
+  font-size: 11px;
+  background: #409eff;
+  color: #fff;
+  border-radius: 10px;
+  padding: 1px 8px;
+  font-weight: 600;
+}
+.live-step-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-left: 20px;
+}
+.live-step-dot {
+  flex-shrink: 0;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: #409eff;
+  animation: pulse 1s ease-in-out infinite;
+}
+.live-step-desc {
+  font-size: 12px;
+  color: #606266;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.4; transform: scale(0.8); }
+}
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
 .progress-mini-stats { display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; }

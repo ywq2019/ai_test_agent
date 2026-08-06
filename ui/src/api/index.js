@@ -222,6 +222,13 @@ export const gvarApi = {
   delete: (id) => api.delete(`/global-vars/${id}`),
 }
 
+export const elementAliasApi = {
+  list:   (taskId) => api.get(`/tasks/${taskId}/element-aliases`),
+  create: (taskId, data) => api.post(`/tasks/${taskId}/element-aliases`, data),
+  update: (taskId, id, data) => api.put(`/tasks/${taskId}/element-aliases/${id}`, data),
+  delete: (taskId, id) => api.delete(`/tasks/${taskId}/element-aliases/${id}`),
+}
+
 export const userApi = {
   list: () => api.get('/auth/users'),
   create: (data) => api.post('/auth/users', data),

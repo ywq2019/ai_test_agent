@@ -178,7 +178,11 @@
         </el-header>
 
         <el-main class="layout-main">
-          <router-view />
+          <router-view v-slot="{ Component, route }">
+            <keep-alive :include="['Execution']">
+              <component :is="Component" :key="route.name" />
+            </keep-alive>
+          </router-view>
         </el-main>
       </el-container>
     </el-container>

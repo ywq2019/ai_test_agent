@@ -59,7 +59,7 @@
             <div class="module-badge badge-blue"><el-icon size="18"><Monitor /></el-icon></div>
             <div>
               <div class="module-title">WebUI 自动化</div>
-              <div class="module-subtitle">AI 场景规划 · 有头浏览器录制 · 步骤健壮化 · 多浏览器并行执行 · 截图报告</div>
+              <div class="module-subtitle">AI 场景规划 · 有头浏览器录制 · 步骤健壮化 · 可视化步骤编辑器 · 多浏览器并行执行 · 来源标签 · 场景覆盖视图</div>
             </div>
           </div>
         </div>
@@ -112,7 +112,7 @@
                 <div class="flow-num fn-3">3</div>
                 <div class="flow-body">
                   <div class="flow-title">录制 & 健壮化</div>
-                  <div class="flow-desc">真实操作录制 · AI 自动补全断言 · Selector 多候选</div>
+                  <div class="flow-desc">真实操作录制 · AI 补全断言 · Selector 多候选评级 · 步骤可视化编辑</div>
                 </div>
               </div>
               <div class="flow-arrow"><el-icon><ArrowRight /></el-icon></div>
@@ -132,12 +132,12 @@
               <div class="sub-card" style="margin-bottom:12px">
                 <div class="sub-card-title">核心能力</div>
                 <div class="feature-list">
-                  <div class="feature-item"><div class="feature-dot" style="background:#409eff"></div><span>AI 场景规划 — 5 个落地维度（核心流程/表单验证/增删改/筛选/异常反馈）自动生成录制场景</span></div>
-                  <div class="feature-item"><div class="feature-dot" style="background:#67c23a"></div><span>录制健壮化 — Selector 多候选 + A/B/C/D 稳定性评级，执行失败率显著降低</span></div>
-                  <div class="feature-item"><div class="feature-dot" style="background:#9254de"></div><span>可视化步骤编辑器 — 行内编辑 action/selector/value，D 级 selector 标红提示替换</span></div>
-                  <div class="feature-item"><div class="feature-dot" style="background:#e6a23c"></div><span>智能断言补全 — 关键操作后自动插入 wait + assert，避免执行空档漏检</span></div>
-                  <div class="feature-item"><div class="feature-dot" style="background:#36cfc9"></div><span>多浏览器并行 — Chromium / Firefox / WebKit 同步执行，矩阵报告对比</span></div>
-                  <div class="feature-item"><div class="feature-dot" style="background:#f56c6c"></div><span>场景覆盖视图 — 规划场景与录制用例对照，直观看哪个维度还没覆盖</span></div>
+                  <div class="feature-item"><div class="feature-dot" style="background:#409eff"></div><span>AI 场景规划 — 5 个落地维度（核心流程/表单验证/增删改/筛选/异常反馈）自动生成录制场景，支持追加与重新规划</span></div>
+                  <div class="feature-item"><div class="feature-dot" style="background:#67c23a"></div><span>录制健壮化 — Selector A/B/C/D 稳定性评级 + 多候选列表 + 关键操作后自动插入 wait/assert，执行失败率显著降低</span></div>
+                  <div class="feature-item"><div class="feature-dot" style="background:#9254de"></div><span>可视化步骤编辑器 — 行内编辑 action/selector/value/expected，D 级 selector 标红提示，点击胶囊一键切换备选</span></div>
+                  <div class="feature-item"><div class="feature-dot" style="background:#e6a23c"></div><span>来源标签 — 用例列表标注 🎬录制 / 🤖AI / ✏️手动来源，AI 生成且失败自动出现「重录」快捷按钮</span></div>
+                  <div class="feature-item"><div class="feature-dot" style="background:#36cfc9"></div><span>多浏览器并行 — Chromium / Firefox / WebKit 同步执行，矩阵报告对比；场景覆盖 Tab 实时追踪覆盖进度</span></div>
+                  <div class="feature-item"><div class="feature-dot" style="background:#f56c6c"></div><span>元素别名库 — 常用元素命名为别名，@ 触发补全，selector 变更只改一处全部生效</span></div>
                 </div>
               </div>
               <div class="action-grid-2">
@@ -153,15 +153,15 @@
                   <div class="action-icon ai-green"><el-icon size="18"><Document /></el-icon></div>
                   <div class="action-info">
                     <div class="action-name">用例管理</div>
-                    <div class="action-desc">来源标签 · 步骤编辑器 · 场景覆盖</div>
+                    <div class="action-desc">AI 规划场景 · 录制用例 · 步骤编辑器 · 场景覆盖</div>
                   </div>
                   <el-icon class="action-go"><ArrowRight /></el-icon>
                 </div>
                 <div class="action-item" @click="$router.push('/execution')">
-                  <div class="action-icon ai-orange"><el-icon size="18"><VideoCamera /></el-icon></div>
+                  <div class="action-icon ai-orange"><el-icon size="18"><VideoPlay /></el-icon></div>
                   <div class="action-info">
-                    <div class="action-name">录制 & 执行</div>
-                    <div class="action-desc">AI 规划场景 · 录制 · 并行执行</div>
+                    <div class="action-name">执行 & 报告</div>
+                    <div class="action-desc">执行全部 · 多浏览器并行 · 实时进度 · 历史记录</div>
                   </div>
                   <el-icon class="action-go"><ArrowRight /></el-icon>
                 </div>
