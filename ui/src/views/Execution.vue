@@ -321,10 +321,12 @@ watch(wsIsConnected, (val) => {
   }
 })
 
-function getClientId() { return `execution_${Date.now()}` }
+// WS client_id 在组件创建时生成一次，断线重连复用同一 ID，保证进度消息不丢失
+const STABLE_WS_CLIENT_ID = `execution_${auth.username || 'u'}_${Date.now()}`
+
 function connectWS() {
   if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null }
-  _wsConnect(getClientId())
+  _wsConnect(STABLE_WS_CLIENT_ID)
 }
 
 const passedCount = computed(() => liveResults.value.filter(r => r.status === 'passed').length)
@@ -437,9 +439,8 @@ const fetchHistory = async () => {
   }
   historyLoading.value = true
   try {
-    const data = await reportApi.list(wsStore.currentId)
-    // 过滤当前任务相关的报告
-    historyList.value = (data || []).filter(r => r.task_id === selectedTaskId.value)
+    const data = await reportApi.list(wsStore.currentId, selectedTaskId.value)
+    historyList.value = data || []
   } catch (e) {
     ElMessage.error('获取历史记录失败')
     historyList.value = []

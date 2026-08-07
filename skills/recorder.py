@@ -195,13 +195,14 @@ _RECORD_JS_TPL = """
       // 去重：若最后一个事件也是同一个 selector 的 fill，更新 value 而不新增
       var last = window.__recEvents[window.__recEvents.length - 1];
       if (last && last.action === 'fill' && last.selector === bestSelector(el)) {
-        last.value = el.value;
+        last.value = el.type === 'password' ? '' : el.value;
         // 同步更新 description 中的值（密码字段脱敏）
         last.description = '填写 ' + (el.placeholder || el.name || 'input') + ' = ' + (el.type === 'password' ? '***' : el.value);
         return;
       }
+      var safeValue = el.type === 'password' ? '' : el.value;
       var displayedValue = el.type === 'password' ? '***' : el.value;
-      push('fill', { el: el, value: el.value, description: '填写 ' + (el.placeholder || el.name || 'input') + ' = ' + displayedValue });
+      push('fill', { el: el, value: safeValue, description: '填写 ' + (el.placeholder || el.name || 'input') + ' = ' + displayedValue });
     }
   }, true);
 

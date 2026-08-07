@@ -11,6 +11,7 @@ import asyncio
 import json
 import base64
 import mimetypes
+import html as _html
 import time
 from datetime import datetime, timezone, timedelta
 
@@ -163,6 +164,9 @@ async def delete_task(task_id: int, db: AsyncSession = Depends(get_db), current_
     await db.execute(delete(TestTask).where(TestTask.id == task_id))
     await db.execute(delete(TestCase).where(TestCase.task_id == task_id))
     await db.execute(delete(TestResult).where(TestResult.task_id == task_id))
+    await db.execute(delete(TestReport).where(TestReport.task_id == task_id))
+    await db.execute(delete(TaskEnvVar).where(TaskEnvVar.task_id == task_id))
+    await db.execute(delete(ElementAlias).where(ElementAlias.task_id == task_id))
     await db.commit()
     return {"message": "Task deleted successfully"}
 
@@ -1021,17 +1025,61 @@ async def webui_incremental_update(
     except Exception as e:
         logger.exception("WebUI 增量更新失败: {}", repr(e))
         raise HTTPException(status_code=500, detail="增量更新失败，请稍后重试")
-    await db.execute(sql_delete(TestCase).where(TestCase.task_id == task_id))
-    for case in upd["retained_cases"] + upd["new_cases"] + upd["deprecated_cases"]:
+    # ── UPSERT：retained_cases 保留 steps_json，new_cases 插入，deprecated 标记 ──
+    # 先建原有用例名称→ORM对象映射，保留 steps_json 和录制结果
+    _existing_res = await db.execute(select(TestCase).where(TestCase.task_id == task_id))
+    _existing_map: dict = {c.name: c for c in _existing_res.scalars().all()}
+
+    # retained_cases：已存在则 UPSERT（保留 steps_json）；否则 INSERT
+    for case in upd["retained_cases"]:
+        name = case.get("name", "未命名")
+        if name in _existing_map:
+            old = _existing_map[name]
+            old.module = case.get("module", old.module)
+            old.priority = case.get("priority", old.priority)
+            old.preconditions = case.get("preconditions", old.preconditions)
+            old.steps = case.get("steps", old.steps)
+            old.expected_results = case.get("expected_results", old.expected_results)
+            old.element_selector = case.get("element_selector", getattr(old, "element_selector", "") or "")
+            old.deprecated = False
+            old.enabled = True
+            # steps_json 不动：保留已录制 / 已编辑的结构化步骤
+        else:
+            db.add(TestCase(
+                task_id=task_id, name=name,
+                module=case.get("module", "通用"), priority=case.get("priority", "P1"),
+                preconditions=case.get("preconditions", ""), steps=case.get("steps", ""),
+                expected_results=case.get("expected_results", ""),
+                element_selector=case.get("element_selector", ""), enabled=True,
+                deprecated=False, source=case.get("source", "ai_generated"),
+            ))
+
+    # new_cases：直接 INSERT
+    for case in upd["new_cases"]:
         db.add(TestCase(
             task_id=task_id, name=case.get("name", "未命名"),
             module=case.get("module", "通用"), priority=case.get("priority", "P1"),
             preconditions=case.get("preconditions", ""), steps=case.get("steps", ""),
             expected_results=case.get("expected_results", ""),
             element_selector=case.get("element_selector", ""), enabled=True,
-            deprecated=(case.get("status") == "deprecated"),
-            source=case.get("source", "ai_generated"),
+            deprecated=False, source=case.get("source", "ai_generated"),
         ))
+
+    # deprecated_cases：已存在则标记 deprecated；否则 INSERT（标记）
+    for case in upd["deprecated_cases"]:
+        name = case.get("name", "未命名")
+        if name in _existing_map:
+            old = _existing_map[name]
+            old.deprecated = True
+        else:
+            db.add(TestCase(
+                task_id=task_id, name=name,
+                module=case.get("module", "通用"), priority=case.get("priority", "P1"),
+                preconditions=case.get("preconditions", ""), steps=case.get("steps", ""),
+                expected_results=case.get("expected_results", ""),
+                element_selector=case.get("element_selector", ""), enabled=True,
+                deprecated=True, source=case.get("source", "ai_generated"),
+            ))
     task.doc_snapshot = new_content[:20000]
     task.doc_hash = cg.compute_doc_hash(new_content)
     task.status = "cases_updated"
@@ -1531,11 +1579,13 @@ async def execute_cases(
 
 
 @router.get("/reports", response_model=List[ReportResponse])
-async def list_reports(workspace_id: int = None, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def list_reports(workspace_id: int = None, task_id: int = None, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     stmt = select(TestReport).order_by(TestReport.created_at.desc())
     f = await workspace_filter_members(db, TestReport, workspace_id, current_user)
     if f is not None:
         stmt = stmt.where(f)
+    if task_id:
+        stmt = stmt.where(TestReport.task_id == task_id)
     result = await db.execute(stmt)
     reports = result.scalars().all()
     return [
@@ -1600,7 +1650,8 @@ async def export_report(report_id: int, db: AsyncSession = Depends(get_db),
     for detail in details:
         status_map = {"passed": ("success", "通过"), "failed": ("danger", "失败"), "skipped": ("warning", "跳过")}
         cls, label = status_map.get(detail.get("status", ""), ("secondary", detail.get("status", "-")))
-        err = (detail.get("error_message") or "-")[:120]
+        err = _html.escape(str((detail.get("error_message") or "-")[:120]))
+        case_name = _html.escape(str(detail.get('case_name', '-')))
         shot = detail.get("screenshot", "")
         if shot:
             data_uri = _screenshot_data_uri(shot)
@@ -1613,7 +1664,7 @@ async def export_report(report_id: int, db: AsyncSession = Depends(get_db),
             shot_cell = "<td style='color:#ccc'>-</td>"
         details_rows += f"""
         <tr>
-            <td>{detail.get('id','')}</td><td>{detail.get('case_name','-')}</td>
+            <td>{detail.get('id','')}</td><td>{case_name}</td>
             <td><span class="badge bg-{cls}">{label}</span></td>
             <td>{detail.get('duration',0)}s</td>
             <td style="max-width:300px;word-break:break-all;">{err}</td>

@@ -103,8 +103,8 @@
               <template v-if="selectedCases.length > 0">
                 <el-divider direction="vertical" style="height:20px;margin:0 4px" />
                 <span style="font-size:13px;color:#606266;white-space:nowrap">已选 {{ selectedCases.length }} 条</span>
-                <el-button size="default" @click="batchEnable">批量启用</el-button>
-                <el-button size="default" @click="batchDisable">批量禁用</el-button>
+                <el-button size="default" :loading="batchEnabling" @click="batchEnable">批量启用</el-button>
+                <el-button size="default" :loading="batchDisabling" @click="batchDisable">批量禁用</el-button>
                 <el-button size="default" type="danger" plain :loading="batchDeleting" @click="batchDelete">批量删除</el-button>
               </template>
               <el-button size="default" @click="toggleAllSelection" style="margin-left:auto">
@@ -1052,6 +1052,7 @@ const searchText = ref('')
 const filterPriority = ref(null)
 const filterModule = ref(null)
 const filterStatus = ref(null)
+const filterFailedIds = ref(new Set())  // quickShowFailures 专用：按执行失败 case id 过滤
 
 // ── 废弃显示 ──
 const showDeprecated = ref(false)
@@ -1382,6 +1383,12 @@ const filteredCases = computed(() => {
       String(c.id).includes(q)
     )
   }
+
+  // 仅看失败（quickShowFailures 触发，按 case id 精确过滤）
+  if (filterFailedIds.value.size) {
+    base = base.filter(c => filterFailedIds.value.has(c.id))
+  }
+
   return base
 })
 
@@ -1419,7 +1426,7 @@ const deprecatedCount = computed(() => {
 })
 
 const hasActiveFilters = computed(() =>
-  !!filterPriority.value || !!filterModule.value || !!filterStatus.value || showDeprecated.value
+  !!filterPriority.value || !!filterModule.value || !!filterStatus.value || showDeprecated.value || filterFailedIds.value.size > 0
 )
 
 function resetFilters() {
@@ -1428,6 +1435,7 @@ function resetFilters() {
   filterStatus.value = null
   showDeprecated.value = false
   searchText.value = ''
+  filterFailedIds.value = new Set()
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1585,10 +1593,11 @@ function formatTime(isoStr) {
   return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 function quickShowFailures() {
-  // 通过名称匹配：只显示失败用例（在搜索框中填入失败用例名）
-  const failedNames = lastExecutionFailed.value.map(f => f.case_name).filter(Boolean)
-  if (failedNames.length) {
-    searchText.value = failedNames.join('|')
+  // 按 case_id 精确过滤失败用例，不污染搜索框，支持多条失败同时显示
+  const failedIds = new Set(lastExecutionFailed.value.map(f => f.case_id).filter(Boolean))
+  if (failedIds.size) {
+    filterFailedIds.value = failedIds
+    currentPage.value = 1
   }
 }
 
@@ -1746,15 +1755,23 @@ const autoFixAll = async () => {
 // ── 表格操作 ──
 const handleSelectionChange = (sel) => { selectedCases.value = sel }
 const toggleAllSelection = () => tableRef.value?.toggleAllSelection()
+const batchEnabling  = ref(false)
+const batchDisabling = ref(false)
 const batchEnable = async () => {
   if (!selectedCases.value.length) { ElMessage.warning('请先选择用例'); return }
-  for (const c of selectedCases.value) await taskStore.updateCase(c.id, { enabled: true })
-  ElMessage.success('批量启用成功')
+  batchEnabling.value = true
+  try {
+    await Promise.all(selectedCases.value.map(c => taskStore.updateCase(c.id, { enabled: true })))
+    ElMessage.success(`已启用 ${selectedCases.value.length} 条用例`)
+  } catch { ElMessage.error('部分用例启用失败') } finally { batchEnabling.value = false }
 }
 const batchDisable = async () => {
   if (!selectedCases.value.length) { ElMessage.warning('请先选择用例'); return }
-  for (const c of selectedCases.value) await taskStore.updateCase(c.id, { enabled: false })
-  ElMessage.success('批量禁用成功')
+  batchDisabling.value = true
+  try {
+    await Promise.all(selectedCases.value.map(c => taskStore.updateCase(c.id, { enabled: false })))
+    ElMessage.success(`已禁用 ${selectedCases.value.length} 条用例`)
+  } catch { ElMessage.error('部分用例禁用失败') } finally { batchDisabling.value = false }
 }
 const batchDelete = async () => {
   if (!selectedCases.value.length) { ElMessage.warning('请先选择用例'); return }

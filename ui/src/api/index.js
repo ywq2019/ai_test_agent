@@ -136,7 +136,12 @@ export const commandApi = {
 
 export const reportApi = {
   get: (taskId) => api.get(`/tasks/${taskId}/report`),
-  list: (workspaceId = null) => api.get(`/reports`, { params: workspaceId ? { workspace_id: workspaceId } : {} }),
+  list: (workspaceId = null, taskId = null) => api.get(`/reports`, {
+    params: {
+      ...(workspaceId ? { workspace_id: workspaceId } : {}),
+      ...(taskId      ? { task_id: taskId }           : {}),
+    }
+  }),
   getById: (reportId) => api.get(`/reports/${reportId}`),
   getProgress: (reportId) => api.get(`/reports/${reportId}/progress`),
   delete: (reportId) => api.delete(`/reports/${reportId}`),

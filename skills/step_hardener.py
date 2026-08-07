@@ -50,6 +50,9 @@ _GRADE_A = [
     r'getByLabel\(',
     r'getByPlaceholder\(',
     r'getByTestId\(',
+    r'getByAltText\(',
+    r'^label=',          # 录制器生成：label=用户名
+    r'^alt=',            # 录制器生成：alt=logo
 ]
 
 # B 级：行为/内容语义，较稳定
@@ -63,6 +66,7 @@ _GRADE_B = [
     r'\[aria-',
     r'\[role=',
     r'label\[for=',
+    r'^role=',           # 录制器生成：role=button（不含方括号）
 ]
 
 # D 级黑名单：几乎不可靠
@@ -164,16 +168,16 @@ def generate_candidate_selectors(step: dict) -> list[str]:
     candidates_b: list[str] = []
     candidates_c: list[str] = []
     candidates_d: list[str] = []
+    _seen: set = set(existing)   # O(1) 去重，避免每次调用重建列表
 
     def _add(sel: str):
         """按评级分桶，去重。"""
         if not sel:
             return
         sel = sel.strip()
-        # 跳过已存在的
-        all_seen = candidates_a + candidates_b + candidates_c + candidates_d + existing
-        if sel in all_seen:
+        if sel in _seen:
             return
+        _seen.add(sel)
         g = selector_grade(sel)
         if g == "A":
             candidates_a.append(sel)

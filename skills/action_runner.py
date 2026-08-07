@@ -31,8 +31,12 @@ except ImportError:
 
 from tools.action_schema import validate_step
 
-# 截图保存目录
-SCREENSHOT_DIR = Path("reports/screenshots")
+# 截图保存目录（用 settings 绝对路径，避免相对路径随 cwd 漂移）
+try:
+    from tools.config import settings as _settings
+    SCREENSHOT_DIR = Path(_settings.SCREENSHOT_DIR)
+except Exception:
+    SCREENSHOT_DIR = Path(__file__).parent.parent / "reports" / "screenshots"
 SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -108,10 +112,8 @@ class ActionRunner:
         其余退化为普通 CSS/XPath locator。
         特殊处理：tag:has-text("X") → locator().filter()
         """
-        import re as _re
-
         if selector.startswith("role="):
-            m = _re.match(r'^role=([^\[]+)(?:\[name="([^"]+)"\])?$', selector)
+            m = re.match(r'^role=([^\[]+)(?:\[name="([^"]+)"\])?$', selector)
             if m:
                 role_name = m.group(1).strip()
                 acc_name  = m.group(2)
@@ -124,7 +126,7 @@ class ActionRunner:
             return ctx.get_by_alt_text(selector[4:])
 
         # tag:has-text("X") → locator().filter()
-        m = _re.match(r'^(\w+):has-text\("([^"]+)"\)$', selector)
+        m = re.match(r'^(\w+):has-text\("([^"]+)"\)$', selector)
         if m:
             tag, text = m.group(1), m.group(2)
             return ctx.locator(tag).filter(has_text=text)
@@ -217,7 +219,6 @@ class ActionRunner:
 
             sr = await self._run_step(step, page)
             step_results.append(sr)
-            step_results.append(sr)
 
             if not sr["passed"] and not step.get("optional"):
                 logger.info(
@@ -247,8 +248,7 @@ class ActionRunner:
         if action in _selector_actions and selector and not selector.startswith(
             ("@", "role=", "label=", "alt=", "#", ".", "[", "/", "(", "*", ":")):
             # 纯数字、纯汉字等明显不是 CSS selector 的字符串，提前报配置错误
-            import re as _re_check
-            if _re_check.match(r'^[\d一-鿿]+$', selector):
+            if re.match(r'^[\d一-鿿]+$', selector):
                 return _step_result(step, False,
                     f'步骤配置错误：selector="{selector}" 不是合法的 CSS selector。'
                     f'请填写元素定位符（如 input[name="phone"]），'
@@ -279,6 +279,8 @@ class ActionRunner:
         if not selectors_to_try and selector:
             selectors_to_try = [selector]
 
+        _ai_fix_attempted = False   # 防止 probe + dispatch 两处都触发 LLM 修复
+
         if action in _interact_actions and selectors_to_try:
             used_selector = selector
             # 多候选：逐个用短超时探测，找到第一个可见的用它
@@ -296,6 +298,7 @@ class ActionRunner:
 
             if not found and len(selectors_to_try) == 1 and not frame_selectors:
                 # 单候选探测失败：直接走 AI 修复，跳过无意义的 30 秒等待
+                _ai_fix_attempted = True
                 fixed_selector = await self._ai_fix_selector(page, step, selector, f"Element not found: {selector}")
                 if fixed_selector and fixed_selector != selector:
                     try:
@@ -334,10 +337,11 @@ class ActionRunner:
                     pass
 
             # ── AI Selector 自动修复（仅主页面支持，frame 暂不支持） ────────────
-            # 只在超时/找不到元素时触发，不在断言失败时触发
+            # 只在超时/找不到元素时触发，不在断言失败时触发；且每步最多尝试一次
             _fixable = ("Timeout" in err_str or "waiting for" in err_str or
                         "not found" in err_str.lower())
-            if _fixable and action in _interact_actions and selector and not frame_selectors:
+            if _fixable and action in _interact_actions and selector and not frame_selectors and not _ai_fix_attempted:
+                _ai_fix_attempted = True
                 fixed_selector = await self._ai_fix_selector(page, step, selector, str(e))
                 if fixed_selector and fixed_selector != selector:
                     try:
@@ -529,7 +533,10 @@ class ActionRunner:
                 await page.mouse.wheel(0, 500)
 
         elif action == "upload":
-            await self._build_locator(ctx, selector).set_input_files(value.split(","), timeout=timeout)
+            import json as _json
+            _files = (_json.loads(value) if value.strip().startswith('[')
+                      else [v.strip() for v in value.split(',') if v.strip()])
+            await self._build_locator(ctx, selector).set_input_files(_files, timeout=timeout)
 
         elif action == "wait_for":
             if url:

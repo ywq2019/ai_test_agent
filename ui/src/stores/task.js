@@ -91,8 +91,11 @@ export const useTaskStore = defineStore('task', () => {
     return data.count
   }
 
+  let _fetchCasesSeq = 0
   async function fetchCases(taskId) {
+    const seq = ++_fetchCasesSeq
     const data = await api.caseApi.list(taskId)
+    if (seq !== _fetchCasesSeq) return   // 旧请求丢弃，防止快速切换任务时数据竞争
     cases.value = data
     return data
   }
@@ -121,13 +124,14 @@ export const useTaskStore = defineStore('task', () => {
     isExecuting.value = true
     executionResults.value = []
     // 后端立即返回 {report_id, status, total}，执行通过 WebSocket 推送进度
-    // isExecuting 由调用方在收到 execution_completed 事件后重置
-    const data = await api.executeApi.execute({
-      task_id: taskId,
-      case_ids: caseIds,
-      browser
-    })
-    return data
+    // 正常完成时 isExecuting 由调用方在收到 execution_completed 事件后重置
+    try {
+      const data = await api.executeApi.execute({ task_id: taskId, case_ids: caseIds, browser })
+      return data
+    } catch (e) {
+      isExecuting.value = false
+      throw e
+    }
   }
 
   async function pauseExecution() {

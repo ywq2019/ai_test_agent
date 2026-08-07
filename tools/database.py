@@ -3,7 +3,7 @@
 """
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, Float, JSON, ForeignKey, Index
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, Float, JSON, ForeignKey, Index, UniqueConstraint
 from datetime import datetime
 from tools.config import settings
 
@@ -139,7 +139,7 @@ class TaskEnvVar(Base):
     __tablename__ = "task_env_vars"
 
     id        = Column(Integer, primary_key=True, index=True)
-    task_id   = Column(Integer, nullable=False, index=True)
+    task_id   = Column(Integer, nullable=False)
     key       = Column(String(100), nullable=False)
     value     = Column(Text, nullable=False, default="")
     is_secret = Column(Boolean, default=False)   # 密码/token 等敏感值
@@ -147,6 +147,7 @@ class TaskEnvVar(Base):
 
     __table_args__ = (
         Index("ix_task_env_vars_task", "task_id"),
+        UniqueConstraint("task_id", "key", name="uq_task_env_var"),
     )
 
 
@@ -157,7 +158,7 @@ class ElementAlias(Base):
     __tablename__ = "element_aliases"
 
     id          = Column(Integer, primary_key=True, index=True)
-    task_id     = Column(Integer, nullable=False, index=True)
+    task_id     = Column(Integer, nullable=False)
     name        = Column(String(100), nullable=False)           # 别名，如"登录按钮"
     selectors   = Column(JSON, nullable=False, default=list)    # 候选 selector 列表（按优先级）
     description = Column(String(255), nullable=True, default="")
@@ -166,6 +167,7 @@ class ElementAlias(Base):
 
     __table_args__ = (
         Index("ix_element_aliases_task", "task_id"),
+        UniqueConstraint("task_id", "name", name="uq_element_alias"),
     )
 
 
