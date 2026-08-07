@@ -1479,8 +1479,10 @@ const onTaskSelect = async () => {
   selectedCases.value = []
   filterModule.value = null
   aliasList.value = []   // 切换任务时清空别名缓存
+  filterFailedIds.value = new Set()
   if (filterTaskId.value) {
     await taskStore.fetchCases(filterTaskId.value)
+    fetchLatestFailedCases()   // 切换任务时同步刷新执行状态
   } else {
     // 全部任务：获取所有
     taskStore.setCases([])
@@ -1490,10 +1492,15 @@ const onTaskSelect = async () => {
 
 // ── 执行 ──
 const runSingle = (row) => {
+  if (!row.enabled) { ElMessage.warning('该用例已禁用，无法执行'); return }
   router.push({ name: 'Execution', query: { taskId: row.task_id, caseIds: String(row.id) } })
 }
 const runBatch = () => {
   if (!selectedCases.value.length) { ElMessage.warning('请先勾选要执行的用例'); return }
+  const disabledCases = selectedCases.value.filter(c => !c.enabled)
+  if (disabledCases.length) {
+    ElMessage.warning(`已选用例中有 ${disabledCases.length} 条已禁用，请取消勾选后重试`); return
+  }
   const taskId = selectedCases.value[0].task_id
   if (!selectedCases.value.every(c => c.task_id === taskId)) {
     ElMessage.warning('批量执行只支持同一任务下的用例，请筛选任务后再选择'); return
@@ -1710,6 +1717,7 @@ const getCasesForScene = (scene) => {
 
 // 在场景覆盖 Tab 执行单条用例
 const runSingleById = (caseRow) => {
+  if (!caseRow.enabled) { ElMessage.warning('该用例已禁用，无法执行'); return }
   router.push({
     name: 'Execution',
     query: { taskId: caseRow.task_id, caseIds: String(caseRow.id) }
@@ -1759,18 +1767,20 @@ const batchEnabling  = ref(false)
 const batchDisabling = ref(false)
 const batchEnable = async () => {
   if (!selectedCases.value.length) { ElMessage.warning('请先选择用例'); return }
+  const count = selectedCases.value.length  // 提前保存，异步更新后 selectedCases 会被清空
   batchEnabling.value = true
   try {
     await Promise.all(selectedCases.value.map(c => taskStore.updateCase(c.id, { enabled: true })))
-    ElMessage.success(`已启用 ${selectedCases.value.length} 条用例`)
+    ElMessage.success(`已启用 ${count} 条用例`)
   } catch { ElMessage.error('部分用例启用失败') } finally { batchEnabling.value = false }
 }
 const batchDisable = async () => {
   if (!selectedCases.value.length) { ElMessage.warning('请先选择用例'); return }
+  const count = selectedCases.value.length  // 提前保存，异步更新后 selectedCases 会被清空
   batchDisabling.value = true
   try {
     await Promise.all(selectedCases.value.map(c => taskStore.updateCase(c.id, { enabled: false })))
-    ElMessage.success(`已禁用 ${selectedCases.value.length} 条用例`)
+    ElMessage.success(`已禁用 ${count} 条用例`)
   } catch { ElMessage.error('部分用例禁用失败') } finally { batchDisabling.value = false }
 }
 const batchDelete = async () => {

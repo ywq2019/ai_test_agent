@@ -133,28 +133,6 @@ _RECORD_JS_TPL = """
     push('dblclick', { el: el, description: '双击 ' + (el.textContent || '').trim().slice(0, 30) });
   }, true);
 
-  // ── Hover (debounced, 300ms) ──
-  var _hoverTimer = null;
-  var _lastHoverEl = null;
-  document.addEventListener('mouseover', function(e) {
-    var el = e.target;
-    if (!el || !el.tagName) return;
-    var tag = el.tagName.toLowerCase();
-    // 只记录有交互意义的元素：a, button, [role], [onclick], [data-*]
-    if (tag !== 'a' && tag !== 'button'
-        && !el.hasAttribute('role') && !el.hasAttribute('onclick')
-        && !Array.from(el.attributes).some(function(a){ return a.name.startsWith('data-'); })) {
-      return;
-    }
-    if (_lastHoverEl === el) return;
-    _lastHoverEl = el;
-    if (_hoverTimer) clearTimeout(_hoverTimer);
-    _hoverTimer = setTimeout(function() {
-      push('hover', { el: _lastHoverEl, description: '悬停 ' + (_lastHoverEl.textContent || '').trim().slice(0, 30) });
-      _lastHoverEl = null;
-    }, 300);
-  }, true);
-
   // ── Key press (Enter, Tab, Escape) ──
   document.addEventListener('keydown', function(e) {
     if (e.key === 'Enter' && e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) {

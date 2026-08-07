@@ -1304,15 +1304,45 @@ async def get_latest_failed_cases(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """获取指定任务最近一次执行的失败用例列表（用于「修正失败用例」功能）。
-    同时返回全部执行结果（含 case_id + status）供表格高亮显示。"""
-    from sqlalchemy import desc
+    """返回任务的执行状态：
+    - execution_results: 每条用例最新一次执行结果（来自 TestResult 表，逐条取最新）
+    - failed_cases / summary: 最近一次报告的汇总信息
+    """
+    from sqlalchemy import desc, func
     task_result = await db.execute(select(TestTask).where(TestTask.id == task_id))
     task = task_result.scalar_one_or_none()
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
     await check_access(db, task, current_user, "任务")
 
+    # ── 每条用例最新一次执行结果（子查询取 max created_at）──────────────────
+    from tools.database import TestResult as TR
+    # 子查询：每个 case_id 的最新 created_at
+    latest_sub = (
+        select(TR.case_id, func.max(TR.created_at).label("max_created_at"))
+        .where(TR.task_id == task_id)
+        .group_by(TR.case_id)
+        .subquery()
+    )
+    # join 回 TestResult 取完整行
+    results_q = await db.execute(
+        select(TR)
+        .join(latest_sub, (TR.case_id == latest_sub.c.case_id) &
+                          (TR.created_at == latest_sub.c.max_created_at))
+        .where(TR.task_id == task_id)
+    )
+    execution_results = [
+        {
+            "case_id":       tr.case_id,
+            "case_name":     "",
+            "status":        tr.status,
+            "error_message": tr.error_message,
+            "duration":      tr.duration,
+        }
+        for tr in results_q.scalars().all()
+    ]
+
+    # ── 最新报告的 failed_cases 和 summary（供修正用例 / 执行摘要使用）────────
     report_result = await db.execute(
         select(TestReport)
         .where(TestReport.task_id == task_id)
@@ -1321,49 +1351,22 @@ async def get_latest_failed_cases(
     )
     report = report_result.scalar_one_or_none()
     if not report:
-        return {"failed_cases": [], "report_id": None, "summary": None, "execution_results": []}
+        return {"failed_cases": [], "report_id": None, "summary": None,
+                "execution_results": execution_results}
 
-    summary = report.summary or {}
-    failed_cases = summary.get("failed_cases", [])
-
-    # 查询该报告关联的 TestResult 记录（按时间范围匹配最近一次执行）
-    from tools.database import TestResult as TR
-    execution_results = []
-    if report.created_at:
-        # 取最近一次执行前后10秒内的结果
-        from datetime import timedelta
-        window_start = report.created_at - timedelta(seconds=30)
-        results_result = await db.execute(
-            select(TR)
-            .where(TR.task_id == task_id, TR.start_time >= window_start)
-            .order_by(TR.start_time)
-        )
-        trs = results_result.scalars().all()
-        execution_results = [
-            {
-                "case_id": tr.case_id,
-                "case_name": "",
-                "status": tr.status,
-                "error_message": tr.error_message,
-                "duration": tr.duration,
-            }
-            for tr in trs
-        ]
-
-    # 如果没有 TestResult（旧数据），回退使用 report.details 匹配
-    if not execution_results and report.details:
-        execution_results = report.details
+    summary_raw = report.summary or {}
+    failed_cases = summary_raw.get("failed_cases", [])
 
     return {
         "failed_cases": failed_cases,
         "report_id": report.id,
         "execution_results": execution_results,
         "summary": {
-            "total": report.total_cases,
-            "passed": report.passed,
-            "failed": report.failed,
-            "pass_rate": report.pass_rate,
-            "created_at": _fmt_cst(report.created_at),
+            "total":       report.total_cases,
+            "passed":      report.passed,
+            "failed":      report.failed,
+            "pass_rate":   report.pass_rate,
+            "created_at":  _fmt_cst(report.created_at),
             "finished_at": _fmt_cst(report.finished_at) if report.finished_at else _fmt_cst(report.created_at),
         },
     }
@@ -1427,7 +1430,7 @@ async def _run_execution_bg(
             return []
 
         details = [
-            {"id": idx, "case_name": r.get("case_name", "Unknown"),
+            {"id": idx, "case_id": r.get("case_id"), "case_name": r.get("case_name", "Unknown"),
              "status": r.get("status", "unknown"), "duration": round(r.get("duration", 0) or 0, 2),
              "error_message": r.get("error_message"), "screenshot": r.get("screenshot_path"),
              "start_time": r.get("start_time"), "end_time": r.get("end_time"),
@@ -1532,7 +1535,8 @@ async def execute_cases(
         cases = result.scalars().all()
         if request.case_ids:
             cases = [c for c in cases if c.id in request.case_ids]
-        cases = [c for c in cases if not getattr(c, "deprecated", False)]
+        # 过滤废弃和禁用用例，任何执行方式均不跳过
+        cases = [c for c in cases if not getattr(c, "deprecated", False) and getattr(c, "enabled", True)]
         case_dicts = [
             {"id": c.id, "name": c.name, "module": c.module, "priority": c.priority,
              "preconditions": c.preconditions, "steps": c.steps,
@@ -2672,9 +2676,10 @@ async def execute_multi_browser(
         raise HTTPException(status_code=404, detail="任务不存在")
     await check_access(db, task, current_user, "任务")
 
-    # 查用例
+    # 查用例，过滤废弃和禁用
     stmt = select(TestCase).where(TestCase.task_id == task_id,
-                                   TestCase.deprecated == False)
+                                   TestCase.deprecated == False,
+                                   TestCase.enabled == True)
     if case_ids:
         stmt = stmt.where(TestCase.id.in_(case_ids))
     cases_result = await db.execute(stmt)

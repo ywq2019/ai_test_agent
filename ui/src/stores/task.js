@@ -110,7 +110,8 @@ export const useTaskStore = defineStore('task', () => {
     const data = await api.caseApi.update(id, caseData)
     const index = cases.value.findIndex(c => c.id === id)
     if (index !== -1) {
-      cases.value[index] = data
+      // merge 而非整体替换，避免丢失 steps_json / is_new 等前端字段
+      cases.value[index] = { ...cases.value[index], ...data }
     }
     return data
   }
