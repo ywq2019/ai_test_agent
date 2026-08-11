@@ -4,27 +4,75 @@
 # ── 全局 system prompt（用例生成通用） ──────────────────────────────────────────
 generate_cases:
   system: |
-    Output a single JSON object only. No explanation. Use this exact structure:
-    {"name":"中文接口功能-中文场景描述","description":"接口功能说明","method":"GET","path":"/relative/path","params":{},"body":null,"assertions":[{"type":"status_code","expected":200}],"priority":"P1","module":"module_name","scenario":"正常流"}
+    You are an expert API test engineer. Generate high-quality API test cases.
+    Output a SINGLE valid JSON object only, no markdown, no explanation, no code fences.
 
-    Rules:
-    - name: Chinese only, format 接口功能-场景描述
-    - params: include ALL param keys, use exact values provided
-    - auth failure cases: set passport/token/edu24ol_token to empty string ""
-    - path: relative path only, no domain
+    Required structure:
+    {
+      "name": "接口功能-场景描述（中文，≤20字）",
+      "description": "一句话说明接口功能与测试目的（中文）",
+      "method": "GET|POST|PUT|DELETE|PATCH",
+      "path": "/relative/path（相对路径，不含域名）",
+      "params": {"key": "value"} or {},
+      "body": {"key": "value"} or null,
+      "body_type": "json|form|raw|null",
+      "headers": {} or null,
+      "assertions": [...],
+      "priority": "P0|P1|P2",
+      "module": "模块名（中文）",
+      "scenario": "正常流|鉴权失败|参数校验|边界值|业务异常"
+    }
+
+    ### Assertion Rules (断言规则)
+    1. status_code:
+       - 正常流 → expected: 200 (或接口实际返回的 2xx)
+       - 鉴权失败（token为空/错误）→ expected: 401 或 403
+       - 参数校验失败（必填参数缺失/格式错误）→ expected: 400 或 422
+       - 资源不存在 → expected: 404
+    2. json_path: 正常流必须包含 ≥2 个对关键业务字段的断言
+       - path 格式: $.字段名.子字段名
+       - expected: 使用真实响应中的精确值
+       - match_type: equals（默认）| contains | type
+    3. 断言顺序: status_code 始终排第一个
+
+    ### Scenario Guidelines (场景指引)
+    - 正常流: 所有参数正确填写，期望 2xx，验证核心业务字段
+    - 鉴权失败: 将鉴权参数（token/passport/edu24ol_token等）设为空字符串""，期望 4xx
+    - 参数校验: 移除必填参数 或 传入非法格式值，期望 4xx
+    - 边界值: 参数用极值（0、负数、空字符串、超长字符串），期望 2xx 或 4xx
+    - 业务异常: 业务上不可操作的状态（如重复提交、无权限），根据业务逻辑判断状态码
+
+    ### Priority Rules (优先级规则)
+    - P0: 核心正常流（登录、主业务 CRUD）
+    - P1: 鉴权失败、参数校验、重要边界值
+    - P2: 非核心边界值、低频业务异常
+
+    ### Example (示例)
+    Input: GET /api/user/info, params={userId:"12345"}, 正常流
+    Output:
+    {"name":"用户查询-正常查询","description":"查询指定用户的基本信息及状态","method":"GET","path":"/api/user/info","params":{"userId":"12345"},"body":null,"body_type":null,"headers":null,"assertions":[{"type":"status_code","expected":200},{"type":"json_path","path":"$.code","expected":0,"match_type":"equals"},{"type":"json_path","path":"$.data.userName","expected":"张三","match_type":"equals"}],"priority":"P0","module":"用户管理","scenario":"正常流"}
 
   user_template: |
-    Generate 1 test case. API: {method} {path}. Module: {module_name}. Base URL: {base_url}.
+    Generate 1 test case.
+    {probe_section}
+    API: {method} {path}
+    Module: {module_name}
+    Base URL: {base_url}
     Params: {params_line}
     Scenario: {scenario}
-    Rules: name=中文(接口功能-场景), all params required, use exact param values.
+    Rules: name=中文(接口功能-场景,≤20字), all params required, use exact param values.
 
 # ── 接口文档模块分组提取 ────────────────────────────────────────────────────────
 extract_groups:
-  system: "You are an API doc analyzer. Output JSON array only."
+  system: |
+    You are an API doc analyzer. Output JSON array only, no explanation, no markdown.
+    CRITICAL: Only extract module names that ACTUALLY EXIST in the document. 
+    Do NOT fabricate, guess, or invent module names. Each module must be traceable 
+    to a real section, tag, or group of endpoints in the document.
   user_template: |
-    分析以下接口文档，提取接口模块分组。
-    输出 JSON 数组，每项包含 name（模块名）和 endpoints（该模块的接口描述）。
+    分析以下接口文档，严格只从文档中提取真实存在的接口模块分组。
+    输出 JSON 数组，每项包含 name（模块名，必须能在文档中找到对应）和 endpoints（该模块的接口描述）。
+    不要编造任何模块名。如果文档中找不到明确的模块，返回空数组 []。
     只输出 JSON，不要解释。
 
     文档内容：
@@ -32,7 +80,9 @@ extract_groups:
 
 # ── 接口描述批量补全 ────────────────────────────────────────────────────────────
 fill_descriptions:
-  system: "You are an API documentation expert. Output JSON object only."
+  system: |
+    You are an API documentation expert. Output a single JSON object only, no markdown, no explanation.
+    Format: {"path1":"描述1","path2":"描述2"}
   user_template: |
     为以下 API 路径各生成一句简洁的中文接口功能描述（10字以内），
     只输出一个 JSON 对象，key 为路径字符串，value 为描述字符串。

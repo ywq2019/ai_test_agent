@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Optional
+from typing import Optional, Dict, Any
 
 import httpx
 from loguru import logger
@@ -39,6 +39,7 @@ def _build_request(
     user_prompt: str,
     max_tokens: int = 8192,
     temperature: Optional[float] = None,
+    response_format: Optional[Dict[str, Any]] = None,
 ) -> tuple[str, dict, dict]:
     """
     返回 (url, headers, payload)。
@@ -46,6 +47,8 @@ def _build_request(
     extra = {}
     if temperature is not None:
         extra["temperature"] = temperature
+    if response_format is not None:
+        extra["response_format"] = response_format
 
     if fmt == "anthropic":
         url = f"{base_url}/v1/messages"
@@ -181,6 +184,7 @@ async def call_llm(
     *,
     max_tokens: int = 8192,
     temperature: Optional[float] = None,
+    response_format: Optional[Dict[str, Any]] = None,
     timeout_secs: int = 90,
     retries: int = 3,
     semaphore: Optional[asyncio.Semaphore] = None,
@@ -225,6 +229,7 @@ async def call_llm(
         system_prompt, user_prompt,
         max_tokens=max_tokens,
         temperature=temperature,
+        response_format=response_format,
     )
 
     logger.info(f"[llm_client] fmt={fmt} url={url} model={model}")

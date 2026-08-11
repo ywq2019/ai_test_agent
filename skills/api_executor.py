@@ -6,6 +6,7 @@
 import base64
 import time
 from typing import List, Dict, Any, Optional, Callable
+from urllib.parse import urlencode
 from loguru import logger
 from skills.param_resolver import resolve_obj, resolve_str, set_global_var, flush_global_vars
 
@@ -323,6 +324,12 @@ class ApiExecutor:
         body_type    = case.get("body_type") or "json"
         body         = resolve_obj(case.get("body"),           var_store, custom_scripts)
         body_raw     = resolve_str(case.get("body_raw") or "", var_store, custom_scripts)
+
+        # ── 构造完整 URL（含查询参数），用于报告展示/复制 ──
+        full_url = url
+        if params and isinstance(params, dict):
+            qs = urlencode(params)
+            full_url = url + ("&" if "?" in url else "?") + qs
         # ────────────────────────────────────────────────────────────────────
 
         headers = {**global_headers, **auth_headers, **case_headers}
@@ -402,7 +409,9 @@ class ApiExecutor:
                 "case_id": case.get("id"),
                 "case_name": case.get("name"),
                 "method": method,
-                "url": url,
+                "url": full_url,
+                "body": body,
+                "body_type": body_type,
                 "status_code": resp.status_code,
                 "duration_ms": duration_ms,
                 "status": "passed" if passed else "failed",
@@ -416,7 +425,9 @@ class ApiExecutor:
                 "case_id": case.get("id"),
                 "case_name": case.get("name"),
                 "method": method,
-                "url": url,
+                "url": full_url,
+                "body": body,
+                "body_type": body_type,
                 "status_code": None,
                 "duration_ms": int((time.time() - t0) * 1000),
                 "status": "failed",

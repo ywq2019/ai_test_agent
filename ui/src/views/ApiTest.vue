@@ -732,6 +732,14 @@ async def create_order(user_id: int, product_id: int, quantity: int):
     ..."
           />
         </el-tab-pane>
+        <el-tab-pane label="粘贴 Curl" name="curl">
+          <el-input
+            v-model="genCurl"
+            type="textarea"
+            :rows="10"
+            :placeholder="genCurlPlaceholder"
+          />
+        </el-tab-pane>
       </el-tabs>
       <template #footer>
         <el-button @click="genDialogVisible = false">取消</el-button>
@@ -881,7 +889,10 @@ async def create_order(user_id: int, product_id: int, quantity: int):
             <el-table-column type="expand">
               <template #default="{ row }">
                 <div style="padding:10px 24px;font-size:12px">
-                  <div style="margin-bottom:6px"><strong>请求URL：</strong><code>{{ row.url }}</code></div>
+                  <div style="margin-bottom:6px;display:flex;align-items:flex-start">
+                    <strong>请求URL：</strong><code style="flex:1;word-break:break-all;margin-right:8px;font-size:12px">{{ row.url }}</code>
+                    <el-button size="small" text @click="copyCurlCommand(row)" style="flex-shrink:0;font-size:11px;padding:0 4px;height:20px">复制</el-button>
+                  </div>
                   <div v-if="row.assertions?.length" style="margin-bottom:8px">
                     <div style="font-weight:500;font-size:12px;color:#555;margin-bottom:5px">断言结果</div>
                     <div class="assertion-list">
@@ -1183,6 +1194,17 @@ const genTab = ref('swagger')
 const genSwagger = ref('')
 const genDescription = ref('')
 const genCode = ref('')
+const genCurl = ref('')
+const genCurlPlaceholder = `粘贴 curl 命令，AI 自动解析 method / URL / headers / body...
+
+例如：
+curl -X POST 'https://api.example.com/v1/orders' \\
+  -H 'Authorization: Bearer xxx' \\
+  -H 'Content-Type: application/json' \\
+  -d '{"userId":123,"amount":99.9}'
+
+也支持单行：
+curl -X POST 'https://api.example.com/v1/users' -H 'Content-Type: application/json' -d '{"name":"test","age":25}'`
 const genCodeLang = ref('python')
 const generating = ref(false)
 const genProgress = ref(0)
@@ -1401,9 +1423,13 @@ const handleWsMsg = (data) => {
   } else if (data.type === 'api_gen_done') {
     generating.value = false
     genProgress.value = 100
-    genStage.value = `生成完成，共 ${data.count} 条用例`
-    genDialogVisible.value = false
-    loadCases()
+    if (data.count === 0) {
+      genStage.value = data.error || '生成失败，未生成用例，请检查大模型配置后重试'
+    } else {
+      genStage.value = `生成完成，共 ${data.count} 条用例`
+      genDialogVisible.value = false
+      loadCases()
+    }
     disconnectWs()
   } else if (data.type === 'api_gen_error') {
     generating.value = false
@@ -1871,15 +1897,17 @@ const showGenDialog = () => {
   genSwagger.value = ''
   genDescription.value = ''
   genCode.value = ''
+  genCurl.value = ''
   genDialogVisible.value = true
 }
 
 const startGenerate = async () => {
   const swagger_text = genTab.value === 'swagger' ? genSwagger.value : ''
   const description  = genTab.value === 'desc'    ? genDescription.value : ''
+  const curl_text    = genTab.value === 'curl'    ? genCurl.value : ''
   const code         = genTab.value === 'code'    ? genCode.value : ''
 
-  if (!swagger_text && !description && !code) return ElMessage.warning('请填写内容')
+  if (!swagger_text && !description && !code && !curl_text) return ElMessage.warning('请填写内容')
 
   generating.value = true
   genProgress.value = 0
@@ -1894,7 +1922,7 @@ const startGenerate = async () => {
         lang: genCodeLang.value,
       })
     } else {
-      await apiTestApi.generateCases(currentProject.value.id, { swagger_text, description })
+      await apiTestApi.generateCases(currentProject.value.id, { swagger_text, description, curl_text })
     }
     genDialogVisible.value = false
   } catch (e) {
@@ -2084,6 +2112,28 @@ const formatResponsePreview = (text) => {
 
 const copyResponseText = (text) => {
   navigator.clipboard.writeText(text).then(() => ElMessage.success('已复制')).catch(() => ElMessage.error('复制失败'))
+}
+
+const copyCurlCommand = (row) => {
+  let parts = [`curl -X ${row.method || 'GET'}`]
+  // URL 用双引号包裹，避免 shell 特殊字符问题
+  const url = (row.url || '').replace(/"/g, '\\"')
+  parts.push(`"${url}"`)
+  // POST/PUT/PATCH 有 body 时追加请求体
+  const hasBody = ['POST', 'PUT', 'PATCH'].includes(row.method) && row.body
+  if (hasBody) {
+    const bodyData = typeof row.body === 'string' ? row.body : row.body
+    const bodyObj = typeof bodyData === 'string' ? (() => { try { return JSON.parse(bodyData) } catch { return null } })() : bodyData
+    if (bodyObj && (typeof bodyObj === 'object' ? Object.keys(bodyObj).length > 0 : true)) {
+      parts.push('-H "Content-Type: application/json"')
+      const bodyStr = JSON.stringify(bodyObj)
+      // 单引号包裹 body，内部单引号转义
+      const escaped = bodyStr.replace(/'/g, "'\\''")
+      parts.push(`-d '${escaped}'`)
+    }
+  }
+  const cmd = parts.join(' \\\n  ')
+  navigator.clipboard.writeText(cmd).then(() => ElMessage.success('已复制 curl 命令')).catch(() => ElMessage.error('复制失败'))
 }
 
 // ── ECharts ──

@@ -194,11 +194,13 @@ Playwright 驱动浏览器，以「AI 场景规划 → 录制 → 健壮化 → 
 
 | 输入源 | 说明 |
 | --- | --- |
-| Swagger / OpenAPI | 解析接口定义，自动生成正常 / 异常 / 边界用例 |
+| Swagger / OpenAPI | 解析接口定义，真实探测获取响应结构，自动生成正常 / 异常 / 边界用例 |
+| Curl 命令 | 粘贴 curl，自动解析 method/URL/headers/body，注入精确数据生成用例 |
 | 自然语言描述 | 描述接口行为，AI 推理补全请求体、断言与边界 |
-| 代码（Python/Java/Go/Node.js/PHP） | 静态分析业务代码，提取接口调用并生成用例 |
-| **代码可行性分析** | 识别 `missing`（缺失接口）/ `mismatch`（字段不符）/ `extra`（多余字段）/ `risk`（潜在风险）四类偏差，自动补充差异验证用例 |
-| **Postman/HAR 导入** | 解析 Postman Collection 或 HAR 文件，直接导入为用例 |
+| 代码（Python/Java/Go/Node/PHP） | 静态分析业务代码，提取接口调用生成用例 |
+| Postman/HAR 导入 | 解析 Postman Collection 或 HAR 文件，直接导入为用例 |
+
+> AI 生成链路优化：真实接口探测 → JSON Mode 强制输出 → 容错补全（缺失字段自动填充）→ 模块名校验（防幻觉）→ json_path 自检，确保生成质量。
 
 #### 参数化与前置依赖
 
@@ -214,9 +216,10 @@ Playwright 驱动浏览器，以「AI 场景规划 → 录制 → 健壮化 → 
 
 | 功能 | 说明 |
 | --- | --- |
-| 单次执行 | 选择全部或指定用例，实时 WebSocket 推送每条用例结果（频道按 project_id 隔离，多用户互不干扰） |
-| 压力测试 | 配置并发数 / 持续时长 / 爬坡策略，实时推送 TPS / P95 / P99 指标，ECharts 实时图表 |
-| **报告 PDF 导出** | 含用例明细表格 + AI 智能分析段落，一键导出归档 |
+| 单次执行 | 选择全部或指定用例，实时 WebSocket 推送结果（频道按 project_id 隔离） |
+| **报告详情** | 每条用例展示请求/响应完整信息，右键一键复制为 curl 命令（自动拼接 method/headers/body） |
+| 压力测试 | 配置并发数 / 持续时长 / 爬坡策略，实时 TPS / P95 / P99，ECharts 图表 |
+| PDF 导出 | 含用例明细 + AI 分析，一键归档 |
 
 ### Mock 服务
 

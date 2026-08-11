@@ -577,6 +577,7 @@ async def generate_api_cases(
 
     swagger_text = data.get("swagger_text", "")
     description  = data.get("description", "")
+    curl_text    = data.get("curl_text", "")
     proj_dict    = _proj_dict(proj)
 
     async def _bg():
@@ -593,7 +594,7 @@ async def generate_api_cases(
         try:
             cases = await api_case_generator.generate_cases(
                 base_url=proj.base_url, swagger_text=swagger_text,
-                description=description, progress_cb=progress_cb,
+                description=description, curl_text=curl_text, progress_cb=progress_cb,
                 project={"base_url": proj.base_url, "auth_type": proj.auth_type or "none",
                          "auth_config": proj.auth_config or {}, "global_headers": proj.global_headers or {}},
             )
@@ -608,7 +609,9 @@ async def generate_api_cases(
                         priority=c.get("priority", "P1"), description=c.get("description", ""), enabled=True,
                     ))
                 await s.commit()
-            await ws_manager.broadcast({"type": "api_gen_done", "count": len(cases)}, client_id=ws_cid)
+            await ws_manager.broadcast({"type": "api_gen_done", "count": len(cases),
+                                        "error": "所有用例生成失败，请检查大模型配置（AI_API_KEY/AI_API_URL）是否正确，或尝试更换模型" if len(cases) == 0 else None},
+                                       client_id=ws_cid)
             # 全局铃铛通知
             await ws_manager.broadcast_to_workspace(
                 {"type": "cases_generated", "case_count": len(cases), "source": "api_test",

@@ -74,6 +74,162 @@ class ApiCaseGenerator:
         ]
         return "\n".join(lines)
 
+    # ─── Curl 解析 ───────────────────────────────────────────────────────────
+
+    def _parse_curl_input(self, content: str) -> Optional[Dict]:
+        """解析 curl 命令，提取 method / url / headers / body。
+
+        支持格式：
+        - curl 'http://...'  /  curl "http://..."
+        - curl -X POST ... -H "..." -d '{...}'
+        - curl ... --data-binary '{...}' --compressed
+        - 反引号包裹 URL
+        - 多行续行符 \\ 和 ^
+        - URL 不在第一位（前面有 -H 等参数）
+        """
+        stripped = content.strip()
+        # 必须是 curl 命令开头
+        if not re.match(r'^curl\s+', stripped, re.IGNORECASE):
+            return None
+
+        # 移除续行符（\ 和 ^）
+        clean = re.sub(r'\\\s*\n\s*', ' ', stripped)
+        clean = re.sub(r'\^\s*\n\s*', ' ', clean)
+
+        # ── 提取 URL：找最后一个 http(s):// 开头的参数 ──
+        # 通用匹配：在引号内或裸露的 http(s):// 链接
+        url_match = re.findall(
+            r"""(?:["'`])(https?://[^"'\s`]+?)(?:["'`])"""  # "url" 或 'url' 或 `url`
+            r"""|(?:["'`])(https?://[^"'\s`]+)$"""            # "url" 在末尾
+            r"""|(?<=\s)(https?://[^\s"']+)(?:\s|$)""",      # 裸露 url
+            clean
+        )
+        url_str = None
+        for t in url_match:
+            for candidate in t:
+                if candidate and candidate.startswith(('http://', 'https://')):
+                    url_str = candidate.rstrip('"\'`')  # 去掉末尾引号
+                    break
+        if not url_str:
+            return None
+
+        # 解析 URL
+        try:
+            parsed = urlparse(url_str.rstrip('/\\'))
+        except Exception:
+            return None
+
+        # ── 提取方法 ──
+        method_match = re.search(r'-X\s+(\w+)', clean, re.IGNORECASE)
+        # 有 body 时默认 POST，否则 GET
+        method = method_match.group(1).upper() if method_match else \
+                 ("POST" if "--data" in clean or "--data-binary" in clean or "--data-raw" in clean else "GET")
+
+        # ── 提取 headers ──
+        headers = {}
+        for m in re.finditer(r"-H\s+(?:\"([^\"]*)\"|'([^']*)'|(\S+))", clean):
+            hv = m.group(1) or m.group(2) or m.group(3)
+            if ":" in hv:
+                k, v = hv.split(":", 1)
+                headers[k.strip()] = v.strip()
+
+        # ── 提取 body（-d / --data / --data-raw / --data-binary）──
+        body = None
+        body_type = "json"
+        body_match = re.search(
+            r'(--data-binary|--data-raw|--data|-d)\s+'
+            r'(?:\$\'([^\']*)\'|'
+            r'\$"([^"]*)"|'
+            r'"((?:[^"\\]|\\.)*)"|'    # 支持 JSON 内转义引号
+            r"\'([^\']*)\'|"
+            r'(\S+))',
+            clean
+        )
+        if body_match:
+            raw_body = body_match.group(2) or body_match.group(3) or body_match.group(4) or body_match.group(5) or body_match.group(6) or ""
+            if raw_body:
+                # bash 双引号内的 JSON 会转义 \" → "，先还原
+                raw_body = raw_body.replace('\\"', '"')
+                try:
+                    body = json.loads(raw_body)
+                    body_type = "json"
+                except (json.JSONDecodeError, Exception):
+                    body = raw_body
+                    body_type = "raw"
+                if body_type == "json" and isinstance(body, dict) and len(body) <= 1:
+                    # 单字段 dict 可能是误解析，尝试作为字符串
+                    if list(body.values()) == [''] or all(v == 0 for v in body.values() if not isinstance(v, str)):
+                        body = raw_body
+
+        # ── URL query params ──
+        params = {}
+        if parsed.query:
+            from urllib.parse import parse_qs
+            params = {k: (v[0] if len(v) == 1 else v)
+                      for k, v in parse_qs(parsed.query, keep_blank_values=True).items()}
+
+        # ── Content-Type 推断 ──
+        ct = headers.get("Content-Type", headers.get("content-type", ""))
+        if "x-www-form-urlencoded" in ct:
+            body_type = "form"
+        elif "json" in ct:
+            body_type = "json"
+
+        return {
+            "scheme": parsed.scheme,
+            "host": parsed.netloc,
+            "path": parsed.path or "/",
+            "method": method,
+            "params": params,
+            "headers": headers,
+            "body": body,
+            "body_type": body_type,
+        }
+
+    def _curl_to_description(self, curl_info: Dict, project_base_url: str) -> str:
+        """将 curl 解析结果转为结构化的接口描述。"""
+        path = curl_info["path"]
+        method = curl_info["method"]
+        params = curl_info["params"]
+        headers = curl_info.get("headers", {})
+        body = curl_info.get("body")
+        body_type = curl_info.get("body_type", "json")
+        inferred_host = f"{curl_info['scheme']}://{curl_info['host']}"
+
+        lines = [
+            f"接口路径: {path}",
+            f"请求方法: {method}",
+            f"Base URL: {project_base_url or inferred_host}",
+        ]
+        if params:
+            lines.append("Query 参数：")
+            for k, v in params.items():
+                lines.append(f"  - {k}: {v}")
+        if headers:
+            # 过滤掉通用 header，只保留业务相关
+            biz_headers = {k: v for k, v in headers.items()
+                          if k.lower() not in ('host', 'user-agent', 'accept', 'accept-encoding',
+                                                'connection', 'content-length', 'cache-control')}
+            if biz_headers:
+                lines.append("请求 Headers：")
+                for k, v in biz_headers.items():
+                    lines.append(f"  - {k}: {v}")
+        if body:
+            lines.append(f"请求体（{body_type}）：")
+            if isinstance(body, dict):
+                lines.append(json.dumps(body, ensure_ascii=False, indent=2))
+            else:
+                lines.append(str(body)[:500])
+        lines += [
+            "",
+            "要求：",
+            f"1. 正常流用例使用上述 {method} 方法和真实参数值",
+            "2. 生成鉴权失败用例（Headers 中的 token/passport 置空）",
+            "3. 生成参数校验和边界值用例",
+            "4. 生成 body 字段缺失/格式错误的用例（如有 body）" if body else "",
+        ]
+        return "\n".join(lines)
+
     # ─── 主入口 ──────────────────────────────────────────────────────────────
 
     async def generate_cases(
@@ -81,18 +237,49 @@ class ApiCaseGenerator:
         base_url: str,
         swagger_text: str = "",
         description: str = "",
+        curl_text: str = "",
         progress_cb: Optional[Callable] = None,
         project: Optional[Dict] = None,
     ) -> List[Dict[str, Any]]:
-        content = swagger_text or description
-        # 从用户描述中解析生成意图（数量 + 场景范围）
+        content = swagger_text or description or curl_text
+        # ── Curl 优先：粘贴 curl 命令，精确解析 method/url/headers/body ──
+        # 支持在任意字段中自动检测 curl（curl_text / description / swagger_text）
+        curl_info = self._parse_curl_input(curl_text) if curl_text else None
+        if not curl_info:
+            curl_info = self._parse_curl_input(description) if description else None
+        if not curl_info:
+            curl_info = self._parse_curl_input(swagger_text) if swagger_text else None
+        is_curl = bool(curl_info)
         user_intent = self._parse_user_intent(description) if description and not swagger_text else {}
         if progress_cb:
             await progress_cb(10, "分析接口文档...")
 
         # Step 1: 识别接口分组
         url_info = self._parse_url_input(content)
-        if url_info:
+        if is_curl:
+            # ── Curl 输入：精确解析，构造单个分组 ──
+            structured = self._curl_to_description(curl_info, base_url)
+            logger.info(
+                f"Curl detected: method={curl_info['method']} path={curl_info['path']}, "
+                f"has_body={bool(curl_info.get('body'))}"
+            )
+            module_name = curl_info["path"].rstrip("/").split("/")[-1] or "接口"
+            probe_hint = {
+                "path": curl_info["path"],
+                "method": curl_info["method"],
+                "params": curl_info["params"],
+            }
+            if curl_info.get("headers"):
+                probe_hint["headers"] = curl_info["headers"]
+            if curl_info.get("body"):
+                probe_hint["body"] = curl_info["body"]
+                probe_hint["body_type"] = curl_info.get("body_type", "json")
+            groups = [{
+                "name": module_name,
+                "endpoints": structured,
+                "_probe_hint": probe_hint,
+            }]
+        elif url_info:
             structured = self._url_to_description(url_info, base_url)
             logger.info(f"URL detected: path={url_info['path']}, params={list(url_info['params'].keys())}")
             module_name = url_info["path"].rstrip("/").split("/")[-1] or "接口"
@@ -188,16 +375,42 @@ class ApiCaseGenerator:
         if not content.strip():
             return []
         prompt = (
-            "分析以下接口文档，提取接口模块分组。\n"
-            "输出 JSON 数组，每项包含 name（模块名）和 endpoints（该模块的接口描述）。\n"
-            "严格输出 JSON，不要任何解释。\n\n"
+            "分析以下接口文档，严格只从文档中提取真实存在的接口模块分组。\n"
+            "输出 JSON 数组，每项包含 name（模块名，必须能在文档中找到对应）和 endpoints（该模块的接口描述）。\n"
+            "不要编造任何模块名。如果文档中找不到明确的模块，返回空数组 []。\n"
+            "只输出 JSON，不要解释。\n\n"
             f"文档内容：\n{content[:3000]}"
         )
         try:
             raw = await self._call_api(get_system("api_case_gen.yaml", "extract_groups"), prompt)
             data = self._extract_json(raw)
             if isinstance(data, list) and data:
-                return data[:10]
+                # ── 校验：模块名必须在文档内容中出现 ──
+                content_lower = content.lower()
+                valid = []
+                for g in data:
+                    if not isinstance(g, dict):
+                        continue
+                    name = g.get("name", "")
+                    # 模块名为中文时拆分逐词检查，英文时直接匹配
+                    if any(ch >= '\u4e00' and ch <= '\u9fff' for ch in name):
+                        # 中文模块名：每个字独立检查是否在文档中出现（容忍少量不在的）
+                        chars_in = sum(1 for c in name if c in content)
+                        ratio = chars_in / len(name) if name else 0
+                        if ratio >= 0.6:
+                            valid.append(g)
+                        else:
+                            logger.warning(f"Dropped hallucinated group: '{name}' (only {ratio:.0%} chars in content)")
+                    else:
+                        # 英文模块名：直接检查子串
+                        if name.lower() in content_lower:
+                            valid.append(g)
+                        else:
+                            logger.warning(f"Dropped hallucinated group: '{name}' (not found in content)")
+                if valid:
+                    return valid[:10]
+                logger.warning(f"All {len(data)} groups filtered out as hallucinations, falling back to single group")
+            return data[:10] if data else []
         except Exception as e:
             logger.warning(f"Group extraction failed: {e}")
         return []
@@ -318,9 +531,15 @@ class ApiCaseGenerator:
             candidates = self._extract_probe_candidates(g)
             probe = None
             for cand in candidates:
+                # 合并项目级 header 和 curl 专用 header
+                probe_headers = dict(headers)
+                hint_headers = (g.get("_probe_hint") or {}).get("headers", {})
+                if hint_headers:
+                    probe_headers.update(hint_headers)
                 probe = await self._probe_endpoint(
                     base_url, cand["path"], cand["method"],
-                    cand.get("params", {}), headers,
+                    cand.get("params", {}), probe_headers,
+                    body=(g.get("_probe_hint") or {}).get("body"),
                 )
                 if probe:
                     break
@@ -352,12 +571,13 @@ class ApiCaseGenerator:
         probe_hint = group.get("_probe_hint", {})
         real_params = probe_hint.get("params", {})
         path = probe_hint.get("path", "/")
+        method = probe_hint.get("method", "GET")
 
         # 只传参数 key 列表，不传值（避免 token 过多）
         param_keys = list(real_params.keys()) if real_params else []
 
         prompt = (
-            f"API: GET {path}, module: {name}, params: {', '.join(param_keys)}\n"
+            f"API: {method} {path}, module: {name}, params: {', '.join(param_keys)}\n"
             "List the test scenarios needed for this API as a JSON array of Chinese strings.\n"
             "Include: normal flow, auth failures, missing required params, boundary values.\n"
             "Max 8 scenarios. Output JSON array only."
@@ -414,6 +634,27 @@ class ApiCaseGenerator:
         )
 
         cases = [r for r in results if isinstance(r, dict) and r.get("path")]
+        if not cases and scenes:
+            # ── LLM 全部失败，用模板兜底生成基础用例 ──
+            probe = group.get("_probe") or group.get("_probe_hint") or {}
+            fallback_path = probe.get("path", "/")
+            fallback_method = probe.get("method", "GET")
+            fallback_params = probe.get("params", {})
+            fallback = {
+                "name": f"{name}-正常流",
+                "module": name,
+                "method": fallback_method,
+                "path": fallback_path,
+                "params": fallback_params,
+                "headers": {},
+                "body": None,
+                "assertions": [{"type": "status_code", "expected": 200}],
+                "description": f"{name}接口正常流测试（AI生成失败，使用模板兜底，请检查大模型配置后重试）",
+                "priority": "P1",
+                "enabled": True,
+            }
+            cases = [fallback]
+            logger.warning(f"All {len(scenes)} scenes failed for '{name}', using template fallback")
         logger.info(f"Generated {len(cases)}/{len(scenes)} cases for module '{name}'")
         return cases
 
@@ -464,7 +705,14 @@ class ApiCaseGenerator:
         path = probe_hint.get("path", "/")
         method = probe_hint.get("method", "GET")
 
-        prompt = (
+        # ── 将预探测结果注入 prompt，让 LLM 基于真实响应生成断言 ──
+        probe = group.get("_probe")
+        probe_section = self._build_probe_section(probe) if probe else ""
+
+        prompt_parts = []
+        if probe_section:
+            prompt_parts.append(probe_section)
+        prompt_parts.append(
             f"Generate 1 test case. API: {method} {path}. "
             f"Module: {name}. Base URL: {base_url}.\n"
             f"Params: {params_line}\n"
@@ -472,6 +720,7 @@ class ApiCaseGenerator:
             "Rules: name=中文(接口功能-场景), all params required, "
             "use exact param values above, auth failure params set to empty string."
         )
+        prompt = "\n".join(prompt_parts)
         try:
             raw = await self._call_api(_get_system_prompt(), prompt)
             # 优先解析为单个对象，其次尝试取数组第一条
@@ -480,9 +729,19 @@ class ApiCaseGenerator:
                 arr = self._extract_json(raw)
                 if isinstance(arr, list) and arr:
                     case = arr[0]
-            if case and isinstance(case, dict) and case.get("path"):
-                case["module"] = case.get("module") or name
-                return case
+            # ── 容错补全：缺失字段从 probe_hint 自动填充 ──
+            if case and isinstance(case, dict):
+                if not case.get("path"):
+                    case["path"] = probe_hint.get("path", path)
+                if not case.get("method"):
+                    case["method"] = probe_hint.get("method", method)
+                # 始终用 group 名覆盖 module，防止 LLM 编造其它模块
+                if name:
+                    case["module"] = name
+                if not case.get("body_type") and case.get("body"):
+                    case["body_type"] = "json"
+                if case.get("path"):
+                    return case
             logger.warning(f"Single case parse failed for '{name}/{scenario}', raw[:200]: {raw[:200]}")
         except Exception as e:
             logger.warning(f"Single case gen failed for '{name}/{scenario}': {e}")
@@ -693,7 +952,10 @@ class ApiCaseGenerator:
 
                 elif atype == "json_path":
                     if not is_normal:
-                        # 异常流：跳过 json_path（无法保证响应结构一致）
+                        # 异常流：仅保留通用错误字段（code/msg/message/error）的断言
+                        _common_err_fields = ('$.code', '$.msg', '$.message', '$.error', '$.status', '$.success')
+                        if a["path"] in _common_err_fields:
+                            new_assertions.append(a)
                         continue
                     # 校验路径是否在真实响应中存在
                     actual = self._jsonpath_get_safe(real_json, a["path"])
@@ -864,8 +1126,27 @@ class ApiCaseGenerator:
         # 响应 4xx 且预期 2xx：明显有问题，需修正
         needs_fix = (not status_ok and actual_status >= 400 and expected_status < 300)
 
+        # ── json_path 断言路径存在性检查 ──
+        json_path_issues = False
+        if not needs_fix and isinstance(actual_body, dict):
+            for a in (case.get("assertions") or []):
+                if a.get("type") != "json_path":
+                    continue
+                jp = a["path"]
+                # 检查路径是否在真实响应中存在
+                val = self._jsonpath_get_safe(actual_body, jp)
+                if val is _MISSING:
+                    logger.info(
+                        f"[self_correct] json_path '{jp}' missing in response "
+                        f"for {method} {path}"
+                    )
+                    json_path_issues = True
+                    break  # 至少有一个路径不匹配就需要修正
+
+        needs_fix = needs_fix or json_path_issues
+
         if not needs_fix:
-            # 状态码符合预期，不需要修正
+            # 状态码 + json_path 都符合预期，不需要修正
             return case
 
         # ── 调用 AI 修正 ──────────────────────────────────────────────────────
@@ -908,8 +1189,12 @@ class ApiCaseGenerator:
 
     async def _call_api(self, system_prompt: str, user_prompt: str) -> str:
         from tools.llm_client import call_llm
-        # max_tokens=1200：英文 system + 单条用例，reasoner 思考约 500 token，输出约 300 token
-        text = await call_llm(system_prompt, user_prompt, max_tokens=1200, timeout_secs=60)
+        # max_tokens=2048：reasoner 思考约 500 token，输出约 500 token，JSON mode 更稳定
+        text = await call_llm(
+            system_prompt, user_prompt,
+            max_tokens=2048, timeout_secs=60,
+            response_format={"type": "json_object"},
+        )
         logger.info(f"API response received, len={len(text)}")
         return text
 
