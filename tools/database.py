@@ -49,6 +49,14 @@ class TestTask(Base):
     # plan_scenes 接口生成的场景列表，格式: [{id, name, priority, description, steps_desc, expected, recorded}, ...]
     scene_plan = Column(JSON, nullable=True)
 
+    # ── 前置登录态（方案三：storage_state 快照）────────────────────────────────
+    # 指向同任务下某条「登录用例」的 id，执行前自动跑该用例并保存 storage_state
+    setup_case_id = Column(Integer, nullable=True)
+    # 快照文件路径（由执行引擎自动管理，前端只读）
+    storage_state_path = Column(String(512), nullable=True)
+    # 快照有效期（分钟），超时自动重跑 setup 用例；0 表示每次都重新跑
+    storage_ttl_minutes = Column(Integer, default=60, nullable=False)
+
 
 class TestCase(Base):
     __tablename__ = "test_cases"
@@ -75,6 +83,14 @@ class TestCase(Base):
     # ── 用例来源 ──────────────────────────────────────────────────────────────
     # recorded=录制产生  ai_generated=AI生成  manual=手动创建
     source = Column(String(20), nullable=True, default="manual")
+
+    # ── 前置步骤（方案一：case 级 setup_steps）────────────────────────────────
+    # 在 steps_json 执行前先跑这些步骤（如导航到特定页面、展开弹窗等），
+    # 与 steps_json 共用同一个 Page，不产生独立用例依赖
+    setup_steps = Column(JSON, nullable=True)
+    # 是否在执行前加载 task 级 storage_state 快照（默认 True）
+    # 设为 False 则该用例始终以干净状态运行（如登录用例本身）
+    use_storage = Column(Boolean, default=True, nullable=False)
 
     # ── 权限与隔离 ──
     created_by = Column(String(100), nullable=True, index=True)
@@ -179,6 +195,7 @@ class AICaseFile(Base):
     case_count = Column(Integer, default=0)
     md_path = Column(String(512), nullable=True)
     xmind_path = Column(String(512), nullable=True)
+    xlsx_path = Column(String(512), nullable=True)
     cases_data = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     created_by = Column(String(100), nullable=True, index=True)
@@ -577,6 +594,13 @@ async def init_database():
         "ALTER TABLE test_cases ADD COLUMN source VARCHAR(20) DEFAULT 'manual'",
         # 任务级 AI 场景规划结果持久化
         "ALTER TABLE test_tasks ADD COLUMN scene_plan JSON",
+        # 前置登录态 — storage_state 快照（方案三）
+        "ALTER TABLE test_tasks ADD COLUMN setup_case_id INTEGER",
+        "ALTER TABLE test_tasks ADD COLUMN storage_state_path VARCHAR(512)",
+        "ALTER TABLE test_tasks ADD COLUMN storage_ttl_minutes INTEGER DEFAULT 60",
+        # 用例级前置步骤 — setup_steps（方案一）
+        "ALTER TABLE test_cases ADD COLUMN setup_steps JSON",
+        "ALTER TABLE test_cases ADD COLUMN use_storage BOOLEAN DEFAULT 1",
         # 元素别名库（create_all 自动建表，无需 ALTER）
     ]:
         try:

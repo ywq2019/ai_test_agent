@@ -10,7 +10,6 @@
             <span class="page-title">测试用例管理</span>
             <div class="header-controls">
               <el-select v-model="filterTaskId" placeholder="选择任务" style="width: 180px;" @change="onTaskSelect">
-                <el-option label="全部任务" :value="null" />
                 <el-option v-for="task in taskStore.tasks" :key="task.id" :label="task.name" :value="task.id" />
               </el-select>
               <el-input
@@ -84,6 +83,10 @@
               <el-button type="primary" @click="openCreateDialog">
                 <el-icon><Plus /></el-icon>新建用例
               </el-button>
+              <!-- AI 生成用例 -->
+              <el-button type="warning" @click="openGenDialog" :disabled="!filterTaskId" :loading="generating">
+                <el-icon><MagicStick /></el-icon>AI 生成用例
+              </el-button>
               <!-- AI 规划场景（内嵌抽屉） -->
               <el-button type="success" @click="openScenePlanner" :disabled="!filterTaskId">
                 <el-icon><MagicStick /></el-icon>AI 规划场景
@@ -93,7 +96,7 @@
                 <el-icon><VideoCamera /></el-icon>录制用例
               </el-button>
               <el-tooltip :content="selectedCases.length === 0 ? '请先勾选用例' : `执行选中 ${selectedCases.length} 条`" placement="bottom">
-                <el-button type="danger" @click="runBatch">
+                <el-button type="primary" plain @click="runBatch">
                   <el-icon><VideoPlay /></el-icon>
                   批量执行{{ selectedCases.length > 0 ? `(${selectedCases.length})` : '' }}
                 </el-button>
@@ -123,6 +126,10 @@
                     </el-dropdown-item>
                     <el-dropdown-item @click="envVarDialogVisible = true" :disabled="!filterTaskId">
                       <el-icon><Setting /></el-icon>环境变量
+                    </el-dropdown-item>
+                    <el-dropdown-item @click="openSetupCaseDialog" :disabled="!filterTaskId">
+                      <el-icon><Connection /></el-icon>登录用例设置
+                      <el-tag v-if="currentTaskSetupCaseId" size="small" type="success" style="margin-left:6px">已配置</el-tag>
                     </el-dropdown-item>
                     <el-dropdown-item @click="exportPytest" :disabled="!filterTaskId || exportLoading">
                       <el-icon><Download /></el-icon>导出 pytest 脚本
@@ -327,38 +334,70 @@
       </el-tabs>
     </el-card>
 
-    <!-- 生成/优化进度弹窗 -->
-    <el-dialog v-model="showProgress" :title="progressTitle" width="480px" :close-on-click-modal="false" :show-close="!canCancelGen">
-      <div class="progress-body">
-        <div class="progress-steps">
-          <div class="progress-step" :class="{ active: progressPct >= 5, done: progressPct >= 15 }">
-            <span class="step-dot">1</span><span class="step-label">页面分析</span>
-          </div>
-          <div class="step-line" :class="{ active: progressPct >= 15 }"></div>
-          <div class="progress-step" :class="{ active: progressPct >= 15, done: progressPct >= 30 }">
-            <span class="step-dot">2</span><span class="step-label">模块划分</span>
-          </div>
-          <div class="step-line" :class="{ active: progressPct >= 30 }"></div>
-          <div class="progress-step" :class="{ active: progressPct >= 30, done: progressPct >= 95 }">
-            <span class="step-dot">3</span><span class="step-label">用例生成</span>
-          </div>
-          <div class="step-line" :class="{ active: progressPct >= 95 }"></div>
-          <div class="progress-step" :class="{ active: progressPct >= 95, done: progressPct >= 100 }">
-            <span class="step-dot">4</span><span class="step-label">完成</span>
-          </div>
+    <!-- 生成/优化进度浮层 -->
+    <Transition name="gen-toast">
+      <div v-if="showProgress" class="gen-toast">
+        <!-- 顶部标题栏 -->
+        <div class="gen-toast-header">
+          <span class="gen-toast-icon">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" style="vertical-align:middle">
+              <path d="M12 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z"
+                fill="currentColor" class="gen-star-fill"/>
+            </svg>
+          </span>
+          <span class="gen-toast-title">{{ progressTitle }}</span>
+          <span class="gen-toast-pct">{{ progressPct }}%</span>
         </div>
-        <div class="progress-bar-wrap">
-          <div class="progress-bar-fill" :style="{ width: progressPct + '%' }">
-            <span v-if="progressPct > 5" class="progress-bar-text">{{ progressPct }}%</span>
-          </div>
+
+        <!-- 步骤轨道 -->
+        <div class="gen-track">
+          <template v-for="(step, i) in genSteps" :key="i">
+            <div class="gen-node" :class="{
+              'is-done':   progressPct >= step.done,
+              'is-active': progressPct >= step.from && progressPct < step.done,
+            }">
+              <span class="gen-node-ring">
+                <svg v-if="progressPct >= step.done" width="10" height="10" viewBox="0 0 12 12">
+                  <polyline points="2,6 5,9 10,3" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                <span v-else-if="progressPct >= step.from" class="gen-node-pulse"/>
+                <span v-else class="gen-node-idx">{{ i + 1 }}</span>
+              </span>
+              <span class="gen-node-label">{{ step.label }}</span>
+            </div>
+            <div v-if="i < genSteps.length - 1" class="gen-rail"
+              :class="{ 'is-filled': progressPct >= step.done }"/>
+          </template>
         </div>
-        <p class="progress-stage">{{ progressStage }}</p>
-        <p v-if="genCaseCount > 0" class="progress-count">已生成 {{ genCaseCount }} 条用例</p>
+
+        <!-- 进度条 -->
+        <div class="gen-bar-bg">
+          <div class="gen-bar-fill" :style="{ width: progressPct + '%' }"/>
+        </div>
+
+        <!-- 状态文字 -->
+        <div class="gen-stage">
+          <span class="gen-stage-dot"/>
+          <span class="gen-stage-text">{{ progressStage }}</span>
+        </div>
+
+        <!-- 用例计数 -->
+        <Transition name="fade">
+          <div v-if="genCaseCount > 0" class="gen-count">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" style="flex-shrink:0">
+              <rect x="1" y="3" width="14" height="10" rx="2" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M5 7h6M5 9.5h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+            已生成 <b>{{ genCaseCount }}</b> 条用例
+          </div>
+        </Transition>
+
+        <!-- 取消按钮 -->
+        <div v-if="canCancelGen" class="gen-footer">
+          <button class="gen-cancel-btn" @click="cancelGeneration">取消生成</button>
+        </div>
       </div>
-      <template #footer>
-        <el-button v-if="canCancelGen" size="small" @click="cancelGeneration">取消</el-button>
-      </template>
-    </el-dialog>
+    </Transition>
 
     <!-- 用例修正结果弹窗 -->
     <el-dialog v-model="showFixResult" title="用例修正结果" width="680px">
@@ -394,6 +433,107 @@
       </div>
       <template #footer>
         <el-button size="small" @click="showFixResult = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 登录用例设置弹窗（方案三：storage_state）-->
+    <el-dialog v-model="showSetupCaseDialog" title="🔑 登录用例设置" width="500px" :close-on-click-modal="false">
+      <el-alert type="info" :closable="false" style="margin-bottom:18px">
+        <template #title>
+          配置后，批量执行前会自动跑一次指定的登录用例并保存浏览器登录态（cookie/token），
+          后续用例直接复用登录态，<b>无需每条用例重复登录</b>。<br>
+          快照过期后会自动重新执行登录用例刷新。
+        </template>
+      </el-alert>
+      <el-form label-width="90px" label-position="left">
+        <el-form-item label="登录用例">
+          <el-select v-model="setupCaseForm.setup_case_id" placeholder="选择一条录制的登录用例" clearable style="width:100%">
+            <el-option :value="null" label="不使用登录用例（每条用例独立执行）" />
+            <el-option
+              v-for="c in currentTaskCases"
+              :key="c.id"
+              :label="`[${c.id}] ${c.name}`"
+              :value="c.id"
+            >
+              <span>{{ c.name }}</span>
+              <el-tag size="small" :type="c.source === 'recorded' ? 'success' : 'warning'"
+                style="margin-left:8px">{{ c.source === 'recorded' ? '录制' : c.source === 'ai_generated' ? 'AI' : '手动' }}</el-tag>
+            </el-option>
+          </el-select>
+          <div style="font-size:12px;color:#909399;margin-top:4px">建议选择「录制」来源的登录用例，稳定性更高</div>
+        </el-form-item>
+        <el-form-item label="快照有效期">
+          <el-input-number v-model="setupCaseForm.storage_ttl_minutes"
+            :min="0" :max="1440" :step="30" controls-position="right" style="width:140px"/>
+          <span style="margin-left:8px;font-size:13px;color:#606266">分钟（0 = 每次执行都重新登录）</span>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showSetupCaseDialog = false">取消</el-button>
+        <el-button type="primary" @click="saveSetupCase" :loading="savingSetupCase">保存设置</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- AI 生成用例配置弹窗 -->
+    <el-dialog v-model="showGenDialog" title="🤖 AI 生成用例" width="540px" :close-on-click-modal="false">
+      <el-form :model="genForm" label-width="90px" label-position="left">
+
+        <el-form-item label="测试重点">
+          <el-input
+            v-model="genForm.user_prompt"
+            type="textarea"
+            :rows="4"
+            placeholder="可选。用自然语言描述你的测试重点、特殊要求或背景，AI 会按此生成更贴合的用例。
+
+示例：重点测试登录校验逻辑，包括密码错误次数限制；忽略注册流程。"
+          />
+        </el-form-item>
+
+        <el-form-item>
+          <template #label>
+            <span>指定模块</span>
+            <el-tooltip content="只生成指定模块的用例，多个模块用逗号或换行分隔。不填则生成全部模块。" placement="top">
+              <el-icon style="margin-left:4px;color:#909399;cursor:help"><QuestionFilled /></el-icon>
+            </el-tooltip>
+          </template>
+          <el-input
+            v-model="genForm.focus_modules"
+            type="textarea"
+            :rows="2"
+            placeholder="可选，示例：登录模块, 搜索模块"
+          />
+        </el-form-item>
+
+        <el-form-item>
+          <template #label>
+            <span>用例数量</span>
+            <el-tooltip content="期望生成的用例总数，AI 会按模块均匀分配。留空则由 AI 自动决定（通常 8-12 条/模块）。" placement="top">
+              <el-icon style="margin-left:4px;color:#909399;cursor:help"><QuestionFilled /></el-icon>
+            </el-tooltip>
+          </template>
+          <el-input-number
+            v-model="genForm.target_count"
+            :min="0"
+            :max="200"
+            :step="5"
+            placeholder="留空由 AI 决定"
+            style="width:160px"
+            controls-position="right"
+          />
+          <span style="margin-left:8px;color:#909399;font-size:12px">条（0 = 不限制）</span>
+        </el-form-item>
+
+        <el-form-item label="重新抓取">
+          <el-switch v-model="reparseBeforeGen" />
+          <span style="margin-left:8px;color:#909399;font-size:12px">重新抓取页面元素（页面已更新时开启）</span>
+        </el-form-item>
+      </el-form>
+
+      <template #footer>
+        <el-button @click="showGenDialog = false">取消</el-button>
+        <el-button type="warning" @click="confirmGenDialog">
+          <el-icon><MagicStick /></el-icon>开始生成
+        </el-button>
       </template>
     </el-dialog>
 
@@ -642,6 +782,116 @@
 
         </el-tab-pane>
 
+        <!-- Tab 3：前置步骤（方案一）-->
+        <el-tab-pane name="setup-steps" :disabled="!editingCase">
+          <template #label>
+            <el-tooltip :content="editingCase ? '' : '新建用例保存后才能编辑前置步骤'" placement="top">
+              <span>
+                前置步骤
+                <el-tag v-if="editingCase && setupStepsJson.length" size="small" type="warning"
+                  style="margin-left:4px">{{ setupStepsJson.length }}步</el-tag>
+              </span>
+            </el-tooltip>
+          </template>
+
+          <div style="padding:12px 0 4px">
+            <el-alert type="info" :closable="false" style="margin-bottom:14px">
+              <template #title>
+                <b>前置步骤</b>在主步骤之前执行，与主步骤共用同一个浏览器页面。<br>
+                适合：导航到特定页面、展开弹窗等操作。登录态请在<b>任务设置 → 登录用例</b>中配置。
+              </template>
+            </el-alert>
+
+            <div class="steps-editor-wrap" style="max-height:300px;overflow-y:auto">
+              <div v-if="!setupStepsJson.length"
+                style="padding:24px;text-align:center;color:#c0c4cc;font-size:13px">
+                暂无前置步骤
+              </div>
+              <div v-for="(step, idx) in setupStepsJson" :key="step.id || idx" class="step-row">
+                <span class="step-idx">{{ idx + 1 }}</span>
+
+                <!-- Action 下拉（同主步骤编辑器） -->
+                <el-select v-model="step.action" size="small" style="width:136px;flex-shrink:0"
+                  @change="onSetupActionChange(step)">
+                  <el-option-group label="交互">
+                    <el-option label="navigate — 跳转页面" value="navigate" />
+                    <el-option label="click — 点击" value="click" />
+                    <el-option label="fill — 填写输入框" value="fill" />
+                    <el-option label="type — 逐字输入" value="type" />
+                    <el-option label="select — 下拉选择" value="select" />
+                    <el-option label="check — 勾选" value="check" />
+                    <el-option label="uncheck — 取消勾选" value="uncheck" />
+                    <el-option label="hover — 悬停" value="hover" />
+                    <el-option label="dblclick — 双击" value="dblclick" />
+                    <el-option label="press — 按键" value="press" />
+                    <el-option label="scroll — 滚动" value="scroll" />
+                    <el-option label="submit — 提交表单" value="submit" />
+                    <el-option label="wait — 固定等待(ms)" value="wait" />
+                  </el-option-group>
+                  <el-option-group label="断言">
+                    <el-option label="assert_text — 断言文本" value="assert_text" />
+                    <el-option label="assert_visible — 断言可见" value="assert_visible" />
+                    <el-option label="assert_hidden — 断言隐藏" value="assert_hidden" />
+                    <el-option label="assert_url — 断言URL" value="assert_url" />
+                  </el-option-group>
+                  <el-option-group label="其他">
+                    <el-option label="wait_for — 等待元素" value="wait_for" />
+                    <el-option label="screenshot — 截图" value="screenshot" />
+                    <el-option label="evaluate — 执行JS" value="evaluate" />
+                  </el-option-group>
+                </el-select>
+
+                <!-- navigate → url 字段；有 selector 的 action → selector；其他 → 占位 -->
+                <template v-if="step.action === 'navigate'">
+                  <el-input v-model="step.url" size="small" placeholder="https://..." style="flex:1;min-width:0"/>
+                </template>
+                <template v-else-if="needsSelector(step.action)">
+                  <el-input v-model="step.selector" size="small" placeholder="selector" style="flex:1;min-width:0"/>
+                </template>
+                <template v-else>
+                  <span style="flex:1"/>
+                </template>
+
+                <!-- Value / Expected -->
+                <el-input
+                  v-if="needsValue(step.action)"
+                  v-model="step.value" size="small"
+                  :placeholder="valuePlaceholder(step.action)"
+                  style="width:110px;flex-shrink:0"/>
+                <el-input
+                  v-else-if="needsExpected(step.action)"
+                  v-model="step.expected" size="small"
+                  :placeholder="step.action === 'assert_url' ? 'URL 关键词' : '期望文本'"
+                  style="width:110px;flex-shrink:0"/>
+                <span v-else style="width:110px;flex-shrink:0"/>
+
+                <!-- 说明 -->
+                <el-input v-model="step.description" size="small" placeholder="说明（可选）"
+                  style="width:110px;flex-shrink:0"/>
+
+                <el-button link type="danger" size="small" @click="setupStepsJson.splice(idx,1)">
+                  <el-icon><Delete /></el-icon>
+                </el-button>
+              </div>
+            </div>
+
+            <div class="add-step-btn" @click="addSetupStep" style="margin-top:10px">
+              <el-icon><Plus /></el-icon><span>添加前置步骤</span>
+            </div>
+
+            <el-divider style="margin:14px 0 10px"/>
+            <div style="display:flex;align-items:center;gap:10px">
+              <el-switch v-model="caseUseStorage" />
+              <span style="font-size:13px;color:#606266">
+                执行时加载任务级登录态快照
+              </span>
+              <el-tooltip content="关闭后以全新浏览器状态运行，适合「登录用例」本身" placement="top">
+                <el-icon style="color:#909399;cursor:help"><QuestionFilled /></el-icon>
+              </el-tooltip>
+            </div>
+          </div>
+        </el-tab-pane>
+
       </el-tabs>
 
       <template #footer>
@@ -649,6 +899,10 @@
         <el-button v-if="caseEditTab === 'steps-editor' && editingCase"
           type="success" @click="saveSteps" :loading="saving">
           保存步骤
+        </el-button>
+        <el-button v-else-if="caseEditTab === 'setup-steps' && editingCase"
+          type="warning" @click="saveSetupSteps" :loading="saving">
+          保存前置步骤
         </el-button>
         <el-button v-else type="primary" @click="saveCase" :loading="saving">保存</el-button>
       </template>
@@ -1037,7 +1291,7 @@ import { caseApi, elementAliasApi, recordingApi, pytestExportApi, envVarApi } fr
 import {
   Plus, MagicStick, VideoPlay, VideoCamera, Edit, Delete, Refresh,
   Hide, View, Search, ArrowDown, InfoFilled, RefreshLeft, SuccessFilled,
-  WarningFilled, Loading, Select, CollectionTag, Download, Setting, Connection, Close, ArrowUp, DocumentChecked,
+  WarningFilled, Loading, Select, CollectionTag, Download, Setting, Connection, Close, ArrowUp, DocumentChecked, QuestionFilled,
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
@@ -1080,6 +1334,28 @@ const progressPct = ref(0)
 const progressStage = ref('')
 const genCaseCount = ref(0)
 const canCancelGen = ref(false)
+
+// 步骤轨道：根据任务类型动态切换
+const genSteps = computed(() => {
+  const t = progressTitle.value
+  if (t.includes('优化')) return [
+    { label: '分析覆盖', from: 3,  done: 40 },
+    { label: '补全用例', from: 40, done: 90 },
+    { label: '完成',     from: 90, done: 100 },
+  ]
+  if (t.includes('修正') || t.includes('修复')) return [
+    { label: '分析失败', from: 3,  done: 30 },
+    { label: 'AI 修正',  from: 30, done: 90 },
+    { label: '完成',     from: 90, done: 100 },
+  ]
+  // 默认：生成用例
+  return [
+    { label: '页面分析', from: 3,  done: 15 },
+    { label: '模块划分', from: 15, done: 30 },
+    { label: '用例生成', from: 30, done: 95 },
+    { label: '完成',     from: 95, done: 100 },
+  ]
+})
 let _genAbortCtrl = null
 
 // ── 用例修正 & 补全 ──
@@ -1092,6 +1368,23 @@ const { lastExecutionFailed, lastExecutionResults, lastExecutionSummary, failedC
 
 // ── 生成选项 ──
 const reparseBeforeGen = ref(false)
+
+// ── AI 生成用例弹窗 ──
+const showGenDialog    = ref(false)
+const genForm = ref({
+  user_prompt:    '',
+  focus_modules:  '',
+  target_count:   0,
+})
+const openGenDialog = () => {
+  if (!filterTaskId.value) { ElMessage.warning('请先选择任务'); return }
+  genForm.value = { user_prompt: '', focus_modules: '', target_count: 0 }
+  showGenDialog.value = true
+}
+const confirmGenDialog = () => {
+  showGenDialog.value = false
+  generateCases()
+}
 
 // ── 录制 ──────────────────────────────────────────────────────────────────────
 const isRecording       = ref(false)
@@ -1478,15 +1771,11 @@ function getWsClientId() {
 const onTaskSelect = async () => {
   selectedCases.value = []
   filterModule.value = null
-  aliasList.value = []   // 切换任务时清空别名缓存
+  aliasList.value = []
   filterFailedIds.value = new Set()
   if (filterTaskId.value) {
     await taskStore.fetchCases(filterTaskId.value)
-    fetchLatestFailedCases()   // 切换任务时同步刷新执行状态
-  } else {
-    // 全部任务：获取所有
-    taskStore.setCases([])
-    if (wsStore.currentId) await taskStore.fetchTasks(wsStore.currentId)
+    fetchLatestFailedCases()
   }
 }
 
@@ -1522,10 +1811,20 @@ const generateCases = async () => {
   _genAbortCtrl = new AbortController()
   const wsClientId = getWsClientId()
   connectWs(wsClientId)
+
+  // 解析弹窗参数
+  const focusMods = genForm.value.focus_modules
+    ? genForm.value.focus_modules.split(/[，,、\n]+/).map(s => s.trim()).filter(Boolean)
+    : []
+  const tCount = genForm.value.target_count || 0
+
   try {
     await caseApi.generate(filterTaskId.value, {
-      reparse_page: reparseBeforeGen.value,
-      ws_client_id: wsClientId,
+      reparse_page:  reparseBeforeGen.value,
+      ws_client_id:  wsClientId,
+      user_prompt:   genForm.value.user_prompt.trim(),
+      focus_modules: focusMods,
+      target_count:  tCount,
     }, { signal: _genAbortCtrl.signal, timeout: 600000 })
     await taskStore.fetchCases(filterTaskId.value)
     taskStore.fetchTotalCaseCount(wsStore.currentId)
@@ -1854,6 +2153,72 @@ const caseEditTab = ref('info')
 const stepsJson   = ref([])
 const stepsLoading = ref(false)
 
+// ── 前置步骤（方案一） ────────────────────────────────────────────────────────
+const setupStepsJson = ref([])
+const caseUseStorage = ref(true)
+
+const addSetupStep = () => {
+  setupStepsJson.value.push({
+    id: `ss${Date.now()}`, action: 'navigate', url: '', selector: '', value: '', expected: '', description: ''
+  })
+}
+
+const saveSetupSteps = async () => {
+  if (!editingCase.value) return
+  saving.value = true
+  try {
+    await taskStore.updateCase(editingCase.value.id, {
+      setup_steps: setupStepsJson.value,
+      use_storage: caseUseStorage.value,
+    })
+    ElMessage.success('前置步骤已保存')
+  } catch (e) {
+    ElMessage.error('保存失败: ' + (e?.response?.data?.detail || e.message))
+  } finally {
+    saving.value = false
+  }
+}
+
+// ── 登录用例设置（方案三：storage_state）────────────────────────────────────
+const showSetupCaseDialog = ref(false)
+const savingSetupCase = ref(false)
+const setupCaseForm = ref({ setup_case_id: null, storage_ttl_minutes: 60 })
+
+const currentTaskSetupCaseId = computed(() => {
+  const task = taskStore.tasks.find(t => t.id === filterTaskId.value)
+  return task?.setup_case_id ?? null
+})
+
+const currentTaskCases = computed(() =>
+  taskStore.cases.filter(c => c.task_id === filterTaskId.value)
+)
+
+const openSetupCaseDialog = () => {
+  const task = taskStore.tasks.find(t => t.id === filterTaskId.value)
+  setupCaseForm.value = {
+    setup_case_id: task?.setup_case_id ?? null,
+    storage_ttl_minutes: task?.storage_ttl_minutes ?? 60,
+  }
+  showSetupCaseDialog.value = true
+}
+
+const saveSetupCase = async () => {
+  if (!filterTaskId.value) return
+  savingSetupCase.value = true
+  try {
+    await taskStore.updateTask(filterTaskId.value, {
+      setup_case_id: setupCaseForm.value.setup_case_id || null,
+      storage_ttl_minutes: setupCaseForm.value.storage_ttl_minutes,
+    })
+    showSetupCaseDialog.value = false
+    ElMessage.success('登录用例设置已保存')
+  } catch (e) {
+    ElMessage.error('保存失败: ' + (e?.response?.data?.detail || e.message))
+  } finally {
+    savingSetupCase.value = false
+  }
+}
+
 // action 分类
 const interactActions = ['navigate','click','dblclick','rightclick','fill','type',
   'select','check','uncheck','hover','press','scroll','upload','submit','keydown','wait']
@@ -2008,6 +2373,14 @@ const onActionChange = (step) => {
   step.robustness = selectorGrade(step.selector)
 }
 
+// 前置步骤 action 切换（同上，但不需要 robustness 评级）
+const onSetupActionChange = (step) => {
+  if (!needsSelector(step.action))  step.selector = ''
+  if (!needsValue(step.action))     step.value    = ''
+  if (!needsExpected(step.action))  step.expected = ''
+  if (step.action === 'navigate')   { step.selector = ''; step.value = '' }
+}
+
 // 步骤操作
 const addStep = () => {
   const newStep = {
@@ -2052,6 +2425,9 @@ const editCase = (row) => {
   })
   caseEditTab.value = 'info'
   stepsJson.value = []
+  // 加载前置步骤和 use_storage
+  setupStepsJson.value = (row.setup_steps || []).map(s => ({ ...s }))
+  caseUseStorage.value = row.use_storage !== false
   showCreateDialog.value = true
 }
 
@@ -2064,9 +2440,14 @@ onMounted(async () => {
   if (route.query.taskId) {
     filterTaskId.value = parseInt(route.query.taskId)
     caseForm.task_id = filterTaskId.value
+  } else if (!filterTaskId.value && taskStore.tasks.length > 0) {
+    // 没有指定任务时，默认选第一个任务
+    filterTaskId.value = taskStore.tasks[0].id
+    caseForm.task_id = filterTaskId.value
   }
   if (filterTaskId.value) {
     await taskStore.fetchCases(filterTaskId.value)
+    fetchLatestFailedCases()
   } else {
     taskStore.setCases([])
   }
@@ -2090,6 +2471,13 @@ watch(() => wsStore.currentId, async (id) => {
   if (_genAbortCtrl) { _genAbortCtrl.abort(); _genAbortCtrl = null }
   showProgress.value = false
   await taskStore.fetchTasks(id)
+  // 切换工作空间后默认选第一个任务
+  if (taskStore.tasks.length > 0) {
+    filterTaskId.value = taskStore.tasks[0].id
+    caseForm.task_id = filterTaskId.value
+    await taskStore.fetchCases(filterTaskId.value)
+    fetchLatestFailedCases()
+  }
 })
 watch(() => wsStore.initialized, async (ready) => {
   if (ready) await taskStore.fetchTasks(wsStore.currentId)
@@ -2127,36 +2515,231 @@ watch(() => wsStore.initialized, async (ready) => {
 .action-sep { display: inline-block; width: 1px; height: 12px; background: #dcdfe6; margin: 0 4px; flex-shrink: 0; }
 
 /* progress */
-.progress-body { padding: 4px 0 8px; }
-.progress-stage { margin: 10px 0 0; text-align: center; color: #606266; font-size: 13px; }
-.progress-count { margin: 4px 0 0; text-align: center; color: #409eff; font-size: 12px; font-weight: 500; }
-.progress-steps { display: flex; align-items: center; justify-content: center; margin-bottom: 16px; }
-.progress-step { display: flex; flex-direction: column; align-items: center; gap: 6px; opacity: 0.35; transition: opacity 0.4s; }
-.progress-step.active { opacity: 0.7; }
-.progress-step.done { opacity: 1; }
-.step-dot {
-  width: 30px; height: 30px; border-radius: 50%; background: #e4e7ed; color: #909399;
-  font-size: 13px; font-weight: 700; display: flex; align-items: center; justify-content: center; transition: all 0.4s;
+/* ── AI 生成进度浮层 ─────────────────────────────────────────── */
+.gen-toast {
+  position: fixed;
+  right: 28px;
+  bottom: 32px;
+  z-index: 3000;
+  width: 320px;
+  background: #fff;
+  border-radius: 14px;
+  box-shadow: 0 8px 32px rgba(0,0,0,.14), 0 2px 8px rgba(0,0,0,.08);
+  padding: 16px 18px 14px;
+  border: 1px solid rgba(64,158,255,.15);
+  overflow: hidden;
 }
-.progress-step.active .step-dot { background: #409eff; color: #fff; box-shadow: 0 0 0 3px rgba(64,158,255,.25); }
-.progress-step.done .step-dot { background: #67c23a; color: #fff; }
-.step-label { font-size: 11px; color: #606266; white-space: nowrap; }
-.step-line { flex: 1; height: 2px; background: #e4e7ed; min-width: 24px; max-width: 50px; transition: background 0.4s; }
-.step-line.active { background: #409eff; }
-.progress-bar-wrap {
-  width: 100%; height: 22px; background: #f0f2f5; border-radius: 11px; overflow: hidden;
-  box-shadow: inset 0 1px 3px rgba(0,0,0,.08);
-}
-.progress-bar-fill {
-  height: 100%; border-radius: 11px;
-  background: linear-gradient(90deg, #409eff 0%, #66b1ff 50%, #a0cfff 100%);
+/* 顶部渐变装饰条 */
+.gen-toast::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, #409eff 0%, #a855f7 50%, #f59e0b 100%);
   background-size: 200% 100%;
-  animation: progressShine 1.8s ease-in-out infinite;
-  display: flex; align-items: center; justify-content: flex-end;
-  min-width: 0; transition: width 0.5s ease;
+  animation: genRainbow 2.4s linear infinite;
 }
-.progress-bar-text { color: #fff; font-size: 12px; font-weight: 600; padding-right: 10px; text-shadow: 0 1px 2px rgba(0,0,0,.2); }
-@keyframes progressShine { 0% { background-position: 200% 0; } 100% { background-position: 0 0; } }
+@keyframes genRainbow {
+  0%   { background-position: 0 0 }
+  100% { background-position: 200% 0 }
+}
+
+/* 标题栏 */
+.gen-toast-header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 14px;
+}
+.gen-toast-icon {
+  color: #f59e0b;
+  display: flex;
+  align-items: center;
+  animation: genStar 1.4s ease-in-out infinite alternate;
+}
+@keyframes genStar {
+  from { opacity: .7; transform: scale(.9) rotate(-8deg); }
+  to   { opacity: 1;  transform: scale(1.1) rotate(8deg); }
+}
+.gen-star-fill { animation: none; }
+.gen-toast-title {
+  flex: 1;
+  font-size: 14px;
+  font-weight: 600;
+  color: #1a1a2e;
+  letter-spacing: .01em;
+}
+.gen-toast-pct {
+  font-size: 20px;
+  font-weight: 700;
+  color: #409eff;
+  letter-spacing: -.5px;
+  line-height: 1;
+}
+
+/* 步骤轨道 */
+.gen-track {
+  display: flex;
+  align-items: flex-start;
+  gap: 0;
+  margin-bottom: 14px;
+}
+.gen-node {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+.gen-node-ring {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 2px solid #dde1e7;
+  background: #f5f7fa;
+  color: #c0c4cc;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  transition: all .35s ease;
+  position: relative;
+}
+.gen-node.is-active .gen-node-ring {
+  border-color: #409eff;
+  background: #ecf5ff;
+  color: #409eff;
+  box-shadow: 0 0 0 4px rgba(64,158,255,.15);
+}
+.gen-node.is-done .gen-node-ring {
+  border-color: #67c23a;
+  background: #67c23a;
+  color: #fff;
+  box-shadow: none;
+}
+.gen-node-pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #409eff;
+  animation: genPulse 1s ease-in-out infinite;
+}
+@keyframes genPulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50%       { transform: scale(1.5); opacity: .6; }
+}
+.gen-node-idx { font-size: 11px; font-weight: 700; color: #c0c4cc; }
+.gen-node-label {
+  font-size: 10px;
+  color: #909399;
+  white-space: nowrap;
+  transition: color .3s;
+}
+.gen-node.is-active .gen-node-label { color: #409eff; font-weight: 600; }
+.gen-node.is-done  .gen-node-label { color: #67c23a; font-weight: 600; }
+
+.gen-rail {
+  flex: 1;
+  height: 2px;
+  background: #ebeef5;
+  margin: 12px 4px 0;  /* margin-top=12px 使连接线垂直居中于圆圈 */
+  border-radius: 1px;
+  position: relative;
+  overflow: hidden;
+  transition: background .3s;
+}
+.gen-rail.is-filled { background: #67c23a; }
+.gen-rail:not(.is-filled)::after {
+  content: '';
+  position: absolute;
+  top: 0; left: -100%; width: 100%; height: 100%;
+  background: linear-gradient(90deg, transparent 0%, #409eff 50%, transparent 100%);
+  animation: genSweep 1.8s ease-in-out infinite;
+}
+@keyframes genSweep {
+  0%   { left: -100% }
+  100% { left:  100% }
+}
+
+/* 进度条 */
+.gen-bar-bg {
+  width: 100%;
+  height: 6px;
+  background: #f0f2f5;
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+.gen-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #409eff 0%, #a855f7 60%, #f59e0b 100%);
+  background-size: 200% 100%;
+  animation: genRainbow 1.8s linear infinite;
+  transition: width .6s cubic-bezier(.4,0,.2,1);
+  min-width: 4px;
+}
+
+/* 状态文字 */
+.gen-stage {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.gen-stage-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #409eff;
+  flex-shrink: 0;
+  animation: genPulse 1.2s ease-in-out infinite;
+}
+.gen-stage-text {
+  font-size: 12px;
+  color: #606266;
+  line-height: 1.4;
+  flex: 1;
+}
+
+/* 用例计数 */
+.gen-count {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: #409eff;
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+.gen-count b { font-weight: 700; }
+
+/* 取消按钮 */
+.gen-footer { margin-top: 10px; display: flex; justify-content: flex-end; }
+.gen-cancel-btn {
+  font-size: 12px;
+  color: #909399;
+  background: none;
+  border: 1px solid #dde1e7;
+  border-radius: 6px;
+  padding: 4px 12px;
+  cursor: pointer;
+  transition: all .2s;
+}
+.gen-cancel-btn:hover { color: #f56c6c; border-color: #f56c6c; background: #fef0f0; }
+
+/* 浮层进出动画 */
+.gen-toast-enter-active { animation: genSlideIn .3s cubic-bezier(.34,1.56,.64,1); }
+.gen-toast-leave-active { animation: genSlideIn .2s ease-in reverse; }
+@keyframes genSlideIn {
+  from { opacity: 0; transform: translateY(20px) scale(.95); }
+  to   { opacity: 1; transform: translateY(0)   scale(1); }
+}
+
+/* 通用 fade */
+.fade-enter-active, .fade-leave-active { transition: opacity .3s; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
 
 /* coverage */
 .coverage-panel { padding: 0 4px; }

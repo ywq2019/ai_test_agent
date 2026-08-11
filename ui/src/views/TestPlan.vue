@@ -225,7 +225,7 @@
               </div>
 
               <!-- 无 Token 状态 -->
-              <div v-if="!activePlan.webhook_token">
+              <div v-if="!hasWebhookToken">
                 <el-button type="primary" :loading="webhookLoading" @click="generateWebhookToken">
                   生成 Webhook Token
                 </el-button>
@@ -679,6 +679,8 @@ const saveCronConfig = async () => {
     ElMessage.error('保存失败：' + (e?.response?.data?.detail || e?.message))
   }
 }
+
+const hasWebhookToken = computed(() => !!(activePlan.value && activePlan.value.webhook_token))
 
 const webhookTriggerUrl = computed(() => {
   if (!activePlan.value?.webhook_token) return ''

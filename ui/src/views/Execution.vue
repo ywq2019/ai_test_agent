@@ -2,206 +2,272 @@
   <div class="execution-page">
     <WorkspaceRequired v-if="auth.role !== 'admin' && !wsStore.currentId" />
     <template v-else>
-    <el-card shadow="hover">
-      <template #header>
-        <div class="card-header">
-          <span class="page-title">测试执行</span>
-          <div class="header-controls">
-            <el-tooltip :content="wsConnected ? 'WebSocket 已连接' : 'WebSocket 未连接'">
-              <span class="ws-dot" :class="wsConnected ? 'ws-on' : 'ws-off'"></span>
-            </el-tooltip>
-            <el-select v-model="selectedTaskId" placeholder="选择任务" style="width: 180px;" @change="onTaskChange" size="default">
-              <el-option v-for="task in taskStore.tasks" :key="task.id" :label="task.name" :value="task.id" />
-            </el-select>
-            <el-select v-model="selectedBrowser" style="width: 110px;" size="default">
-              <el-option label="Chromium" value="chromium" />
-              <el-option label="Firefox" value="firefox" />
-              <el-option label="WebKit" value="webkit" />
-            </el-select>
-            <el-dropdown trigger="click">
-              <el-button size="default" :disabled="!selectedTaskId">
-                <el-icon><MoreFilled /></el-icon>
-              </el-button>
-              <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item @click="; multiBrowserMode = true">
-                    <el-icon><Connection /></el-icon>多浏览器并行执行
-                  </el-dropdown-item>
-                </el-dropdown-menu>
-              </template>
-            </el-dropdown>
-            <el-button type="primary" size="default" @click="executeAll" :loading="taskStore.isExecuting" :disabled="!selectedTaskId">
-              <el-icon><VideoPlay /></el-icon>
-              执行全部
-            </el-button>
-          </div>
-        </div>
-      </template>
 
-      <!-- 多浏览器选项 -->
-      <el-alert v-if="multiBrowserMode" type="info" :closable="true" @close="multiBrowserMode = false" style="margin-bottom: 14px;">
-        <template #title>多浏览器并行模式</template>
+      <!-- ── 页头 ── -->
+      <div class="ex-header">
+        <div class="ex-header-left">
+          <span class="ex-page-title">测试执行</span>
+          <el-tooltip :content="wsConnected ? 'WebSocket 已连接' : 'WebSocket 未连接'">
+            <span class="ws-pill" :class="wsConnected ? 'ws-on' : 'ws-off'">
+              <span class="ws-dot-inner"></span>
+              {{ wsConnected ? '已连接' : '未连接' }}
+            </span>
+          </el-tooltip>
+        </div>
+        <div class="ex-header-right">
+          <el-select v-model="selectedTaskId" placeholder="选择任务" style="width:190px" @change="onTaskChange">
+            <el-option v-for="task in taskStore.tasks" :key="task.id" :label="task.name" :value="task.id" />
+          </el-select>
+          <el-select v-model="selectedBrowser" style="width:116px">
+            <el-option label="Chromium" value="chromium" />
+            <el-option label="Firefox"  value="firefox"  />
+            <el-option label="WebKit"   value="webkit"   />
+          </el-select>
+          <el-dropdown trigger="click">
+            <el-button :disabled="!selectedTaskId" circle>
+              <el-icon><MoreFilled /></el-icon>
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item @click="multiBrowserMode = true">
+                  <el-icon><Connection /></el-icon>多浏览器并行执行
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+          <el-button type="primary" @click="executeAll"
+            :loading="taskStore.isExecuting" :disabled="!selectedTaskId" class="btn-run">
+            <el-icon><VideoPlay /></el-icon>执行全部
+          </el-button>
+        </div>
+      </div>
+
+      <!-- 多浏览器选项条 -->
+      <div v-if="multiBrowserMode" class="multi-bar">
+        <el-icon style="color:var(--c-accent)"><Connection /></el-icon>
+        <span class="multi-bar-label">多浏览器并行：</span>
         <el-checkbox-group v-model="selectedBrowsers" size="small">
           <el-checkbox-button value="chromium">Chromium</el-checkbox-button>
           <el-checkbox-button value="firefox">Firefox</el-checkbox-button>
           <el-checkbox-button value="webkit">WebKit</el-checkbox-button>
         </el-checkbox-group>
-      </el-alert>
+        <el-button link @click="multiBrowserMode = false" style="margin-left:auto;color:var(--c-muted)">关闭</el-button>
+      </div>
 
-      <!-- Tabs: 实时执行 / 执行历史 -->
-      <el-tabs v-model="activeTab" type="border-card" @tab-change="onTabChange">
-        <el-tab-pane label="实时执行" name="live">
-          <!-- 进度面板 -->
-          <div v-if="taskStore.isExecuting || liveResults.length > 0" class="progress-panel">
-            <div class="progress-header">
-              <div class="progress-status-row">
-                <span class="status-dot" :class="taskStore.isExecuting ? 'running' : (failedCount > 0 ? 'failed' : 'done')"></span>
-                <span class="status-label">
-                  {{ taskStore.isExecuting ? '执行中' : (failedCount > 0 ? '执行完成（含失败）' : '执行完成') }}
+      <!-- ── Tab 主体 ── -->
+      <div class="ex-body">
+        <!-- Tab 导航 -->
+        <div class="ex-tabs-nav">
+          <button class="ex-tab-btn" :class="{ active: activeTab === 'live' }"    @click="activeTab = 'live'">
+            <span class="tab-dot" :class="taskStore.isExecuting ? 'dot-run' : 'dot-idle'"></span>
+            实时执行
+          </button>
+          <button class="ex-tab-btn" :class="{ active: activeTab === 'history' }" @click="activeTab = 'history'; onTabChange('history')">
+            执行历史
+          </button>
+        </div>
+
+        <!-- ── 实时执行 ── -->
+        <div v-show="activeTab === 'live'" class="ex-tab-pane">
+
+          <!-- 进度卡 -->
+          <div v-if="taskStore.isExecuting || liveResults.length > 0" class="live-card">
+
+            <!-- 顶行：状态 + 计时 + 控制 -->
+            <div class="live-top">
+              <div class="live-status-group">
+                <span class="live-status-dot"
+                  :class="taskStore.isExecuting ? 'run' : failedCount > 0 ? 'fail' : 'pass'"></span>
+                <span class="live-status-label">
+                  {{ taskStore.isExecuting ? '执行中' : failedCount > 0 ? '完成（含失败）' : '全部通过' }}
                 </span>
-                <span class="case-progress-text">{{ liveResults.length }} / {{ liveTotal }} 用例</span>
+                <span class="live-progress-chip">{{ liveResults.length }} / {{ liveTotal }}</span>
               </div>
-              <div class="progress-right">
-                <span v-if="elapsedTime !== null" class="elapsed-time">
+              <div class="live-right">
+                <span v-if="elapsedTime !== null" class="live-elapsed">
                   <el-icon><Timer /></el-icon>{{ elapsedTime }}s
                 </span>
-                <div class="progress-controls" v-if="taskStore.isExecuting">
-                  <el-button size="small" @click="pauseExecution">暂停</el-button>
-                  <el-button size="small" type="primary" @click="resumeExecution">继续</el-button>
-                  <el-button size="small" type="danger" @click="stopExecution">停止</el-button>
-                </div>
+                <template v-if="taskStore.isExecuting">
+                  <el-button size="small" plain @click="pauseExecution">暂停</el-button>
+                  <el-button size="small" plain @click="resumeExecution">继续</el-button>
+                  <el-button size="small" type="danger" plain @click="stopExecution">停止</el-button>
+                </template>
               </div>
             </div>
 
-            <el-progress
-              :percentage="progressPercentage"
-              :status="progressStatus"
-              :stroke-width="16"
-              :striped="taskStore.isExecuting"
-              :striped-flow="taskStore.isExecuting"
-              style="margin: 10px 0 4px;"
-            />
-
-            <!-- 用例 + 步骤实时状态 -->
-            <div v-if="taskStore.isExecuting" class="live-status-bar">
-              <div class="live-case-row">
-                <el-icon class="spin-icon"><Loading /></el-icon>
-                <span class="live-case-name">{{ currentCaseName || '准备中...' }}</span>
-                <span v-if="currentStepTotal > 0" class="live-step-badge">
-                  步骤 {{ currentStepIdx }}/{{ currentStepTotal }}
-                </span>
-              </div>
-              <div v-if="currentStepDesc" class="live-step-row">
-                <span class="live-step-dot"></span>
-                <span class="live-step-desc">{{ currentStepDesc }}</span>
-              </div>
+            <!-- 进度条 -->
+            <div class="live-bar-bg">
+              <div class="live-bar-fill"
+                :class="progressPercentage >= 100 ? (failedCount > 0 ? 'bar-fail' : 'bar-pass') : 'bar-run'"
+                :style="{ width: progressPercentage + '%' }"></div>
             </div>
 
-            <div class="progress-mini-stats">
-              <div class="mini-stat total-stat"><span class="mini-val">{{ liveTotal }}</span><span class="mini-lbl">总计</span></div>
-              <div class="mini-stat passed-stat"><span class="mini-val">{{ passedCount }}</span><span class="mini-lbl">通过</span></div>
-              <div class="mini-stat failed-stat"><span class="mini-val">{{ failedCount }}</span><span class="mini-lbl">失败</span></div>
-              <div class="mini-stat rate-stat"><span class="mini-val">{{ passRate }}%</span><span class="mini-lbl">通过率</span></div>
+            <!-- 当前步骤 -->
+            <div v-if="taskStore.isExecuting" class="live-step-ticker">
+              <span class="ticker-spin">
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                  <circle cx="7" cy="7" r="6" stroke="currentColor" stroke-width="1.5" stroke-dasharray="20 18" />
+                </svg>
+              </span>
+              <span class="ticker-case">{{ currentCaseName || '准备中…' }}</span>
+              <span v-if="currentStepTotal > 0" class="ticker-badge">{{ currentStepIdx }}/{{ currentStepTotal }}</span>
+              <span v-if="currentStepDesc" class="ticker-step">— {{ currentStepDesc }}</span>
+            </div>
+
+            <!-- 四格统计 -->
+            <div class="live-metrics">
+              <div class="metric-cell metric-total">
+                <span class="metric-val">{{ liveTotal }}</span>
+                <span class="metric-lbl">总计</span>
+              </div>
+              <div class="metric-cell metric-pass">
+                <span class="metric-val">{{ passedCount }}</span>
+                <span class="metric-lbl">通过</span>
+              </div>
+              <div class="metric-cell metric-fail">
+                <span class="metric-val">{{ failedCount }}</span>
+                <span class="metric-lbl">失败</span>
+              </div>
+              <div class="metric-cell metric-rate">
+                <span class="metric-val">{{ passRate }}<span class="metric-unit">%</span></span>
+                <span class="metric-lbl">通过率</span>
+              </div>
             </div>
           </div>
 
-          <!-- 空状态提示 -->
-          <el-empty v-if="!taskStore.isExecuting && liveResults.length === 0" description="选择任务后点击「执行全部」开始测试">
-            <template #extra>
-              <div style="color: #909399; font-size: 13px;">
-                执行结果将实时显示在此处，也可切换到「执行历史」查看过往报告
-              </div>
-            </template>
-          </el-empty>
+          <!-- 空态 -->
+          <div v-if="!taskStore.isExecuting && liveResults.length === 0" class="live-empty">
+            <svg width="52" height="52" viewBox="0 0 52 52" fill="none">
+              <circle cx="26" cy="26" r="24" stroke="var(--c-border)" stroke-width="1.5" stroke-dasharray="4 4"/>
+              <polyline points="16,26 22,32 36,18" stroke="var(--c-muted)" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <p class="live-empty-title">选择任务后点击「执行全部」</p>
+            <p class="live-empty-sub">执行结果将实时显示，也可切换至「执行历史」查看过往报告</p>
+          </div>
 
-          <!-- 执行结果表格 -->
-          <el-table v-show="liveResults.length > 0" :data="liveResults" stripe style="width: 100%; margin-top: 12px;" max-height="460">
-            <el-table-column prop="case_name" label="用例名称" min-width="160" show-overflow-tooltip />
-            <el-table-column prop="status" label="状态" width="85" align="center">
-              <template #default="{ row }">
-                <el-tag :type="getStatusType(row.status)" size="small">{{ getStatusText(row.status) }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column prop="duration" label="耗时" width="80" align="center">
-              <template #default="{ row }">{{ row.duration ? row.duration.toFixed(1) + 's' : '-' }}</template>
-            </el-table-column>
-            <el-table-column prop="error_message" label="错误信息" min-width="200" show-overflow-tooltip>
-              <template #default="{ row }">
-                <span :style="{ color: row.status === 'failed' ? '#f56c6c' : '' }">{{ row.error_message || '-' }}</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="截图" width="75" align="center">
-              <template #default="{ row }">
-                <el-button v-if="row.screenshot_path" type="primary" link size="small" @click="viewScreenshot(row.screenshot_path)">查看</el-button>
-                <span v-else style="color:#c0c4cc;">-</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="操作" width="80" align="center">
-              <template #default="{ row }">
-                <el-button type="warning" link size="small" @click="retryCase(row)" :disabled="taskStore.isExecuting">重试</el-button>
-              </template>
-            </el-table-column>
-          </el-table>
+          <!-- 结果列表 -->
+          <div v-if="liveResults.length > 0" class="result-list">
+            <div v-for="(row, i) in liveResults" :key="i" class="result-row"
+              :class="row.status === 'passed' ? 'row-pass' : row.status === 'failed' ? 'row-fail' : 'row-skip'">
+              <span class="rr-status-dot"></span>
+              <span class="rr-idx">{{ i + 1 }}</span>
+              <span class="rr-name" :title="row.case_name">{{ row.case_name }}</span>
+              <span class="rr-tag" :class="'tag-' + row.status">
+                {{ { passed:'通过', failed:'失败', skipped:'跳过' }[row.status] || row.status }}
+              </span>
+              <span class="rr-dur">{{ row.duration ? row.duration.toFixed(1) + 's' : '—' }}</span>
+              <span class="rr-err" :title="row.error_message">{{ row.error_message || '' }}</span>
+              <span class="rr-actions">
+                <el-button v-if="row.screenshot_path" link size="small"
+                  @click="viewScreenshot(row.screenshot_path)" style="color:var(--c-accent)">截图</el-button>
+                <el-button link size="small" @click="retryCase(row)"
+                  :disabled="taskStore.isExecuting" style="color:var(--c-muted)">重试</el-button>
+              </span>
+            </div>
+          </div>
 
-          <div v-show="liveResults.length > 0 && !taskStore.isExecuting" style="margin-top: 12px; display: flex; gap: 8px;">
-            <el-button size="small" type="primary" @click="executeAll" :disabled="!selectedTaskId">
+          <div v-if="liveResults.length > 0 && !taskStore.isExecuting" class="live-footer">
+            <el-button size="small" @click="executeAll" :disabled="!selectedTaskId">
               <el-icon><RefreshRight /></el-icon>重新执行
             </el-button>
-            <el-button v-if="failedCount > 0" size="small" type="warning" @click="goToCaseManagement">
+            <el-button v-if="failedCount > 0" size="small" type="warning" plain @click="goToCaseManagement">
               <el-icon><MagicStick /></el-icon>去用例管理修正失败用例
             </el-button>
           </div>
-        </el-tab-pane>
+        </div>
 
-        <!-- 执行历史 Tab -->
-        <el-tab-pane label="执行历史" name="history">
+        <!-- ── 执行历史 ── -->
+        <div v-show="activeTab === 'history'" class="ex-tab-pane">
           <div class="history-toolbar">
-            <el-button size="small" type="primary" @click="fetchHistory" :loading="historyLoading" :disabled="!selectedTaskId">
+            <el-button size="small" @click="fetchHistory" :loading="historyLoading" :disabled="!selectedTaskId">
               <el-icon><Refresh /></el-icon>刷新
             </el-button>
-            <el-button size="small" type="danger" :disabled="historySelected.length === 0" @click="deleteHistoryBatch">
-              <el-icon><Delete /></el-icon>批量删除{{ historySelected.length ? '(' + historySelected.length + ')' : '' }}
+            <el-button size="small" type="danger" plain
+              :disabled="historySelected.length === 0" @click="deleteHistoryBatch">
+              <el-icon><Delete /></el-icon>
+              批量删除{{ historySelected.length ? '(' + historySelected.length + ')' : '' }}
             </el-button>
-            <span class="history-count" v-if="historyList.length">共 {{ historyList.length }} 条记录</span>
+            <!-- 全选 -->
+            <el-checkbox
+              v-if="historyList.length > 0"
+              :model-value="historySelected.length === historyList.length && historyList.length > 0"
+              :indeterminate="historySelected.length > 0 && historySelected.length < historyList.length"
+              @change="v => historySelected = v ? historyList.map(r => r.report_id) : []"
+              size="small" style="margin-left:4px">
+              全选
+            </el-checkbox>
+            <span v-if="historyList.length" class="history-count">共 {{ historyList.length }} 条</span>
           </div>
 
-          <el-empty v-if="historyList.length === 0 && !historyLoading" description="暂无执行记录，请先执行测试" />
+          <div v-if="historyList.length === 0 && !historyLoading" class="live-empty">
+            <svg width="52" height="52" viewBox="0 0 52 52" fill="none">
+              <rect x="10" y="8" width="32" height="36" rx="4" stroke="var(--c-border)" stroke-width="1.5"/>
+              <line x1="18" y1="18" x2="34" y2="18" stroke="var(--c-border)" stroke-width="1.5" stroke-linecap="round"/>
+              <line x1="18" y1="24" x2="34" y2="24" stroke="var(--c-border)" stroke-width="1.5" stroke-linecap="round"/>
+              <line x1="18" y1="30" x2="28" y2="30" stroke="var(--c-border)" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+            <p class="live-empty-title">暂无执行记录</p>
+            <p class="live-empty-sub">请先在「实时执行」Tab 运行测试</p>
+          </div>
 
-          <el-table v-if="historyList.length > 0" :data="historyList" stripe max-height="460"
-            @selection-change="onHistorySelectionChange" row-key="report_id">
-            <el-table-column type="selection" width="40" />
-            <el-table-column type="index" label="序号" width="60" />
-            <el-table-column prop="task_name" label="任务" min-width="140" show-overflow-tooltip />
-            <el-table-column label="通过率" width="90" align="center">
-              <template #default="{ row }">
-                <el-progress :percentage="row.pass_rate" :color="row.pass_rate >= 80 ? '#67c23a' : row.pass_rate >= 60 ? '#e6a23c' : '#f56c6c'" :stroke-width="6" style="width:60px;display:inline-block" />
-                <span style="font-size:12px;margin-left:4px;">{{ row.pass_rate }}%</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="通过/失败" width="110" align="center">
-              <template #default="{ row }">
-                <span class="history-passed">{{ row.passed }}</span> /
-                <span class="history-failed">{{ row.failed }}</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="执行时间" width="160" align="center">
-              <template #default="{ row }">{{ formatDate(row.created_at) }}</template>
-            </el-table-column>
-            <el-table-column label="操作" width="130" align="center" fixed="right">
-              <template #default="{ row }">
-                <el-button type="primary" link size="small" @click="viewHistoryReport(row)">查看</el-button>
-                <el-button type="danger" link size="small" @click="deleteHistoryOne(row)">删除</el-button>
-              </template>
-            </el-table-column>
-          </el-table>
-        </el-tab-pane>
-      </el-tabs>
-    </el-card>
+          <!-- 历史卡片网格 -->
+          <div v-if="historyList.length > 0" class="history-grid">
+            <div v-for="row in historyList" :key="row.report_id"
+              class="history-card"
+              :class="{ 'hcard-selected': historySelected.includes(row.report_id) }"
+              @click="viewHistoryReport(row)">
 
-    <!-- 截图查看 dialog -->
-    <el-dialog v-model="showScreenshotDialog" title="截图" width="800px">
-      <img v-if="screenshotUrl" :src="screenshotUrl" style="width: 100%;" />
-    </el-dialog>
+              <!-- 选择框 -->
+              <span class="hcard-check" @click.stop>
+                <el-checkbox
+                  :model-value="historySelected.includes(row.report_id)"
+                  @change="v => {
+                    if (v) historySelected.push(row.report_id)
+                    else historySelected = historySelected.filter(id => id !== row.report_id)
+                  }" size="small"/>
+              </span>
+
+              <!-- 环形进度 -->
+              <div class="hcard-ring-wrap">
+                <svg class="hcard-ring" viewBox="0 0 48 48" width="56" height="56">
+                  <circle cx="24" cy="24" r="19" fill="none" stroke="var(--c-border)" stroke-width="3.5"/>
+                  <circle cx="24" cy="24" r="19" fill="none"
+                    :stroke="row.pass_rate >= 80 ? 'var(--c-pass)' : row.pass_rate >= 50 ? 'var(--c-warn)' : 'var(--c-fail)'"
+                    stroke-width="3.5"
+                    stroke-linecap="round"
+                    :stroke-dasharray="`${row.pass_rate * 1.194} 119.4`"
+                    stroke-dashoffset="29.85"
+                    style="transition:stroke-dasharray .4s ease"/>
+                </svg>
+                <span class="hcard-rate-label">{{ row.pass_rate }}<span style="font-size:9px">%</span></span>
+              </div>
+
+              <!-- 内容 -->
+              <div class="hcard-body">
+                <p class="hcard-task">{{ row.task_name }}</p>
+                <p class="hcard-time">{{ formatDate(row.created_at) }}</p>
+                <div class="hcard-stats">
+                  <span class="hstat pass"><span class="hstat-dot"></span>{{ row.passed }} 通过</span>
+                  <span class="hstat fail"><span class="hstat-dot"></span>{{ row.failed }} 失败</span>
+                  <span class="hstat total">共 {{ row.total_cases }} 条</span>
+                </div>
+              </div>
+
+              <!-- 操作 -->
+              <div class="hcard-actions" @click.stop>
+                <el-button link size="small" style="color:var(--c-accent)" @click="viewHistoryReport(row)">查看</el-button>
+                <el-button link size="small" style="color:var(--c-muted)" @click="deleteHistoryOne(row)">删除</el-button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 截图弹窗 -->
+      <el-dialog v-model="showScreenshotDialog" title="截图" width="820px">
+        <img v-if="screenshotUrl" :src="screenshotUrl" style="width:100%;border-radius:6px" />
+      </el-dialog>
 
     </template>
   </div>
@@ -301,6 +367,20 @@ const { connect: _wsConnect, disconnect: _wsDisconnect, isConnected: wsIsConnect
     currentStepIdx.value = 0
     liveProgress.value = 100
     ElMessage.success('执行完成')
+  } else if (msg.type === 'execution_stopped') {
+    if (currentReportId.value && msg.report_id && msg.report_id !== currentReportId.value) return
+    stopElapsedTimer()
+    taskStore.isExecuting = false
+    currentCaseName.value = ''
+    currentStepDesc.value = ''
+    currentStepIdx.value = 0
+    const done = msg.executed || 0
+    const total = msg.total || 0
+    if (done === 0) {
+      ElMessage.warning('执行已取消，未执行任何用例')
+    } else {
+      ElMessage.warning(`执行已停止（已完成 ${done}/${total} 条用例）`)
+    }
   } else if (msg.type === 'execution_saved') {
     if (currentReportId.value && msg.report_id && msg.report_id !== currentReportId.value) return
     currentReportId.value = msg.report_id
@@ -491,6 +571,11 @@ onMounted(async () => {
         if (data?.report_id) currentReportId.value = data.report_id
       } catch { ElMessage.error('自动执行失败') }
     }
+  } else if (!selectedTaskId.value && taskStore.tasks.length > 0) {
+    // 没有指定任务时默认选第一个，并自动拉取历史
+    selectedTaskId.value = taskStore.tasks[0].id
+    await taskStore.fetchCases(selectedTaskId.value)
+    if (activeTab.value === 'history') fetchHistory()
   }
 })
 
@@ -527,6 +612,11 @@ onActivated(async () => {
       } catch { ElMessage.error('自动执行失败') }
     }
   }
+
+  // 切回执行历史 tab 时，若有选中任务则刷新历史列表
+  if (activeTab.value === 'history' && selectedTaskId.value && historyList.value.length === 0) {
+    fetchHistory()
+  }
 })
 
 // keep-alive 停用：切走时不断 WS，保留连接接收推送
@@ -543,6 +633,11 @@ watch(() => wsStore.currentId, async (id) => {
   stopElapsedTimer()
   if (taskStore.isExecuting) taskStore.isExecuting = false
   await taskStore.fetchTasks(id)
+  // 切换工作空间后默认选第一个任务并恢复历史
+  if (taskStore.tasks.length > 0) {
+    selectedTaskId.value = taskStore.tasks[0].id
+    if (activeTab.value === 'history') fetchHistory()
+  }
 })
 watch(() => wsStore.initialized, async (ready) => { if (ready) await taskStore.fetchTasks(wsStore.currentId) })
 
@@ -553,202 +648,547 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.execution-page { padding: 0; }
-.page-title { font-weight: 600; font-size: 16px; }
-.card-header { display: flex; justify-content: space-between; align-items: center; }
-.header-controls { display: flex; align-items: center; gap: 8px; }
-
-.ws-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; display: inline-block; }
-.ws-on { background: #67c23a; }
-.ws-off { background: #f56c6c; animation: pulse 1.2s ease-in-out infinite; }
-
-/* 进度面板 */
-.progress-panel {
-  background: #f8faff; border: 1px solid #d0e4ff; border-radius: 10px;
-  padding: 14px 18px; margin-bottom: 14px;
+/* ── 设计令牌 ─────────────────────────────────────────────────── */
+:root, .execution-page {
+  --c-accent:  #4a80f5;
+  --c-pass:    #22c57e;
+  --c-fail:    #f05960;
+  --c-warn:    #f59e10;
+  --c-surface: #ffffff;
+  --c-raised:  #f4f6fb;
+  --c-border:  #e2e7f0;
+  --c-text:    #1a1f2e;
+  --c-sub:     #4e5769;
+  --c-muted:   #8c95a8;
+  --c-accent15: rgba(74,128,245,.12);
+  --c-pass12:   rgba(34,197,126,.12);
+  --c-fail12:   rgba(240,89,96,.12);
+  --c-warn12:   rgba(245,158,16,.12);
 }
-.progress-header { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
-.progress-status-row { display: flex; align-items: center; gap: 8px; }
-.status-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
-.status-dot.running { background: #409eff; animation: pulse 1.2s ease-in-out infinite; }
-.status-dot.done { background: #67c23a; }
-.status-dot.failed { background: #f56c6c; }
-@keyframes pulse { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.5); opacity: 0.6; } }
-.status-label { font-weight: 600; font-size: 14px; }
-.case-progress-text { font-size: 13px; color: #606266; background: #e8f4ff; padding: 2px 10px; border-radius: 12px; }
-.progress-right { display: flex; align-items: center; gap: 10px; }
-.elapsed-time { display: flex; align-items: center; gap: 4px; font-size: 13px; color: #909399; }
-.progress-controls { display: flex; gap: 6px; }
-.current-case-bar { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #409eff; background: #ecf5ff; border-radius: 6px; padding: 6px 12px; margin-bottom: 8px; }
-.spin-icon { animation: spin 1s linear infinite; }
 
-/* 实时步骤状态 */
-.live-status-bar {
-  background: #f0f7ff;
-  border: 1px solid #d0e8ff;
-  border-radius: 8px;
-  padding: 8px 12px;
-  margin-bottom: 8px;
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --c-surface: #111827;
+    --c-raised:  #1a2336;
+    --c-border:  #2a3550;
+    --c-text:    #e8edf5;
+    --c-sub:     #9daabf;
+    --c-muted:   #5a6882;
+  }
+}
+:root[data-theme="dark"] {
+  --c-surface: #111827;
+  --c-raised:  #1a2336;
+  --c-border:  #2a3550;
+  --c-text:    #e8edf5;
+  --c-sub:     #9daabf;
+  --c-muted:   #5a6882;
+}
+
+/* ── 页面基底 ──────────────────────────────────────────────────── */
+.execution-page {
+  padding: 0;
+  background: var(--c-surface);
+  min-height: 100%;
+  color: var(--c-text);
+}
+
+/* ── 页头 ──────────────────────────────────────────────────────── */
+.ex-header {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 16px 20px 12px;
+  border-bottom: 1px solid var(--c-border);
+  background: var(--c-surface);
 }
-.live-case-row {
+.ex-header-left  { display: flex; align-items: center; gap: 10px; }
+.ex-header-right { display: flex; align-items: center; gap: 8px;  flex-wrap: wrap; }
+
+.ex-page-title {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -.01em;
+  color: var(--c-text);
+}
+
+/* WS 连接状态胶囊 */
+.ws-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 9px 2px 6px;
+  border-radius: 20px;
+  letter-spacing: .01em;
+}
+.ws-on  { background: var(--c-pass12); color: var(--c-pass); }
+.ws-off { background: var(--c-fail12); color: var(--c-fail); }
+.ws-dot-inner {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+.ws-off .ws-dot-inner { animation: dot-pulse 1.2s ease-in-out infinite; }
+
+/* 执行按钮 */
+.btn-run { font-weight: 600; }
+
+/* 多浏览器条 */
+.multi-bar {
   display: flex;
   align-items: center;
   gap: 8px;
+  padding: 8px 20px;
+  background: var(--c-accent15);
+  border-bottom: 1px solid var(--c-border);
   font-size: 13px;
-  color: #1a6fc4;
+  flex-wrap: wrap;
 }
-.live-case-name {
-  flex: 1;
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.multi-bar-label { color: var(--c-sub); font-weight: 500; }
+
+/* ── 主体区 ─────────────────────────────────────────────────────── */
+.ex-body {
+  padding: 0 20px 24px;
+  background: var(--c-surface);
 }
-.live-step-badge {
-  flex-shrink: 0;
-  font-size: 11px;
-  background: #409eff;
-  color: #fff;
-  border-radius: 10px;
-  padding: 1px 8px;
-  font-weight: 600;
-}
-.live-step-row {
+
+/* ── 自定义 Tab 导航 ─────────────────────────────────────────────── */
+.ex-tabs-nav {
   display: flex;
+  gap: 0;
+  border-bottom: 2px solid var(--c-border);
+  margin-bottom: 20px;
+}
+.ex-tab-btn {
+  position: relative;
+  display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding-left: 20px;
+  padding: 12px 18px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--c-muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  transition: color .2s;
+  outline: none;
 }
-.live-step-dot {
-  flex-shrink: 0;
+.ex-tab-btn:hover { color: var(--c-sub); }
+.ex-tab-btn.active {
+  color: var(--c-accent);
+  font-weight: 700;
+}
+.ex-tab-btn.active::after {
+  content: '';
+  position: absolute;
+  bottom: -2px; left: 12px; right: 12px;
+  height: 2px;
+  background: var(--c-accent);
+  border-radius: 1px;
+}
+
+/* 实时执行状态点（tab 上） */
+.tab-dot {
   width: 6px; height: 6px;
   border-radius: 50%;
-  background: #409eff;
-  animation: pulse 1s ease-in-out infinite;
+  flex-shrink: 0;
 }
-.live-step-desc {
+.dot-run  { background: var(--c-accent); animation: dot-pulse 1.2s ease-in-out infinite; }
+.dot-idle { background: var(--c-border); }
+
+.ex-tab-pane { min-height: 200px; }
+
+/* ── 进度卡 ─────────────────────────────────────────────────────── */
+.live-card {
+  background: var(--c-raised);
+  border: 1px solid var(--c-border);
+  border-radius: 12px;
+  padding: 16px 20px;
+  margin-bottom: 16px;
+}
+
+.live-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.live-status-group { display: flex; align-items: center; gap: 8px; }
+
+.live-status-dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.live-status-dot.run  { background: var(--c-accent); animation: dot-pulse 1.2s ease-in-out infinite; }
+.live-status-dot.pass { background: var(--c-pass); }
+.live-status-dot.fail { background: var(--c-fail); }
+
+.live-status-label {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--c-text);
+}
+.live-progress-chip {
   font-size: 12px;
-  color: #606266;
+  font-variant-numeric: tabular-nums;
+  color: var(--c-sub);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 20px;
+  padding: 1px 10px;
+}
+.live-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.live-elapsed {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--c-muted);
+}
+
+/* 进度条 */
+.live-bar-bg {
+  height: 6px;
+  background: var(--c-border);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 12px;
+}
+.live-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width .5s cubic-bezier(.4,0,.2,1);
+  min-width: 4px;
+}
+.bar-run  { background: linear-gradient(90deg, var(--c-accent) 0%, #7da8ff 100%);
+            background-size: 200% 100%; animation: bar-flow 1.6s linear infinite; }
+.bar-pass { background: var(--c-pass); }
+.bar-fail { background: var(--c-fail); }
+
+@keyframes bar-flow {
+  0%   { background-position: 0 0 }
+  100% { background-position: -200% 0 }
+}
+
+/* 步骤走马灯 */
+.live-step-ticker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  margin-bottom: 14px;
+  font-size: 12.5px;
+  min-width: 0;
+  overflow: hidden;
+}
+.ticker-spin {
+  color: var(--c-accent);
+  flex-shrink: 0;
+  animation: spin 1.2s linear infinite;
+}
+.ticker-case {
+  font-weight: 600;
+  color: var(--c-text);
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  max-width: 260px;
+}
+.ticker-badge {
+  flex-shrink: 0;
+  font-size: 11px;
+  background: var(--c-accent15);
+  color: var(--c-accent);
+  border-radius: 10px;
+  padding: 1px 8px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+.ticker-step {
+  color: var(--c-muted);
   white-space: nowrap;
-}
-@keyframes pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50%       { opacity: 0.4; transform: scale(0.8); }
-}
-@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-
-.progress-mini-stats { display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
-.mini-stat { display: flex; flex-direction: column; align-items: center; padding: 8px 18px; border-radius: 8px; min-width: 68px; }
-.mini-stat .mini-val { font-size: 20px; font-weight: bold; line-height: 1.2; }
-.mini-stat .mini-lbl { font-size: 12px; margin-top: 2px; opacity: 0.85; }
-.total-stat { background: linear-gradient(135deg, #667eea, #764ba2); color: #fff; }
-.passed-stat { background: linear-gradient(135deg, #52c41a, #73d13d); color: #fff; }
-.failed-stat { background: linear-gradient(135deg, #ff4d4f, #ff7875); color: #fff; }
-.rate-stat { background: linear-gradient(135deg, #11998e, #38ef7d); color: #fff; }
-
-/* 执行历史 */
-.history-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
-.history-count { color: #909399; font-size: 13px; margin-left: auto; }
-.history-passed { color: #67c23a; font-weight: 600; }
-.history-failed { color: #f56c6c; font-weight: 600; }
-
-/* 录制 */
-.rec-step-list { display: flex; flex-direction: column; gap: 4px; }
-.rec-step-item { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 6px; background: #f8fafc; font-size: 12px; }
-.rec-step-desc { flex: 1; color: #606266; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-
-/* ── AI 场景规划抽屉 ── */
-/* 输入区 */
-.scene-input-area { padding: 0 2px; }
-.scene-intro { margin-bottom: 16px; font-size: 13px; color: #606266; line-height: 1.7; }
-.scene-intro p { margin: 0 0 10px; }
-.scene-dimensions { display: flex; flex-wrap: wrap; gap: 6px; }
-.dim-tag { cursor: default; }
-.scene-planning-hint {
-  display: flex; align-items: center; gap: 6px; justify-content: center;
-  margin-top: 14px; color: #909399; font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
 }
 
-/* 场景列表区 */
-.scene-list-area { padding: 0 2px; }
-.scene-toolbar {
-  display: flex; justify-content: space-between; align-items: center;
-  margin-bottom: 14px; gap: 8px; flex-wrap: wrap;
+/* 四格统计 */
+.live-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
 }
-.scene-list { display: flex; flex-direction: column; gap: 10px; }
+@media (max-width: 540px) {
+  .live-metrics { grid-template-columns: repeat(2, 1fr); }
+}
+.metric-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 10px 8px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+}
+.metric-val {
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -.02em;
+}
+.metric-unit { font-size: 13px; font-weight: 600; }
+.metric-lbl  { font-size: 11px; margin-top: 2px; opacity: .75; letter-spacing: .03em; text-transform: uppercase; }
 
-/* 场景卡片 */
-.scene-card {
-  border: 1px solid #e4e7ed; border-radius: 10px;
-  padding: 12px 14px; background: #fff;
-  transition: box-shadow .2s, border-color .2s;
-}
-.scene-card:hover { box-shadow: 0 2px 12px rgba(0,0,0,.07); border-color: #c6d8f5; }
-.scene-recorded { border-color: #b7ebc8; background: #f6fff9; }
+.metric-total { background: var(--c-raised);   border-color: var(--c-border); color: var(--c-sub); }
+.metric-pass  { background: var(--c-pass12);   border-color: rgba(34,197,126,.25); color: var(--c-pass); }
+.metric-fail  { background: var(--c-fail12);   border-color: rgba(240,89,96,.25);  color: var(--c-fail); }
+.metric-rate  { background: var(--c-accent15); border-color: rgba(74,128,245,.25); color: var(--c-accent); }
 
-.scene-card-header {
-  display: flex; align-items: center; gap: 6px;
-  margin-bottom: 6px; flex-wrap: wrap;
+/* ── 空态 ─────────────────────────────────────────────────────── */
+.live-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 20px;
+  gap: 10px;
+  text-align: center;
 }
-.scene-name {
-  flex: 1; font-size: 14px; font-weight: 600; color: #303133;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  cursor: text; border-bottom: 1px dashed transparent;
-  transition: border-color .2s;
+.live-empty-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--c-sub);
+  margin: 0;
 }
-.scene-name:hover { border-bottom-color: #c0c4cc; }
+.live-empty-sub {
+  font-size: 12.5px;
+  color: var(--c-muted);
+  margin: 0;
+  max-width: 340px;
+  line-height: 1.6;
+}
 
-.scene-desc {
-  font-size: 13px; color: #606266; line-height: 1.5; margin-bottom: 8px;
-  cursor: text; border-bottom: 1px dashed transparent; transition: border-color .2s;
+/* ── 结果列表 ─────────────────────────────────────────────────── */
+.result-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 420px;
+  overflow-y: auto;
 }
-.scene-desc:hover { border-bottom-color: #c0c4cc; }
+.result-row {
+  display: grid;
+  grid-template-columns: 6px 32px minmax(0,1fr) 52px 52px minmax(0,1.2fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 7px;
+  border-left: 3px solid transparent;
+  background: var(--c-raised);
+  font-size: 12.5px;
+  transition: background .15s;
+}
+.result-row:hover { background: var(--c-border); }
 
-/* 展开步骤 */
-.scene-expand-btn {
-  display: flex; align-items: center; gap: 4px;
-  font-size: 12px; color: #909399; cursor: pointer;
-  margin-bottom: 8px; transition: color .2s;
-}
-.scene-expand-btn:hover { color: #409eff; }
+.row-pass { border-left-color: var(--c-pass); }
+.row-fail { border-left-color: var(--c-fail); }
+.row-skip { border-left-color: var(--c-warn); }
 
-.scene-steps {
-  display: flex; flex-direction: column; gap: 4px;
-  background: #f8fafc; border-radius: 6px;
-  padding: 8px 10px; margin-bottom: 8px;
+.rr-status-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
 }
-.scene-step-item {
-  display: flex; align-items: flex-start; gap: 8px;
-  font-size: 12px; color: #606266; line-height: 1.5;
+.row-pass .rr-status-dot { background: var(--c-pass); }
+.row-fail .rr-status-dot { background: var(--c-fail); }
+.row-skip .rr-status-dot { background: var(--c-warn); }
+
+.rr-idx  { color: var(--c-muted); font-variant-numeric: tabular-nums; font-size: 11px; text-align: right; }
+.rr-name { font-weight: 500; color: var(--c-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rr-dur  { color: var(--c-muted); font-variant-numeric: tabular-nums; text-align: right; font-size: 11.5px; }
+.rr-err  { color: var(--c-fail); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rr-actions { display: flex; gap: 2px; }
+
+.rr-tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 4px;
+  letter-spacing: .02em;
 }
-.step-num {
-  flex-shrink: 0; width: 18px; height: 18px; border-radius: 50%;
-  background: #409eff; color: #fff;
+.tag-passed  { background: var(--c-pass12); color: var(--c-pass); }
+.tag-failed  { background: var(--c-fail12); color: var(--c-fail); }
+.tag-skipped { background: var(--c-warn12); color: var(--c-warn); }
+
+.live-footer {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+
+/* ── 历史工具栏 ──────────────────────────────────────────────── */
+.history-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.history-count {
+  margin-left: auto;
+  font-size: 12.5px;
+  color: var(--c-muted);
+}
+
+/* ── 历史卡片网格 ─────────────────────────────────────────────── */
+.history-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+
+.history-card {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 14px 14px 16px;
+  background: var(--c-raised);
+  border: 1px solid var(--c-border);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: box-shadow .18s, border-color .18s, transform .18s;
+  overflow: hidden;
+}
+.history-card::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 16px; bottom: 16px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--c-border);
+  transition: background .2s;
+}
+.history-card:hover {
+  box-shadow: 0 4px 16px rgba(0,0,0,.08);
+  border-color: var(--c-accent);
+  transform: translateY(-1px);
+}
+.history-card:hover::before { background: var(--c-accent); }
+.hcard-selected {
+  border-color: var(--c-accent);
+  background: var(--c-accent15);
+}
+.hcard-selected::before { background: var(--c-accent); }
+
+.hcard-check {
+  position: absolute;
+  top: 10px; right: 10px;
+}
+
+/* SVG 环形进度 */
+.hcard-ring-wrap {
+  position: relative;
+  flex-shrink: 0;
+  width: 56px; height: 56px;
   display: flex; align-items: center; justify-content: center;
-  font-size: 11px; font-weight: 600; margin-top: 1px;
 }
-.scene-expected {
-  display: flex; align-items: flex-start; gap: 5px;
-  font-size: 12px; color: #67c23a; background: #f0fff4;
-  border-radius: 5px; padding: 5px 8px; line-height: 1.5;
-}
-
-.scene-actions { display: flex; justify-content: flex-end; }
-
-.scene-done-banner {
-  margin-top: 16px; background: #f0fff4;
-  border: 1px solid #b7ebc8; border-radius: 8px;
-  padding: 14px; text-align: center;
+.hcard-ring { transform: rotate(-90deg); overflow: visible; }
+.hcard-rate-label {
+  position: absolute;
+  font-size: 12px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: var(--c-text);
+  line-height: 1;
 }
 
-.page-elements-hint {
-  display: flex; align-items: center; gap: 4px;
-  font-size: 12px; color: #67c23a;
-  margin-bottom: 12px;
+.hcard-body {
+  flex: 1;
+  min-width: 0;
+}
+.hcard-task {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--c-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin: 0 0 3px;
+  padding-right: 22px; /* 避免和复选框重叠 */
+}
+.hcard-time {
+  font-size: 11.5px;
+  color: var(--c-muted);
+  margin: 0 0 6px;
+  font-variant-numeric: tabular-nums;
+}
+.hcard-stats {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.hstat {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+.hstat-dot {
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.hstat.pass { color: var(--c-pass); }
+.hstat.pass .hstat-dot { background: var(--c-pass); }
+.hstat.fail { color: var(--c-fail); }
+.hstat.fail .hstat-dot { background: var(--c-fail); }
+.hstat.total { color: var(--c-muted); }
+
+.hcard-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex-shrink: 0;
+  align-items: flex-end;
+  margin-right: 4px;
+}
+
+/* ── 动画 ────────────────────────────────────────────────────── */
+@keyframes dot-pulse {
+  0%, 100% { transform: scale(1);   opacity: 1;   }
+  50%       { transform: scale(1.6); opacity: 0.5; }
+}
+@keyframes spin {
+  from { transform: rotate(0deg);   }
+  to   { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dot-run, .live-status-dot.run, .ws-off .ws-dot-inner,
+  .ticker-spin, .bar-run { animation: none; }
 }
 </style>

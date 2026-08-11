@@ -87,6 +87,19 @@ from api.auth import get_current_user, owner_filter, check_owner, workspace_filt
 router = APIRouter()
 
 
+def _task_resp(task) -> "TaskResponse":
+    """统一构建 TaskResponse，包含 setup_case_id / storage_ttl_minutes。"""
+    return TaskResponse(
+        id=task.id, name=task.name, url=task.url, status=task.status,
+        browser=task.browser, environment=task.environment,
+        document_path=getattr(task, "document_path", None),
+        created_at=task.created_at.isoformat(),
+        updated_at=task.updated_at.isoformat() if task.updated_at else None,
+        setup_case_id=getattr(task, "setup_case_id", None),
+        storage_ttl_minutes=getattr(task, "storage_ttl_minutes", 60) or 60,
+    )
+
+
 # ── 任务管理 ──────────────────────────────────────────────────────────────────
 
 @router.post("/tasks", response_model=TaskResponse)
@@ -107,12 +120,7 @@ async def create_task(request: TaskCreateRequest, db: AsyncSession = Depends(get
     await ws_manager.broadcast_to_workspace({"type": "task_created", "task": {
         "id": task.id, "name": task.name, "url": task.url, "status": task.status,
     }}, request.workspace_id)
-    return TaskResponse(
-        id=task.id, name=task.name, url=task.url, status=task.status,
-        browser=task.browser, environment=task.environment,
-        created_at=task.created_at.isoformat(),
-        updated_at=task.updated_at.isoformat() if task.updated_at else None,
-    )
+    return _task_resp(task)
 
 
 @router.get("/tasks", response_model=List[TaskResponse])
@@ -123,17 +131,7 @@ async def list_tasks(skip: int = 0, limit: int = 100, workspace_id: int = None, 
         stmt = stmt.where(f)
     result = await db.execute(stmt)
     tasks = result.scalars().all()
-    return [
-        TaskResponse(
-            id=t.id, name=t.name, url=t.url, status=t.status,
-            browser=t.browser, environment=t.environment,
-            document_path=t.document_path,
-            page_elements=t.page_elements or [],
-            created_at=t.created_at.isoformat(),
-            updated_at=t.updated_at.isoformat() if t.updated_at else None,
-        )
-        for t in tasks
-    ]
+    return [_task_resp(t) for t in tasks]
 
 
 @router.get("/tasks/{task_id}", response_model=TaskResponse)
@@ -143,14 +141,9 @@ async def get_task(task_id: int, db: AsyncSession = Depends(get_db), current_use
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
     await check_access(db, task, current_user, "任务")
-    return TaskResponse(
-        id=task.id, name=task.name, url=task.url, status=task.status,
-        browser=task.browser, environment=task.environment,
-        document_path=task.document_path,
-        created_at=task.created_at.isoformat(),
-        updated_at=task.updated_at.isoformat() if task.updated_at else None,
-        page_elements=task.page_elements or [],
-    )
+    resp = _task_resp(task)
+    resp.page_elements = task.page_elements or []
+    return resp
 
 
 @router.delete("/tasks/{task_id}", response_model=dict)
@@ -186,13 +179,7 @@ async def update_task(task_id: int, request: TaskUpdateRequest, db: AsyncSession
 
     await db.commit()
     await db.refresh(task)
-    return TaskResponse(
-        id=task.id, name=task.name, url=task.url, status=task.status,
-        browser=task.browser, environment=task.environment,
-        document_path=task.document_path,
-        created_at=task.created_at.isoformat(),
-        updated_at=task.updated_at.isoformat() if task.updated_at else None,
-    )
+    return _task_resp(task)
 
 
 # ── 文档 / 页面解析 ───────────────────────────────────────────────────────────
@@ -287,13 +274,9 @@ async def set_page_elements(task_id: int, elements: List[dict], db: AsyncSession
         task.status = "parsed"
         await db.commit()
         await db.refresh(task)
-        return TaskResponse(
-            id=task.id, name=task.name, url=task.url, status=task.status,
-            browser=task.browser, environment=task.environment,
-            created_at=task.created_at.isoformat(),
-            updated_at=task.updated_at.isoformat() if task.updated_at else None,
-            page_elements=task.page_elements,
-        )
+        resp = _task_resp(task)
+        resp.page_elements = task.page_elements
+        return resp
     except HTTPException:
         raise
     except Exception as e:
@@ -374,6 +357,21 @@ async def get_stats(
     }
 
 
+def _case_resp(c) -> CaseResponse:
+    """统一构建 CaseResponse，确保 setup_steps / use_storage 等新字段不遗漏。"""
+    return CaseResponse(
+        id=c.id, task_id=c.task_id, name=c.name, module=c.module,
+        priority=c.priority, preconditions=c.preconditions,
+        steps=c.steps or "", expected_results=c.expected_results or "",
+        element_selector=getattr(c, "element_selector", "") or "",
+        enabled=c.enabled,
+        deprecated=getattr(c, "deprecated", False) or False,
+        source=getattr(c, "source", "manual") or "manual",
+        setup_steps=getattr(c, "setup_steps", None),
+        use_storage=bool(getattr(c, "use_storage", False)),
+    )
+
+
 @router.get("/tasks/{task_id}/cases", response_model=List[CaseResponse])
 async def list_cases(task_id: int, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     result = await db.execute(select(TestTask).where(TestTask.id == task_id))
@@ -383,18 +381,7 @@ async def list_cases(task_id: int, db: AsyncSession = Depends(get_db), current_u
     await check_access(db, task, current_user, "任务")
     result = await db.execute(select(TestCase).where(TestCase.task_id == task_id))
     cases = result.scalars().all()
-    return [
-        CaseResponse(
-            id=c.id, task_id=c.task_id, name=c.name, module=c.module,
-            priority=c.priority, preconditions=c.preconditions,
-            steps=c.steps, expected_results=c.expected_results,
-            element_selector=getattr(c, "element_selector", "") or "",
-            enabled=c.enabled,
-            deprecated=getattr(c, "deprecated", False) or False,
-            source=getattr(c, "source", "manual") or "manual",
-        )
-        for c in cases
-    ]
+    return [_case_resp(c) for c in cases]
 
 
 @router.post("/cases", response_model=CaseResponse)
@@ -413,14 +400,7 @@ async def create_case(request: CaseCreateRequest, db: AsyncSession = Depends(get
     db.add(case)
     await db.commit()
     await db.refresh(case)
-    return CaseResponse(
-        id=case.id, task_id=case.task_id, name=case.name, module=case.module,
-        priority=case.priority, preconditions=case.preconditions,
-        steps=case.steps, expected_results=case.expected_results,
-        enabled=case.enabled,
-        deprecated=getattr(case, "deprecated", False) or False,
-        source="manual",
-    )
+    return _case_resp(case)
 
 
 def _resolve_doc_path(document_path: str) -> Optional[Path]:
@@ -443,6 +423,10 @@ async def generate_cases(task_id: int, request: dict = None, db: AsyncSession = 
     reparse_page: bool = request.get("reparse_page", False)
     # 前端通过请求体传入 ws_client_id，精确推送给对应的 WebSocket 连接
     ws_client_id: str = request.get("ws_client_id") or "cases_gen"
+    # 用户定制生成参数
+    user_prompt: str = request.get("user_prompt", "").strip()
+    focus_modules: list = request.get("focus_modules") or []
+    target_count: int = int(request.get("target_count") or 0)
     try:
         logger.info(f"Generating cases for task: {task_id}, reparse_page={reparse_page}, ws_client_id={ws_client_id}")
         result = await db.execute(select(TestTask).where(TestTask.id == task_id))
@@ -497,7 +481,12 @@ async def generate_cases(task_id: int, request: dict = None, db: AsyncSession = 
                 client_id=ws_client_id,
             )
 
-        cases = await uitest_agent.generate_cases(task_id=task_id, progress_cb=_progress)
+        cases = await uitest_agent.generate_cases(
+            task_id=task_id, progress_cb=_progress,
+            user_prompt=user_prompt,
+            focus_modules=focus_modules,
+            target_count=target_count,
+        )
 
         if uitest_agent._get_state(task_id).document_data:
             _snap = uitest_agent._get_state(task_id).document_data.get("content", "")
@@ -523,17 +512,7 @@ async def generate_cases(task_id: int, request: dict = None, db: AsyncSession = 
         await db.commit()
         result = await db.execute(select(TestCase).where(TestCase.task_id == task_id))
         all_cases = result.scalars().all()
-        return [
-            CaseResponse(
-                id=c.id, task_id=c.task_id, name=c.name, module=c.module,
-                priority=c.priority, preconditions=c.preconditions,
-                steps=c.steps, expected_results=c.expected_results,
-                element_selector=getattr(c, "element_selector", "") or "",
-                enabled=c.enabled,
-                source=getattr(c, "source", "ai_generated") or "ai_generated",
-            )
-            for c in all_cases
-        ]
+        return [_case_resp(c) for c in all_cases]
     except HTTPException:
         raise
     except Exception as e:
@@ -1131,13 +1110,7 @@ async def update_case(case_id: int, request: CaseUpdateRequest, db: AsyncSession
         setattr(case, key, value)
     await db.commit()
     await db.refresh(case)
-    return CaseResponse(
-        id=case.id, task_id=case.task_id, name=case.name, module=case.module,
-        priority=case.priority, preconditions=case.preconditions,
-        steps=case.steps, expected_results=case.expected_results,
-        enabled=case.enabled, deprecated=getattr(case, "deprecated", False) or False,
-        source=getattr(case, "source", "manual") or "manual",
-    )
+    return _case_resp(case)
 
 
 @router.delete("/cases/{case_id}")
@@ -1309,11 +1282,22 @@ async def get_latest_failed_cases(
     - failed_cases / summary: 最近一次报告的汇总信息
     """
     from sqlalchemy import desc, func
-    task_result = await db.execute(select(TestTask).where(TestTask.id == task_id))
-    task = task_result.scalar_one_or_none()
-    if not task:
+    # 只读非 JSON 列，避免 page_elements 等大 JSON 列触发反序列化异常
+    task_result = await db.execute(
+        select(TestTask.id, TestTask.created_by, TestTask.project_id)
+        .where(TestTask.id == task_id)
+    )
+    task_row = task_result.one_or_none()
+    if not task_row:
         raise HTTPException(status_code=404, detail="任务不存在")
-    await check_access(db, task, current_user, "任务")
+
+    # 简化权限检查：用 task_row 构造一个轻量对象供 check_access 使用
+    class _TaskStub:
+        def __init__(self, r):
+            self.id = r.id
+            self.created_by = r.created_by
+            self.project_id = r.project_id
+    await check_access(db, _TaskStub(task_row), current_user, "任务")
 
     # ── 每条用例最新一次执行结果（子查询取 max created_at）──────────────────
     from tools.database import TestResult as TR
@@ -1324,22 +1308,22 @@ async def get_latest_failed_cases(
         .group_by(TR.case_id)
         .subquery()
     )
-    # join 回 TestResult 取完整行
+    # 只取需要的列（避免 logs JSON 列解析失败导致 500）
     results_q = await db.execute(
-        select(TR)
+        select(TR.case_id, TR.status, TR.error_message, TR.duration)
         .join(latest_sub, (TR.case_id == latest_sub.c.case_id) &
                           (TR.created_at == latest_sub.c.max_created_at))
         .where(TR.task_id == task_id)
     )
     execution_results = [
         {
-            "case_id":       tr.case_id,
+            "case_id":       row.case_id,
             "case_name":     "",
-            "status":        tr.status,
-            "error_message": tr.error_message,
-            "duration":      tr.duration,
+            "status":        row.status,
+            "error_message": row.error_message,
+            "duration":      row.duration,
         }
-        for tr in results_q.scalars().all()
+        for row in results_q.all()
     ]
 
     # ── 最新报告的 failed_cases 和 summary（供修正用例 / 执行摘要使用）────────
@@ -1355,6 +1339,12 @@ async def get_latest_failed_cases(
                 "execution_results": execution_results}
 
     summary_raw = report.summary or {}
+    if isinstance(summary_raw, str):
+        try:
+            import json as _json
+            summary_raw = _json.loads(summary_raw) if summary_raw.strip() else {}
+        except Exception:
+            summary_raw = {}
     failed_cases = summary_raw.get("failed_cases", [])
 
     return {
@@ -1378,6 +1368,9 @@ async def _run_execution_bg(
     report_id: int, task_id: int, task_name: str,
     task_url: str, case_dicts: list, case_ids, browser: str,
     workspace_id: int = None,
+    setup_case: dict = None,
+    storage_state_path: str = None,
+    storage_ttl_minutes: int = 60,
 ):
     """后台执行测试，通过 WebSocket 推送进度，完成后写回数据库。"""
     from tools.database import async_session_maker, TestResult as TR
@@ -1406,13 +1399,18 @@ async def _run_execution_bg(
             screenshots_dir="./screenshots",
             progress_callback=_progress_cb,
             task_id=task_id,
+            setup_case=setup_case,
+            storage_state_path=storage_state_path,
+            storage_ttl_minutes=storage_ttl_minutes,
         )
+
+        # ── 判断是否被用户主动停止 ──
+        real_results = [r for r in results if r.get("case_id") is not None]
+        was_stopped = len(real_results) < total_cases
 
         passed  = sum(1 for r in results if r.get("status") == "passed" and r.get("case_id") is not None)
         failed  = sum(1 for r in results if r.get("status") == "failed" and r.get("case_id") is not None)
         skipped = sum(1 for r in results if r.get("status") == "skipped" and r.get("case_id") is not None)
-        # 过滤掉预检/连通性测试结果用于统计
-        real_results = [r for r in results if r.get("case_id") is not None]
         pass_rate = (passed / len(real_results) * 100) if real_results else 0
 
         def _safe_parse_steps(logs_val):
@@ -1429,6 +1427,18 @@ async def _run_execution_bg(
                     return []
             return []
 
+        # ── 用户停止时不生成报告，直接推送停止事件后返回 ──
+        if was_stopped:
+            await ws_manager.broadcast_to_workspace({
+                "type": "execution_stopped",
+                "report_id": report_id,
+                "executed": len(real_results),
+                "total": total_cases,
+            }, workspace_id)
+            logger.info(f"[Execution] Report {report_id} stopped by user: {len(real_results)}/{total_cases} cases executed, skipping report generation")
+            return
+
+        # ── 正常完成：生成报告并入库 ──
         details = [
             {"id": idx, "case_id": r.get("case_id"), "case_name": r.get("case_name", "Unknown"),
              "status": r.get("status", "unknown"), "duration": round(r.get("duration", 0) or 0, 2),
@@ -1484,7 +1494,7 @@ async def _run_execution_bg(
                 logger.error(f"[Execution] DB commit failed for report {report_id}: {db_err}", exc_info=True)
                 await db.rollback()
                 raise
-        # 执行完成事件（前端重置进度条、停止计时器）
+
         await ws_manager.broadcast_to_workspace({
             "type": "execution_completed",
             "report_id": report_id,
@@ -1542,7 +1552,9 @@ async def execute_cases(
              "preconditions": c.preconditions, "steps": c.steps,
              "expected_results": c.expected_results,
              "element_selector": getattr(c, "element_selector", ""),
-             "steps_json": getattr(c, "steps_json", None)}
+             "steps_json": getattr(c, "steps_json", None),
+             "setup_steps": getattr(c, "setup_steps", None),
+             "use_storage": bool(getattr(c, "use_storage", False))}
             for c in cases
         ]
         task_result = await db.execute(select(TestTask).where(TestTask.id == request.task_id))
@@ -1554,6 +1566,25 @@ async def execute_cases(
         await check_access(db, task, current_user, "任务")
         task_url  = task.url  if task else ""
         task_name = task.name if task else f"Task {request.task_id}"
+
+        # ── 方案三：只有当本次执行的用例中有 use_storage=True 时才读取 setup_case ──
+        # 若全部用例都是 use_storage=False（如单条执行登录用例本身），跳过快照生成
+        needs_storage = any(c.get("use_storage") is True for c in case_dicts)
+        setup_case_id = getattr(task, "setup_case_id", None)
+        setup_case_dict = None
+        if setup_case_id and needs_storage:
+            sc_result = await db.execute(select(TestCase).where(TestCase.id == setup_case_id))
+            sc = sc_result.scalar_one_or_none()
+            if sc:
+                setup_case_dict = {
+                    "id": sc.id, "name": sc.name,
+                    "steps_json": getattr(sc, "steps_json", None),
+                    "steps": sc.steps or "",
+                }
+
+        storage_state_path = getattr(task, "storage_state_path", None)
+        storage_ttl_minutes = getattr(task, "storage_ttl_minutes", 60) or 60
+
         report = TestReport(
             task_id=request.task_id, name=f"{task_name} - 测试报告",
             summary={}, details=[], pass_rate=0, total_cases=len(case_dicts),
@@ -1569,6 +1600,9 @@ async def execute_cases(
             report_id=report.id, task_id=request.task_id, task_name=task_name,
             task_url=task_url, case_dicts=case_dicts, case_ids=request.case_ids, browser=request.browser,
             workspace_id=task.project_id,
+            setup_case=setup_case_dict,
+            storage_state_path=storage_state_path,
+            storage_ttl_minutes=storage_ttl_minutes,
         )
         return {"report_id": report.id, "status": "running", "total": len(case_dicts),
                 "message": f"开始执行 {len(case_dicts)} 个用例，请通过 WebSocket 接收进度"}
@@ -2691,7 +2725,9 @@ async def execute_multi_browser(
         {"id": c.id, "name": c.name, "module": c.module,
          "steps_json": c.steps_json or [], "steps": c.steps or "",
          "expected_results": c.expected_results or "",
-         "element_selector": getattr(c, "element_selector", "") or ""}
+         "element_selector": getattr(c, "element_selector", "") or "",
+         "setup_steps": getattr(c, "setup_steps", None),
+         "use_storage": bool(getattr(c, "use_storage", False))}
         for c in cases
     ]
 

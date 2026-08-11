@@ -6,6 +6,19 @@ import asyncio
 import sys
 import os
 
+# ── 从 .env 预加载 PLAYWRIGHT_BROWSERS_PATH（必须在 Playwright 初始化前设置）──
+# pydantic_settings 读取 .env 但不会自动写入 os.environ，需要手动处理
+_env_file = os.path.join(os.path.dirname(__file__), ".env")
+if os.path.exists(_env_file):
+    with open(_env_file, encoding="utf-8") as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line.startswith("PLAYWRIGHT_BROWSERS_PATH=") and "=" in _line:
+                _k, _v = _line.split("=", 1)
+                _v = _v.strip().strip('"').strip("'")
+                if _v:
+                    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", _v)
+
 # ── Windows 事件循环策略修复（必须在任何 asyncio 操作前设置）────────────────
 # Playwright 需要 ProactorEventLoop 才能在 Windows 上启动浏览器子进程
 # 放在模块级别确保 uvicorn reload 模式下子进程也能正确设置
@@ -332,7 +345,7 @@ async def access_log_middleware(request: Request, call_next):
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    logger.error(f"Unhandled error [{request.method} {request.url.path}]: {type(exc).__name__}: {exc}")
+    logger.error(f"Unhandled error [{request.method} {request.url.path}]: {type(exc).__name__}: {exc}", exc_info=True)
     return JSONResponse(status_code=500, content={"detail": "服务器内部错误，请稍后重试"})
 
 app.add_middleware(

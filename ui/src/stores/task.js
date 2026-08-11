@@ -145,7 +145,7 @@ export const useTaskStore = defineStore('task', () => {
 
   async function stopExecution() {
     await api.executeApi.stop()
-    isExecuting.value = false
+    // 不立即重置 isExecuting，等待后端 execution_stopped / execution_completed 事件
   }
 
   async function sendCommand(message) {

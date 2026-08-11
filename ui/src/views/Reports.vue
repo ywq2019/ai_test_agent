@@ -29,6 +29,15 @@
           <div class="report-list-panel">
             <el-empty v-if="reportsList.length === 0" description="暂无测试报告" style="margin-top: 60px;" />
             <div v-else class="report-list">
+              <!-- 全选栏 -->
+              <div class="report-select-all-bar">
+                <el-checkbox
+                  :model-value="isAllSelected"
+                  :indeterminate="isIndeterminate"
+                  @change="toggleSelectAll"
+                  size="small"
+                >全选（{{ selectedIds.length }}/{{ reportsList.length }}）</el-checkbox>
+              </div>
               <div
                 v-for="r in reportsList"
                 :key="r.report_id"
@@ -224,6 +233,20 @@ const toggleSelect = (id) => {
   else selectedIds.value.splice(idx, 1)
 }
 
+const isAllSelected = computed(
+  () => reportsList.value.length > 0 && selectedIds.value.length === reportsList.value.length
+)
+const isIndeterminate = computed(
+  () => selectedIds.value.length > 0 && selectedIds.value.length < reportsList.value.length
+)
+const toggleSelectAll = () => {
+  if (isAllSelected.value) {
+    selectedIds.value = []
+  } else {
+    selectedIds.value = reportsList.value.map(r => r.report_id)
+  }
+}
+
 // ── CRUD ──
 const fetchReports = async () => {
   try {
@@ -319,6 +342,14 @@ onMounted(async () => {
 
 /* 报告列表 */
 .report-list-panel { max-height: 600px; overflow-y: auto; }
+.report-select-all-bar {
+  padding: 6px 10px 6px 12px;
+  background: var(--el-fill-color-light, #f5f7fa);
+  border-radius: 6px;
+  margin-bottom: 6px;
+  font-size: 13px;
+  color: #606266;
+}
 .report-list { display: flex; flex-direction: column; gap: 8px; }
 .report-item {
   padding: 10px 12px; border: 1px solid #e0e0e0; border-radius: 6px;

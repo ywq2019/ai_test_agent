@@ -21,6 +21,9 @@ class TaskUpdateRequest(BaseModel):
     document_path: Optional[str] = Field(None, description="需求文档路径")
     browser: Optional[str] = Field(None, description="浏览器类型: chromium/firefox/webkit")
     environment: Optional[str] = Field(None, description="测试环境: test/staging/production")
+    # 方案三：storage_state 快照配置
+    setup_case_id: Optional[int] = Field(None, description="登录用例 ID，执行前自动生成快照")
+    storage_ttl_minutes: Optional[int] = Field(None, description="快照有效期分钟数，0=每次重新登录")
 
 
 class TaskResponse(BaseModel):
@@ -34,6 +37,9 @@ class TaskResponse(BaseModel):
     created_at: str
     updated_at: Optional[str] = None
     page_elements: Optional[List[Dict[str, Any]]] = None
+    # 方案三：storage_state 快照配置
+    setup_case_id: Optional[int] = None
+    storage_ttl_minutes: int = 60
 
 
 class CaseCreateRequest(BaseModel):
@@ -56,6 +62,9 @@ class CaseUpdateRequest(BaseModel):
     expected_results: Optional[str] = None
     enabled: Optional[bool] = None
     steps_json: Optional[List[Any]] = None  # 可视化步骤编辑器保存结构化步骤
+    # 方案一：前置步骤
+    setup_steps: Optional[List[Any]] = None
+    use_storage: Optional[bool] = None     # 是否加载 task 级快照
 
 
 class CaseResponse(BaseModel):
@@ -69,8 +78,11 @@ class CaseResponse(BaseModel):
     expected_results: str
     element_selector: Optional[str] = ""
     enabled: bool
-    deprecated: bool = False  # 需求变更废弃标记（与用户禁用 enabled 分开）
-    source: Optional[str] = "manual"  # recorded / ai_generated / manual
+    deprecated: bool = False
+    source: Optional[str] = "manual"
+    # 方案一
+    setup_steps: Optional[List[Any]] = None
+    use_storage: bool = True
 
 
 class ExecuteRequest(BaseModel):
@@ -172,6 +184,7 @@ class AICaseFileResponse(BaseModel):
     case_count: int
     has_md: bool
     has_xmind: bool
+    has_xlsx: bool = False
     modules: List[Dict[str, Any]] = []
     created_at: str = ""
     doc_hash: Optional[str] = None

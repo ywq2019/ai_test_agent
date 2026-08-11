@@ -2,15 +2,23 @@
 测试执行技能
 - 执行状态按 task_id 隔离，多用户并发执行互不干扰
 - 每条用例创建独立浏览器 Context，执行完立即释放
+- 方案一：case 级 setup_steps，在 steps_json 前执行前置步骤
+- 方案三：task 级 storage_state 快照，一次登录全批复用
 """
 import asyncio
 import json
+import os
+import time
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Callable
 from pathlib import Path
 from loguru import logger
 from tools.browser import browser_pool
 from tools.config import settings
+
+# 快照存储目录
+_STORAGE_DIR = Path("./screenshots/.storage_states")
+_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class TaskExecutionState:
@@ -19,10 +27,33 @@ class TaskExecutionState:
         self.is_running: bool = False
         self.is_paused: bool = False
         self.should_stop: bool = False
+        self._active_browser_tool = None  # 当前活跃的 BrowserTool，stop 时主动关闭
 
     def pause(self):  self.is_paused = True
     def resume(self): self.is_paused = False
-    def stop(self):   self.should_stop = True
+
+    def stop(self):
+        self.should_stop = True
+        # 主动关闭活跃浏览器 Context，打断正在执行的 Playwright 操作
+        bt = self._active_browser_tool
+        if bt is not None:
+            try:
+                import asyncio
+                asyncio.ensure_future(self._force_close_browser(bt))
+            except Exception:
+                pass
+
+    async def _force_close_browser(self, bt):
+        """在 stop 时强制关闭浏览器 Context，导致当前 Playwright 操作立即报错退出。"""
+        try:
+            await bt.close()
+        except Exception:
+            pass
+        try:
+            from tools.browser import browser_pool
+            browser_pool.release(bt)
+        except Exception:
+            pass
 
     def to_dict(self) -> dict:
         return {
@@ -97,20 +128,41 @@ class TestExecutor:
         screenshots_dir: str = None,
         progress_callback: Optional[Callable] = None,
         task_id: int = None,
+        setup_case: Optional[Dict[str, Any]] = None,
+        storage_state_path: Optional[str] = None,
+        storage_ttl_minutes: int = 60,
     ) -> List[Dict[str, Any]]:
         """
         批量执行测试用例。
-        task_id 用于隔离暂停/继续/停止控制，多用户并发执行互不干扰。
+        task_id           — 用于隔离暂停/继续/停止控制
+        setup_case        — 登录用例 dict（方案三：执行前先跑它，保存 storage_state）
+        storage_state_path— 快照文件路径（由本方法自动管理）
+        storage_ttl_minutes — 快照有效期分钟数（0=每次重跑）
         """
-        _task_id = task_id or id(cases)   # 没传 task_id 时用对象地址作唯一键
+        _task_id = task_id or id(cases)
         state = self._get_state(_task_id)
-        self._current_task_id = _task_id  # 向后兼容
+        self._current_task_id = _task_id
 
         state.is_running = True
         state.should_stop = False
+        was_stopped = False
         results = []
         total_cases = len(cases)
         completed_cases = 0
+
+        # ── 方案三：生成 / 复用 storage_state 快照 ──────────────────────────
+        active_storage_state = None
+        if setup_case:
+            snap_path = Path(storage_state_path) if storage_state_path else \
+                        _STORAGE_DIR / f"task_{_task_id}.json"
+            active_storage_state = await self._ensure_storage_state(
+                setup_case=setup_case,
+                url=url,
+                browser_type=browser_type,
+                snap_path=snap_path,
+                ttl_minutes=storage_ttl_minutes,
+                progress_callback=progress_callback,
+            )
 
         try:
             # ── 预检：执行前先确认目标页面可达 ──
@@ -159,17 +211,25 @@ class TestExecutor:
 
             for case in cases:
                 if state.should_stop:
+                    was_stopped = True
                     break
 
                 while state.is_paused and not state.should_stop:
                     await asyncio.sleep(0.2)
                 if state.should_stop:
+                    was_stopped = True
                     break
+
+                # 方案三：use_storage 明确为 True 时注入快照（默认 False，不自动注入）
+                case_storage = None
+                if active_storage_state and case.get("use_storage") is True:
+                    case_storage = active_storage_state
 
                 result = await self.execute_case(
                     case, url, browser_type, screenshots_dir,
                     task_id=_task_id,
                     step_callback=progress_callback,
+                    storage_state=case_storage,
                 )
                 results.append(result)
                 completed_cases += 1
@@ -201,16 +261,24 @@ class TestExecutor:
         screenshots_dir: str = None,
         task_id: int = None,
         step_callback: Optional[Callable] = None,
+        storage_state=None,
     ) -> Dict[str, Any]:
         """
         执行单条用例，优先使用 ActionRunner 执行结构化 steps_json，
         无结构化步骤时回退到 element_selector 简单执行。
+        storage_state: 文件路径或状态字典，注入登录态（方案三）。
         """
         start_time = datetime.utcnow()
         bt = None
+        state = self._get_state(task_id) if task_id else None
 
         try:
-            bt = await browser_pool.acquire(browser_type)
+            bt = await browser_pool.acquire(browser_type, storage_state=storage_state)
+
+            # ── 注册活跃浏览器，供 stop 时强制关闭 ──
+            if state:
+                state._active_browser_tool = bt
+
             await bt.navigate(url)
 
             screenshot_path = None
@@ -220,6 +288,21 @@ class TestExecutor:
             steps_json = case.get("steps_json")
             if steps_json:
                 try:
+                    # 执行前检查 stop 标志
+                    if state and state.should_stop:
+                        end_time = datetime.utcnow()
+                        return {
+                            "case_id": case.get("id"),
+                            "case_name": case.get("name", ""),
+                            "status": "skipped",
+                            "start_time": start_time.isoformat(),
+                            "end_time": end_time.isoformat(),
+                            "duration": 0,
+                            "error_message": "用户停止执行",
+                            "screenshot_path": "",
+                            "logs": "",
+                        }
+
                     if isinstance(steps_json, str):
                         steps_json = json.loads(steps_json)
 
@@ -228,7 +311,9 @@ class TestExecutor:
                         from tools.database import TaskEnvVar, async_session_maker
                         from sqlalchemy import select as _sa_select
 
-                        runner = ActionRunner(task_id=task_id, browser=browser_type)
+                        # 传入 stop 检查回调，让 ActionRunner 感知停止信号
+                        _stop_cb = (lambda st=state: st.should_stop) if state else None
+                        runner = ActionRunner(task_id=task_id, browser=browser_type, should_stop_cb=_stop_cb)
                         if step_callback:
                             runner.step_callback = step_callback
 
@@ -250,6 +335,44 @@ class TestExecutor:
                         # 语义 locator、strict mode 降级、AI 修复）在这里统一处理
                         case_payload = dict(case)
                         case_payload["steps_json"] = steps_json
+
+                        # ── 方案一：先执行 setup_steps（与主步骤共用同一 Page）──
+                        setup_steps = case.get("setup_steps")
+                        if setup_steps:
+                            if isinstance(setup_steps, str):
+                                try:
+                                    setup_steps = json.loads(setup_steps)
+                                except Exception:
+                                    setup_steps = []
+                            if setup_steps and isinstance(setup_steps, list):
+                                logger.info(f"[execute_case] case={case.get('id')} 执行前置步骤 {len(setup_steps)} 步")
+                                setup_payload = dict(case)
+                                setup_payload["steps_json"] = setup_steps
+                                setup_payload["name"] = f"{case.get('name','')}_setup"
+                                setup_result = await runner.run_case(setup_payload, bt.page)
+                                if setup_result.get("status") != "passed":
+                                    # 前置步骤失败 → 直接标记用例为 failed，跳过主步骤
+                                    end_time = datetime.utcnow()
+                                    setup_err = next(
+                                        (s.get("error","") for s in setup_result.get("steps",[]) if not s.get("passed")),
+                                        "前置步骤失败"
+                                    )
+                                    logger.warning(f"[execute_case] case={case.get('id')} 前置步骤失败: {setup_err}")
+                                    return {
+                                        "case_id": case.get("id"),
+                                        "case_name": case.get("name", ""),
+                                        "status": "failed",
+                                        "start_time": start_time.isoformat(),
+                                        "end_time": end_time.isoformat(),
+                                        "duration": (end_time - start_time).total_seconds(),
+                                        "error_message": f"[前置步骤失败] {setup_err}",
+                                        "screenshot_path": next(
+                                            (s.get("screenshot","") for s in setup_result.get("steps",[]) if s.get("screenshot")),
+                                            ""
+                                        ),
+                                        "logs": setup_result.get("steps", []),
+                                    }
+
                         result = await runner.run_case(case_payload, bt.page)
 
                         end_time = datetime.utcnow()
@@ -348,8 +471,108 @@ class TestExecutor:
             }
 
         finally:
+            # ── 清理活跃浏览器引用，防止 stop 重复关闭 ──
+            if state:
+                state._active_browser_tool = None
             if bt:
-                await bt.close()
+                try:
+                    await bt.close()
+                except Exception:
+                    pass
+                browser_pool.release(bt)
+
+    # ── 方案三：storage_state 快照管理 ─────────────────────────────────────
+
+    async def _ensure_storage_state(
+        self,
+        setup_case: Dict[str, Any],
+        url: str,
+        browser_type: str,
+        snap_path: Path,
+        ttl_minutes: int,
+        progress_callback: Optional[Callable] = None,
+    ) -> Optional[str]:
+        """
+        确保 storage_state 快照存在且在有效期内。
+        - 有效：直接返回快照路径
+        - 无效/不存在：执行 setup_case，保存快照后返回路径
+        - ttl_minutes=0：每次都重新跑
+        返回快照文件路径（str），失败返回 None（降级为无登录态执行）。
+        """
+        snap_path = Path(snap_path)
+
+        # 检查快照是否在有效期内
+        if ttl_minutes > 0 and snap_path.exists():
+            age_minutes = (time.time() - snap_path.stat().st_mtime) / 60
+            if age_minutes < ttl_minutes:
+                logger.info(f"[storage_state] 复用快照 {snap_path}（剩余 {ttl_minutes - age_minutes:.1f} 分钟）")
+                return str(snap_path)
+            else:
+                logger.info(f"[storage_state] 快照已过期（{age_minutes:.1f} 分钟），重新生成")
+
+        # 通知前端
+        if progress_callback:
+            try:
+                await progress_callback({
+                    "type": "setup_running",
+                    "message": f"正在执行登录前置用例「{setup_case.get('name', '')}」...",
+                })
+            except Exception:
+                pass
+
+        # 执行 setup 用例，获取登录态
+        bt = None
+        try:
+            bt = await browser_pool.acquire(browser_type)  # 干净 context
+            await bt.navigate(url)
+
+            steps_json = setup_case.get("steps_json")
+            if isinstance(steps_json, str):
+                steps_json = json.loads(steps_json)
+
+            if not steps_json:
+                logger.warning("[storage_state] setup_case 无 steps_json，跳过快照生成")
+                return None
+
+            from skills.action_runner import ActionRunner
+            runner = ActionRunner(task_id=0, browser=browser_type)
+            setup_payload = dict(setup_case)
+            setup_payload["steps_json"] = steps_json
+            result = await runner.run_case(setup_payload, bt.page)
+
+            if result.get("status") != "passed":
+                failed_err = next(
+                    (s.get("error", "") for s in result.get("steps", []) if not s.get("passed")),
+                    "setup 用例失败"
+                )
+                logger.warning(f"[storage_state] setup 用例执行失败: {failed_err}，将以无登录态继续")
+                return None
+
+            # 保存 storage_state 到文件
+            snap_path.parent.mkdir(parents=True, exist_ok=True)
+            await bt.context.storage_state(path=str(snap_path))
+            logger.info(f"[storage_state] 快照已保存: {snap_path}")
+
+            if progress_callback:
+                try:
+                    await progress_callback({
+                        "type": "setup_done",
+                        "message": "登录态已建立，开始执行测试用例",
+                    })
+                except Exception:
+                    pass
+
+            return str(snap_path)
+
+        except Exception as e:
+            logger.error(f"[storage_state] 快照生成异常: {e}，将以无登录态继续")
+            return None
+        finally:
+            if bt:
+                try:
+                    await bt.close()
+                except Exception:
+                    pass
                 browser_pool.release(bt)
 
     async def execute_test_suite(

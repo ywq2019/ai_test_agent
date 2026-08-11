@@ -69,6 +69,7 @@
               <div class="record-meta">
                 <el-tag size="small" type="success" v-if="r.has_md">MD</el-tag>
                 <el-tag size="small" type="warning" v-if="r.has_xmind">XMind</el-tag>
+                <el-tag size="small" type="success" effect="plain" v-if="r.has_xlsx">Excel</el-tag>
                 <el-tag size="small" type="info" v-if="r.parent_id">增量更新</el-tag>
                 <el-tag size="small" effect="plain" type="danger" v-if="r.record_status === 'deprecated'">已废弃</el-tag>
                 <el-tag size="small" type="primary" effect="plain" v-if="r.gen_status === 'generating'">
@@ -131,7 +132,7 @@
                   </el-button>
                 </div>
                 <!-- 下载组 -->
-                <div class="btn-group" v-if="current.has_md || current.has_xmind || current.case_count > 0">
+                <div class="btn-group" v-if="current.has_md || current.has_xmind || current.has_xlsx">
                   <el-button v-if="current.has_md" size="small" @click="download(current.id, 'md')">
                     <el-icon><Download /></el-icon>MD
                   </el-button>
@@ -139,7 +140,7 @@
                     <el-icon><Download /></el-icon>XMind
                   </el-button>
                   <el-button
-                    v-if="current.case_count > 0"
+                    v-if="current.has_xlsx"
                     size="small"
                     type="success"
                     plain
@@ -720,9 +721,12 @@
             <el-checkbox value="xmind" style="margin-left:16px">
               <el-tag type="warning" size="small">XMind (.xmind)</el-tag>
             </el-checkbox>
+            <el-checkbox value="excel" style="margin-left:16px">
+              <el-tag type="success" size="small">Excel (.xlsx)</el-tag>
+            </el-checkbox>
           </el-checkbox-group>
           <div style="font-size:12px;color:#909399;margin-top:4px">
-            Markdown 便于阅读，XMind 可直接用思维导图软件打开
+            Markdown 便于阅读，XMind 和 Excel 可直接用办公软件打开
           </div>
         </el-form-item>
       </el-form>
@@ -1702,11 +1706,13 @@ const stats = computed(() => {
   const cases = records.value.reduce((s, r) => s + (r.case_count || 0), 0)
   const mdCount = records.value.filter(r => r.has_md).length
   const xmindCount = records.value.filter(r => r.has_xmind).length
+  const xlsxCount = records.value.filter(r => r.has_xlsx).length
   return [
     { label: '生成次数', value: total, icon: 'MagicStick', bg: 'linear-gradient(135deg,#667eea,#764ba2)' },
     { label: '用例总数', value: cases, icon: 'Document', bg: 'linear-gradient(135deg,#11998e,#38ef7d)' },
     { label: 'MD 文件', value: mdCount, icon: 'Tickets', bg: 'linear-gradient(135deg,#2193b0,#6dd5ed)' },
     { label: 'XMind 文件', value: xmindCount, icon: 'Share', bg: 'linear-gradient(135deg,#f7971e,#ffd200)' },
+    { label: 'Excel 文件', value: xlsxCount, icon: 'DataBoard', bg: 'linear-gradient(135deg,#43e97b,#38f9d7)' },
   ]
 })
 

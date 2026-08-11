@@ -34,14 +34,20 @@ class BrowserTool:
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
 
-    async def _init_context(self):
-        """为当前请求创建独立 Context 和 Page。"""
-        self.context = await self._browser.new_context(
+    async def _init_context(self, storage_state=None):
+        """为当前请求创建独立 Context 和 Page。
+        storage_state: 可传文件路径(str)或状态字典，用于恢复登录态。
+        """
+        ctx_opts = dict(
             viewport={"width": 1920, "height": 1080},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         )
+        if storage_state:
+            ctx_opts["storage_state"] = storage_state
+        self.context = await self._browser.new_context(**ctx_opts)
         self.page = await self.context.new_page()
-        logger.debug(f"New browser context created for {self.browser_type}")
+        logger.debug(f"New browser context created for {self.browser_type}"
+                     + (" (with storage_state)" if storage_state else ""))
 
     async def navigate(self, url: str, timeout: int = 60000):
         # 根据 URL 自动判断是否是移动端页面，切换 UA
@@ -74,18 +80,22 @@ class BrowserTool:
     async def _scroll_to_load(self):
         """分段滚动页面到底部，触发懒加载内容。
         策略：
-        - 每步滚动一屏，等待 JS 渲染
+        - 每步滚动一屏，等待 JS 渲染 + MutationObserver 稳定
         - 检测页面高度变化，有新内容时额外等待
-        - 连续两步高度不变则认为内容已全部加载
-        - 最多滚动 5 屏（页面元素抓取只需首屏内容，不做全量懒加载）
+        - 连续 3 步高度不变则认为内容已全部加载
+        - 最多滚动 12 屏（覆盖常见长列表/无限滚动页面）
+        - 自动检测并等待 Loading 动画消失
         """
         try:
+            # ── 智能等待：Loading / 骨架屏消失 ──
+            await self._wait_loading_disappear()
+
             viewport_height = await self.page.evaluate("() => window.innerHeight") or 1080
             page_height     = await self.page.evaluate("() => document.body.scrollHeight")
             current_pos     = 0
-            max_scrolls     = 5
+            max_scrolls     = 12    # 从 5 增加到 12，覆盖长列表页面
             scroll_count    = 0
-            unchanged_count = 0   # 连续高度未变计数
+            unchanged_count = 0     # 连续高度未变计数
 
             logger.info(f"开始滚动加载，页面总高度: {page_height}px，视口: {viewport_height}px")
 
@@ -93,36 +103,111 @@ class BrowserTool:
                 next_pos = current_pos + viewport_height
                 await self.page.evaluate(f"window.scrollTo({{top: {next_pos}, behavior: 'smooth'}})")
 
-                # 等待渲染，不用等 networkidle（避免 SPA 轮询导致永久等待）
+                # 等待 JS 渲染 + DOM 稳定
                 await self.page.wait_for_timeout(600)
+                await self._wait_dom_stable(timeout=800)
 
                 new_height = await self.page.evaluate("() => document.body.scrollHeight")
                 if new_height > page_height:
                     logger.debug(f"页面高度增加 {page_height}→{new_height}px，等待内容稳定...")
                     page_height     = new_height
                     unchanged_count = 0
-                    await self.page.wait_for_timeout(800)
+                    # 新内容较多时，等待更久并再次检查 Loading
+                    await self.page.wait_for_timeout(1000)
+                    await self._wait_loading_disappear()
                 else:
                     unchanged_count += 1
 
                 current_pos   = next_pos
                 scroll_count += 1
 
-                # 已滚到底或连续2步无新内容 → 结束
-                if current_pos >= page_height or unchanged_count >= 2:
+                # 已滚到底或连续 3 步无新内容 → 结束（从 2 步放宽到 3 步，给懒加载更多机会）
+                if current_pos >= page_height or unchanged_count >= 3:
                     break
 
             logger.info(f"滚动完成，共滚动 {scroll_count} 屏，最终页面高度: {page_height}px")
 
             # 停在底部等内容稳定，然后回顶
             await self.page.wait_for_timeout(500)
+            await self._wait_dom_stable(timeout=800)
             await self.page.evaluate("window.scrollTo(0, 0)")
             await self.page.wait_for_timeout(500)
 
         except Exception as e:
             logger.warning(f"滚动加载失败（不影响主流程）: {e}")
 
+    async def _wait_loading_disappear(self, timeout: int = 5000):
+        """等待页面 Loading 动画 / 骨架屏消失。"""
+        try:
+            await self.page.evaluate("""
+                async (timeout) => {
+                    const start = Date.now();
+                    const checkInterval = 300;
+                    const loaders = [
+                        '[class*="loading"]', '[class*="spinner"]', '[class*="Loading"]',
+                        '[class*="skeleton"]', '[class*="Skeleton"]', '[class*="mask"]',
+                        '.el-loading-mask', '.ant-spin', '.n-spin', '.van-loading',
+                        '[role="progressbar"]', '.loading-text', '.loader'
+                    ];
+                    while (Date.now() - start < timeout) {
+                        let allHidden = true;
+                        for (const sel of loaders) {
+                            try {
+                                const els = document.querySelectorAll(sel);
+                                for (const el of els) {
+                                    const style = window.getComputedStyle(el);
+                                    const visible = el.offsetParent !== null &&
+                                        style.display !== 'none' &&
+                                        style.visibility !== 'hidden' &&
+                                        parseFloat(style.opacity) > 0.1;
+                                    if (visible) { allHidden = false; break; }
+                                }
+                            } catch(e) { /* ignore invalid selectors */ }
+                            if (!allHidden) break;
+                        }
+                        if (allHidden) break;
+                        await new Promise(r => setTimeout(r, checkInterval));
+                    }
+                }
+            """, timeout)
+        except Exception as e:
+            logger.debug(f"等待 Loading 消失时出错（不影响主流程）: {e}")
+
+    async def _wait_dom_stable(self, timeout: int = 1000):
+        """通过 MutationObserver 等待 DOM 稳定（无新增节点）。"""
+        try:
+            await self.page.evaluate(f"""
+                async (timeout) => {{
+                    const start = Date.now();
+                    let lastChange = start;
+                    const observer = new MutationObserver(() => {{ lastChange = Date.now(); }});
+                    observer.observe(document.body, {{
+                        childList: true, subtree: true,
+                        attributes: false, characterData: false
+                    }});
+                    while (Date.now() - start < timeout) {{
+                        await new Promise(r => setTimeout(r, 200));
+                        if (Date.now() - lastChange > 200) break;  // 200ms 无变化则稳定
+                    }}
+                    observer.disconnect();
+                }}
+            """, timeout)
+        except Exception as e:
+            logger.debug(f"等待 DOM 稳定时出错（不影响主流程）: {e}")
+
     async def capture_elements(self) -> List[Dict[str, Any]]:
+        """抓取页面交互元素 + 语义文字节点。
+        优化：
+        - 抓取前智能等待 Loading 消失 + DOM 稳定
+        - 选择器优先级：data-testid > id > aria-label > name > placeholder > class > tag
+        - 过滤不可见/全屏容器元素
+        - 语义文字节点始终追加
+        - 交互元素 < 8 时自动重试（放宽阈值）
+        """
+        # ── 抓取前：等待页面就绪 ──
+        await self._wait_loading_disappear()
+        await self._wait_dom_stable(timeout=1200)
+
         debug_script = """
         () => {
             return {
@@ -143,90 +228,174 @@ class BrowserTool:
         elements_script = """
         () => {
             const elements = [];
-            const interactiveTags = ['input', 'button', 'a', 'select', 'textarea', 'checkbox', 'radio', 'option', 'table', 'div', 'span', 'img', 'iframe'];
+            const viewW = window.innerWidth;
+            const viewH = window.innerHeight;
+            const interactiveTags = ['input', 'button', 'a', 'select', 'textarea', 'option', 'table', 'img', 'iframe'];
 
+            // ── 第一批：真正的交互元素 ──
             document.querySelectorAll(interactiveTags.join(',')).forEach(el => {
                 const tag = el.tagName.toLowerCase();
+                const rect = el.getBoundingClientRect();
+
+                // 跳过不可见元素
+                if (rect.width <= 0 || rect.height <= 0) return;
+                const style = window.getComputedStyle(el);
+                if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) < 0.1) return;
+
+                // 跳过全屏容器 (div/span > 80%视口)
+                if (rect.width > viewW * 0.8 && rect.height > viewH * 0.8) return;
+
                 const type = el.type || '';
                 const role = el.getAttribute('role') || '';
                 const id = el.id || '';
-                const name = el.name || el.getAttribute('data-testid') || '';
-                const text = el.innerText || el.value || '';
+                const name = el.name || '';
+                const text = (el.innerText || el.value || '').trim();
                 const placeholder = el.placeholder || '';
                 const href = el.href || '';
-                const rect = el.getBoundingClientRect();
 
-                const viewW = window.innerWidth;
-                const viewH = window.innerHeight;
-                const isLargeContainer = (tag === 'div' || tag === 'span') &&
-                    rect.width > viewW * 0.8 && rect.height > viewH * 0.8;
-
-                if (rect.width > 0 && rect.height > 0 && !isLargeContainer) {
-                    elements.push({
-                        tag, type, role, id, name,
-                        text: text.substring(0, 100),
-                        placeholder, href,
-                        x: rect.x, y: rect.y,
-                        width: rect.width, height: rect.height,
-                        selector: get_selector(el)
-                    });
-                }
+                elements.push({
+                    tag, type, role, id, name,
+                    text: text.substring(0, 100),
+                    placeholder, href,
+                    x: rect.x, y: rect.y,
+                    width: rect.width, height: rect.height,
+                    selector: get_selector(el)
+                });
             });
 
+            // ── 第二批：有交互属性的 div/span（role=button, tabindex, onclick, data-* 等）──
+            document.querySelectorAll('div, span, li').forEach(el => {
+                const hasInteraction =
+                    el.getAttribute('role') === 'button' ||
+                    el.hasAttribute('tabindex') ||
+                    el.hasAttribute('onclick') ||
+                    el.hasAttribute('data-testid') ||
+                    el.hasAttribute('data-action') ||
+                    el.className && (
+                        el.className.includes('btn') ||
+                        el.className.includes('click') ||
+                        el.className.includes('tab') ||
+                        el.className.includes('menu') ||
+                        el.className.includes('card') ||
+                        el.className.includes('item')
+                    );
+
+                if (!hasInteraction) return;
+
+                const rect = el.getBoundingClientRect();
+                if (rect.width <= 0 || rect.height <= 0) return;
+                const style = window.getComputedStyle(el);
+                if (style.display === 'none' || style.visibility === 'hidden') return;
+
+                const tag = el.tagName.toLowerCase();
+                const text = (el.innerText || '').trim();
+                if (!text) return;  // 无文本的交互 div 不收录
+
+                elements.push({
+                    tag, type: '', role: el.getAttribute('role') || '',
+                    id: el.id || '', name: el.getAttribute('data-testid') || '',
+                    text: text.substring(0, 100),
+                    placeholder: '', href: '',
+                    x: rect.x, y: rect.y,
+                    width: rect.width, height: rect.height,
+                    selector: get_selector(el)
+                });
+            });
+
+            // ── Selector 生成（优先级：data-testid > id > aria-label > name > placeholder > class > tag）──
             function get_selector(el) {
-                if (el.id) return `#${el.id}`;
+                const testId = el.getAttribute('data-testid');
+                if (testId) return `[data-testid="${testId}"]`;
+
+                if (el.id && !/^\\d/.test(el.id)) return `#${CSS.escape(el.id)}`;
+
+                const ariaLabel = el.getAttribute('aria-label');
+                if (ariaLabel) return `${el.tagName.toLowerCase()}[aria-label="${ariaLabel}"]`;
+
                 if (el.name) return `${el.tagName.toLowerCase()}[name="${el.name}"]`;
-                if (el.className) return `${el.tagName.toLowerCase()}.${el.className.split(' ').join('.')}`;
+
+                const ph = el.getAttribute('placeholder');
+                if (ph) return `${el.tagName.toLowerCase()}[placeholder="${ph}"]`;
+
+                if (el.className && typeof el.className === 'string') {
+                    const cls = el.className.trim().split(/\\s+/).filter(c => c && !/^(active|hover|focus|selected|disabled)$/i.test(c)).slice(0, 2).join('.');
+                    if (cls) return `${el.tagName.toLowerCase()}.${cls}`;
+                }
+
                 return el.tagName.toLowerCase();
             }
 
-            return elements;
+            // ── 去重：相同 selector + 相同 text → 只保留可见的 ──
+            const seen = new Map();
+            const deduped = [];
+            for (const el of elements) {
+                const key = el.selector + '|' + el.text;
+                const existing = seen.get(key);
+                if (existing) {
+                    // 保留面积更大或位置更靠上的
+                    if (el.width * el.height > existing.width * existing.height) {
+                        deduped[deduped.indexOf(existing)] = el;
+                        seen.set(key, el);
+                    }
+                } else {
+                    seen.set(key, el);
+                    deduped.push(el);
+                }
+            }
+
+            return deduped;
         }
         """
         elements = await self.page.evaluate(elements_script)
         logger.info(f"Captured {len(elements)} interactive elements")
 
-        # 元素太少说明页面还没渲染完，等待后重试一次
-        if len(elements) < 5:
+        # 元素太少说明页面还没渲染完，等待后重试（阈值从 5 提高到 8）
+        if len(elements) < 8:
             logger.warning(f"Too few elements ({len(elements)}), waiting 3s and retrying...")
             await self.page.wait_for_timeout(3000)
+            await self._wait_loading_disappear()
+            await self._wait_dom_stable(timeout=1200)
             elements = await self.page.evaluate(elements_script)
-            logger.info(f"Retry captured {len(elements)} interactive elements")
+            logger.info(f"Retry 1 captured {len(elements)} interactive elements")
+
+        if len(elements) < 5:
+            logger.warning(f"Still too few ({len(elements)}), waiting 5s more and retrying...")
+            await self.page.wait_for_timeout(5000)
+            elements = await self.page.evaluate(elements_script)
+            logger.info(f"Retry 2 captured {len(elements)} interactive elements")
 
         # ── 补充文字内容节点（h/p/li/label/strong 等）──────────────────────────
-        # 无论交互元素数量多少，始终追加页面文字节点作为语义补充。
-        # 对于名师专区/课程列表等内容型页面，名师姓名、职称、简介均在文字节点里，
-        # 不补充这些内容 LLM 无法生成有意义的用例。
-        if True:  # 始终执行，替换原来的 len(elements) < 10 条件
-            logger.info("补充抓取页面文字节点（语义增强）...")
-            text_script = """
-            () => {
-                const texts = [];
-                const textTags = ['h1','h2','h3','h4','h5','h6','p','li','td','th','label','strong','dt','dd','span'];
-                document.querySelectorAll(textTags.join(',')).forEach(el => {
-                    const t = (el.innerText || '').trim();
-                    if (t.length > 5 && t.length < 500) {
-                        texts.push({
-                            tag: el.tagName.toLowerCase(),
-                            text: t.substring(0, 200),
-                            type: '', role: '', id: el.id || '', name: '',
-                            placeholder: '', href: '',
-                            x: 0, y: 0, width: 100, height: 20,
-                            selector: el.tagName.toLowerCase()
-                        });
-                    }
-                });
-                // 去重（相同文本只保留一条）
-                const seen = new Set();
-                return texts.filter(t => {
-                    if (seen.has(t.text)) return false;
-                    seen.add(t.text); return true;
-                }).slice(0, 300);  // 最多300条文字节点
-            }
-            """
-            text_elements = await self.page.evaluate(text_script)
-            logger.info(f"补充文字节点: {len(text_elements)} 条")
-            elements = elements + text_elements
+        # 始终追加页面文字节点作为语义补充。
+        # 对于内容型页面（如电商、SaaS 后台等），页面的文字信息是 AI 生成用例的关键输入。
+        logger.info("补充抓取页面文字节点（语义增强）...")
+        text_script = """
+        () => {
+            const texts = [];
+            const textTags = ['h1','h2','h3','h4','h5','h6','p','li','td','th','label','strong','dt','dd','span'];
+            document.querySelectorAll(textTags.join(',')).forEach(el => {
+                const t = (el.innerText || '').trim();
+                if (t.length > 3 && t.length < 500) {
+                    texts.push({
+                        tag: el.tagName.toLowerCase(),
+                        text: t.substring(0, 200),
+                        type: '', role: '', id: el.id || '', name: '',
+                        placeholder: '', href: '',
+                        x: 0, y: 0, width: 100, height: 20,
+                        selector: el.tagName.toLowerCase()
+                    });
+                }
+            });
+            // 去重（相同文本只保留一条）
+            const seen = new Set();
+            return texts.filter(t => {
+                if (seen.has(t.text)) return false;
+                seen.add(t.text); return true;
+            }).slice(0, 300);  // 最多300条文字节点
+        }
+        """
+        text_elements = await self.page.evaluate(text_script)
+        logger.info(f"补充文字节点: {len(text_elements)} 条")
+        elements = elements + text_elements
 
         return elements
 
@@ -310,16 +479,17 @@ class BrowserPool:
                 logger.info(f"Browser {browser_type} launched (shared instance)")
         return self._browsers[browser_type]
 
-    async def acquire(self, browser_type: str = "chromium") -> "BrowserTool":
+    async def acquire(self, browser_type: str = "chromium", storage_state=None) -> "BrowserTool":
         """
         获取一个独立 Context 的 BrowserTool 实例。
+        storage_state: 文件路径或状态字典，用于恢复登录态（方案三）。
         调用方必须在使用完毕后调用 release(bt) 或使用 async with 语法。
         """
         await self._semaphore.acquire()
         try:
             browser = await self._ensure_browser(browser_type)
             bt = BrowserTool(browser, browser_type)
-            await bt._init_context()
+            await bt._init_context(storage_state=storage_state)
             return bt
         except Exception:
             self._semaphore.release()

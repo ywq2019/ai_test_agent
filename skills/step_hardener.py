@@ -42,6 +42,7 @@ _GRADE_A = [
     r'\[data-testid=',
     r'\[data-test=',
     r'\[data-cy=',
+    r'\[data-',          # 通用 data-* 自定义属性（data-id / data-key / data-type 等均属语义锚点）
     r'\[aria-label=',
     r'\[name=',
     r'\[placeholder=',
@@ -365,18 +366,30 @@ def harden_steps(steps: list) -> list:
 
 async def ai_enrich_selectors(steps: list, timeout_secs: int = 30) -> list:
     """
-    对规则推导覆盖不足的步骤（robustness=D 且 selectors 只有 1 个），
-    让 LLM 根据 description/value 生成更多候选 selector。
+    对规则推导覆盖不足的步骤，让 LLM 根据 description/value/action 生成候选 selector。
+
+    覆盖两类场景：
+    1. robustness=D 且 selectors ≤1（有 selector 但等级低）
+    2. selector 为空 且 description/value 有语义信息（AI 生成用例常见）
 
     失败时静默返回原列表，不影响主流程。
     """
-    # 找出需要 AI 增强的步骤（D 级且只有 1 个候选）
+    _skip_actions = ("navigate", "wait", "wait_for", "evaluate", "screenshot",
+                     "assert_url", "assert_title", "press")
     need_ai = [
         (i, s) for i, s in enumerate(steps)
-        if s.get("robustness") == "D"
-        and len(s.get("selectors") or []) <= 1
-        and s.get("selector")
-        and s.get("action") not in ("navigate", "wait", "evaluate")
+        if s.get("action") not in _skip_actions
+        and (
+            # 场景1：有 selector 但等级低
+            (s.get("robustness") == "D"
+             and len(s.get("selectors") or []) <= 1
+             and s.get("selector"))
+            or
+            # 场景2：无 selector，但描述有足够语义（去掉标记前缀后有内容）
+            (not s.get("selector")
+             and (s.get("description", "").replace("[需补充selector]", "").strip()
+                  or s.get("value", "").strip()))
+        )
     ]
     if not need_ai:
         return steps
@@ -387,27 +400,33 @@ async def ai_enrich_selectors(steps: list, timeout_secs: int = 30) -> list:
         # 批量构建 prompt
         step_lines = []
         for idx, (i, s) in enumerate(need_ai):
+            # 对空 selector 的步骤，description 是主要信息源
+            desc = s.get("description", "").replace("[需补充selector]", "").strip()
             step_lines.append(
                 f"{idx+1}. action={s['action']} "
-                f"selector={s['selector']!r} "
-                f"description={s.get('description','')!r} "
+                f"selector={s.get('selector','')!r} "
+                f"description={desc!r} "
                 f"value={s.get('value','')!r}"
             )
 
         system = (
-            "You are a Playwright selector expert. "
-            "For each step, generate 3-5 alternative CSS selectors ordered by stability "
-            "(data-testid/aria-label first, then :has-text, then class, then id). "
-            "Output ONLY valid JSON array of arrays. No explanation."
+            "You are a Playwright/Selenium selector expert. "
+            "For each step, generate 3-5 CSS selectors ordered by stability:\n"
+            "  Priority 1: [data-testid=...], [aria-label=...], [name=...], [placeholder=...]\n"
+            "  Priority 2: button:has-text('...'), input:has-text('...'), :has-text('...')\n"
+            "  Priority 3: .className, tag[attr=...]\n"
+            "  Priority 4: #id\n"
+            "When selector is empty, infer from description and value fields.\n"
+            "Output ONLY valid JSON array of arrays (one inner array per step). No explanation."
         )
         user = (
-            "Generate alternative selectors for these steps:\n"
+            "Generate selectors for these test steps:\n"
             + "\n".join(step_lines)
             + "\n\nOutput format: [[\"sel1\",\"sel2\",...], [\"sel1\",...], ...]"
-            + "\nOne inner array per step, same order."
+            + "\nOne inner array per step, same order. Return [] for navigate/wait steps."
         )
 
-        raw = await call_llm(system, user, max_tokens=800, timeout_secs=timeout_secs)
+        raw = await call_llm(system, user, max_tokens=1200, timeout_secs=timeout_secs)
         raw = raw.strip()
 
         # 提取 JSON 数组
@@ -433,10 +452,14 @@ async def ai_enrich_selectors(steps: list, timeout_secs: int = 30) -> list:
                     seen.add(sel)
             merged.sort(key=lambda s: {"A": 0, "B": 1, "C": 2, "D": 3}.get(selector_grade(s), 4))
             steps_result[i]["selectors"] = merged
+            # 同步更新 selector 主值（如果原来为空，取推导结果的第一个）
+            if merged and not steps_result[i].get("selector"):
+                steps_result[i]["selector"] = merged[0]
             if merged:
                 steps_result[i]["robustness"] = selector_grade(merged[0])
 
-        logger.info(f"[step_hardener] AI 增强了 {len(need_ai)} 个 D 级步骤的候选 selector")
+        empty_count = sum(1 for _, s in need_ai if not s.get("selector"))
+        logger.info(f"[step_hardener] AI 增强了 {len(need_ai)} 个步骤的候选 selector（含 {empty_count} 个空 selector）")
         return steps_result
 
     except Exception as e:

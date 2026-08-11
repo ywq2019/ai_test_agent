@@ -14,6 +14,8 @@ import os
 from typing import Any, Callable, Dict, List, Optional
 from loguru import logger
 
+from skills.step_hardener import harden_and_enrich
+
 
 def _make_step_json(action: str, selector: str = "", value: str = "", description: str = "") -> dict:
     """构建结构化的步骤 JSON 对象（与 tools/action_schema.py 兼容）。"""
@@ -171,7 +173,29 @@ class CaseGenerator:
         document_data: Optional[Dict[str, Any]] = None,
         requirements: List[str] = None,
         progress_cb: Optional[Callable] = None,
+        user_prompt: str = "",
+        focus_modules: List[str] = None,
+        target_count: int = 0,
     ) -> List[Dict[str, Any]]:
+        """
+        生成测试用例。
+
+        新增参数：
+          user_prompt    — 用户自然语言描述（测试重点、背景、特殊要求）
+          focus_modules  — 限定生成范围的模块名列表，为空则全页面生成
+          target_count   — 期望生成的用例总数（0 表示不限制，由 LLM 自行决定）
+        """
+        focus_modules = focus_modules or []
+        _hint = ""
+        if user_prompt:
+            _hint += f"\n【用户补充说明】{user_prompt}"
+        if focus_modules:
+            _hint += f"\n【仅生成以下模块的用例】{'、'.join(focus_modules)}"
+        if target_count > 0:
+            _hint += f"\n【期望用例总数】约 {target_count} 条（按模块均匀分配）"
+        if _hint:
+            logger.info(f"[generate_cases] 用户定制提示:{_hint.strip()}")
+
         logger.info("Generating test cases via staged LLM...")
 
         # 累计已生成的用例数，用于进度推送
@@ -189,7 +213,12 @@ class CaseGenerator:
         await _p(3, "准备生成...")
 
         try:
-            cases = await self._generate_staged(url, page_elements, document_data, _p)
+            cases = await self._generate_staged(
+                url, page_elements, document_data, _p,
+                user_prompt=_hint,
+                focus_modules=focus_modules,
+                target_count=target_count,
+            )
             if cases:
                 # ── 为每条用例解析 steps → steps_json ──
                 for case in cases:
@@ -199,6 +228,19 @@ class CaseGenerator:
                             case["steps_json"] = self.parse_steps_to_json(steps_text, url)
                         else:
                             case["steps_json"] = []
+
+                # ── 健壮化：为 AI 生成的 steps_json 补齐候选 selector 和评级 ──
+                await _p(96, "正在健壮化用例 selector...")
+                hardened_count = 0
+                for case in cases:
+                    if case.get("steps_json"):
+                        try:
+                            case["steps_json"] = await harden_and_enrich(case["steps_json"], use_ai=True)
+                            hardened_count += 1
+                        except Exception as e:
+                            logger.warning(f"用例「{case.get('name','')}」健壮化失败: {e}")
+                if hardened_count:
+                    logger.info(f"健壮化完成: {hardened_count}/{len(cases)} 条用例")
 
                 await _p(100, f"生成完成，共 {len(cases)} 条用例")
                 logger.info(f"Staged LLM generated {len(cases)} test cases")
@@ -212,6 +254,14 @@ class CaseGenerator:
                 for c in doc_cases:
                     if not c.get("steps_json"):
                         c["steps_json"] = self.parse_steps_to_json(c.get("steps", ""), url)
+                # ── 健壮化 ──
+                await _p(96, "正在健壮化用例 selector...")
+                for c in doc_cases:
+                    if c.get("steps_json"):
+                        try:
+                            c["steps_json"] = await harden_and_enrich(c["steps_json"], use_ai=True)
+                        except Exception as e:
+                            logger.warning(f"用例「{c.get('name','')}」健壮化失败: {e}")
                 await _p(100, f"生成完成，共 {len(doc_cases)} 条用例")
                 logger.info(f"Doc-driven fallback generated {len(doc_cases)} test cases")
                 return doc_cases
@@ -234,6 +284,15 @@ class CaseGenerator:
         for c in cases:
             if not c.get("steps_json"):
                 c["steps_json"] = self.parse_steps_to_json(c.get("steps", ""), url)
+        # ── 健壮化 ──
+        await _p(96, "正在健壮化用例 selector...")
+        has_steps = [c for c in cases if c.get("steps_json")]
+        if has_steps:
+            for c in has_steps:
+                try:
+                    c["steps_json"] = await harden_and_enrich(c["steps_json"], use_ai=True)
+                except Exception as e:
+                    logger.warning(f"用例「{c.get('name','')}」健壮化失败: {e}")
         # ── 无特定元素可生成时，返回页面级基础用例 ──
         if not cases:
             cases = self._generate_page_level_cases(url, page_elements)
@@ -253,9 +312,16 @@ class CaseGenerator:
         page_elements: List[Dict[str, Any]],
         document_data: Optional[Dict[str, Any]],
         _p: Callable,
+        user_prompt: str = "",
+        focus_modules: List[str] = None,
+        target_count: int = 0,
     ) -> List[Dict[str, Any]]:
-        elements_summary = self._build_elements_summary(page_elements)
+        focus_modules = focus_modules or []
+        index_map, elements_summary = self._build_indexed_elements(page_elements)
         doc_context = self._build_doc_context(document_data)
+        # 将用户提示追加到 doc_context，让各子调用都能感知
+        if user_prompt:
+            doc_context = doc_context + "\n" + user_prompt if doc_context else user_prompt
 
         # 页面元素太少（≤3个）时，跳过元素分析，直接以文档为主生成
         FEW_ELEMENTS = len(page_elements) <= 3
@@ -266,7 +332,7 @@ class CaseGenerator:
 
         # ── 文档中有详细用例说明？优先提取映射为可执行用例 ──
         doc_cases_mapped = []
-        if document_data and self._is_doc_test_case_rich(document_data):
+        if not focus_modules and document_data and self._is_doc_test_case_rich(document_data):
             logger.info("检测到文档包含详细用例说明，优先从文档提取映射...")
             await _p(6, "检测到文档包含用例说明，正在提取并映射为可执行用例...")
             try:
@@ -284,8 +350,32 @@ class CaseGenerator:
             await _p(20, "正在调用 AI 整体生成用例...")
             return await self._generate_single_call(url, elements_summary, doc_context)
 
+        # ── 按用户指定模块过滤 ──
+        if focus_modules:
+            focus_lower = {f.strip().lower() for f in focus_modules}
+            filtered = [m for m in modules if m.get("name", "").strip().lower() in focus_lower]
+            if filtered:
+                logger.info(f"按用户指定过滤模块: {[m['name'] for m in filtered]}")
+                modules = filtered
+            else:
+                # 模糊匹配
+                filtered = [
+                    m for m in modules
+                    if any(fl in m.get("name", "").lower() or m.get("name", "").lower() in fl
+                           for fl in focus_lower)
+                ]
+                if filtered:
+                    logger.info(f"模糊匹配指定模块: {[m['name'] for m in filtered]}")
+                    modules = filtered
+                else:
+                    logger.warning(f"指定模块 {focus_modules} 在页面中未找到，将生成全部模块")
+
         logger.info(f"Extracted {len(modules)} modules: {[m['name'] for m in modules]}")
         await _p(20, f"识别到 {len(modules)} 个功能模块，开始并行生成...")
+
+        # 每个模块的期望用例数
+        # - 不设硬下限，完全遵从用户意图（少于1条时退化为0，让LLM自行决定）
+        per_module_count = round(target_count / len(modules)) if target_count > 0 else 0
 
         sem = asyncio.Semaphore(2)
         counter = {"done": 0, "total": len(modules)}
@@ -297,10 +387,18 @@ class CaseGenerator:
         async def _gen_module(idx: int, module: Dict) -> List[Dict]:
             async with sem:
                 module_name = module.get("name", f"模块{idx + 1}")
-                module_elements = module.get("elements", [])
+                # 优先从 element_ids 取真实元素；兜底兼容旧格式 elements（字符串列表）
+                element_ids = module.get("element_ids") or []
+                if element_ids:
+                    real_elements = self._resolve_module_elements(element_ids, index_map)
+                else:
+                    # 兜底：旧格式直接用字符串当 selector
+                    real_elements = [{"selector": s, "text": "", "tag": "", "placeholder": "", "name": ""}
+                                     for s in (module.get("elements") or []) if isinstance(s, str)]
                 try:
                     cases = await self._generate_cases_for_module(
-                        url, module_name, module_elements, doc_context
+                        url, module_name, real_elements, doc_context,
+                        per_module_count=per_module_count,
                     )
                     _cases_so_far.extend(cases)
                     counter["done"] += 1
@@ -343,8 +441,8 @@ class CaseGenerator:
                 f" = {len(all_cases)} 条"
             )
 
-        # ── 跨模块端到端流程测试 ──
-        if len(modules) >= 2 and not doc_cases_mapped:
+        # ── 跨模块端到端流程测试（target_count > 0 时不额外追加，避免超出数量）──
+        if len(modules) >= 2 and not doc_cases_mapped and target_count == 0:
             await _p(93, "正在生成跨模块端到端流程用例...")
             try:
                 flow_cases = await self._generate_flow_tests(
@@ -359,6 +457,15 @@ class CaseGenerator:
         else:
             await _p(95, f"生成完成，共 {len(all_cases)} 条用例")
 
+        # ── 最终按 target_count 截断（精确控制总数） ──────────────────────────────
+        if target_count > 0 and len(all_cases) > target_count:
+            # 优先保留高优先级用例：P0 > P1 > P2
+            _prio = {"P0": 0, "P1": 1, "P2": 2}
+            all_cases.sort(key=lambda c: _prio.get(c.get("priority", "P2"), 2))
+            logger.info(f"按 target_count={target_count} 截断：{len(all_cases)} → {target_count} 条")
+            all_cases = all_cases[:target_count]
+            await _p(95, f"已按设定截断至 {target_count} 条（P0 优先保留）", len(all_cases))
+
         for i, case in enumerate(all_cases):
             case["id"] = f"TC{i + 1:03d}"
 
@@ -372,30 +479,33 @@ class CaseGenerator:
     ) -> List[Dict]:
         system_prompt = (
             "You are a senior UI analyst specializing in test case design. "
-            "Analyze page elements and group them into logical functional modules. "
-            "Consider both visible UI components AND document-implied features. "
+            "Analyze page elements (each prefixed with a numeric ID like [001]) and group them into logical functional modules. "
+            "Return ONLY the numeric IDs — never invent new selectors. "
             "Output ONLY valid JSON. No markdown, no explanation."
         )
-        prompt = f"""分析以下页面元素和需求文档，归纳为 3-8 个逻辑功能模块。
+        prompt = f"""分析以下页面元素（每个元素带有编号如 [001]），归纳为 3-8 个逻辑功能模块。
 
-页面元素（按交互元素优先排列）：
+页面元素（带编号）：
 {elements_summary}
 
 {doc_context}
 
-【模块划分原则】
+【分组原则】
 1. 每个模块聚焦一个独立功能（如登录、搜索、表单提交、导航）
-2. 不要遗漏页面上任何交互元素（按钮、输入框、链接、下拉框）
-3. 需求文档中提到的功能即使页面元素不完整，也应单独成模块
-4. 关联紧密的元素归入同一模块（如"用户名+密码+登录按钮" → 登录模块）
-5. 利用元素的 text/placeholder/label 语义信息辅助理解元素用途，更准确地进行模块分组
+2. 每个元素只能归入一个模块
+3. 关联紧密的元素归入同一模块（如"用户名+密码+登录按钮" → 登录模块）
+4. elements 数组里填元素编号（数字），不要填 selector 字符串
 
 只输出纯JSON：
 {{
   "modules": [
     {{
       "name": "登录模块",
-      "elements": ["#username", "#password", "button[type=submit]"]
+      "element_ids": [1, 2, 5]
+    }},
+    {{
+      "name": "搜索模块",
+      "element_ids": [8, 9]
     }}
   ]
 }}"""
@@ -417,8 +527,9 @@ class CaseGenerator:
         self,
         url: str,
         module_name: str,
-        module_elements: List[str],
+        module_elements: List,           # 可以是真实元素 dict 列表，也兼容旧格式字符串列表
         doc_context: str,
+        per_module_count: int = 0,
     ) -> List[Dict]:
         system_prompt = (
             "You are a senior QA automation engineer. "
@@ -426,47 +537,106 @@ class CaseGenerator:
             "Cover happy paths, validation errors, edge cases, and boundary conditions. "
             "Output ONLY a single valid JSON object. No markdown, no explanation."
         )
-        selectors_str = "\n".join(f"  - {s}" for s in module_elements) if module_elements else "  （见完整元素列表）"
+
+        # ── 构建本模块真实元素的展示文本 ──────────────────────────────
+        elem_lines = []
+        for e in (module_elements or []):
+            if isinstance(e, dict):
+                sel   = e.get("selector", "").strip()
+                text  = (e.get("text", "") or "").strip()[:40]
+                ph    = (e.get("placeholder", "") or "").strip()[:40]
+                name  = (e.get("name", "") or "").strip()
+                tag   = e.get("tag", "")
+                typ   = e.get("type", "")
+                label = (e.get("label", "") or "").strip()[:40]
+
+                # 构建人类可读的描述 + 必须使用的真实 selector
+                desc_parts = []
+                if text:
+                    desc_parts.append(f"文本={text!r}")
+                if ph:
+                    desc_parts.append(f"placeholder={ph!r}")
+                if label:
+                    desc_parts.append(f"label={label!r}")
+                if name:
+                    desc_parts.append(f"name={name!r}")
+                desc = "、".join(desc_parts) if desc_parts else "（无语义描述）"
+
+                # 构建候选 selector（优先真实 selector，补充 :has-text 作为备选）
+                sel_candidates = []
+                if sel and sel not in ("a", "button", "input", "select", "textarea", ""):
+                    sel_candidates.append(sel)
+                if text and tag in ("button", "a"):
+                    sel_candidates.append(f'{tag}:has-text("{text[:20]}")')
+                if ph:
+                    sel_candidates.append(f'{tag or "input"}[placeholder="{ph}"]')
+                if name:
+                    sel_candidates.append(f'[name="{name}"]')
+
+                if sel_candidates:
+                    elem_lines.append(
+                        f"  • {tag}[{typ}] {desc} → 【真实selector】{sel_candidates[0]}"
+                        + (f"  备选: {sel_candidates[1]}" if len(sel_candidates) > 1 else "")
+                    )
+            else:
+                # 旧格式：直接是 selector 字符串
+                if str(e).strip():
+                    elem_lines.append(f"  • {e}")
+
+        if elem_lines:
+            selectors_str = "\n".join(elem_lines)
+        else:
+            selectors_str = "  （未找到具体元素，请根据页面 URL 和文档推断）"
+
+        # 动态用例数量要求
+        count_hint = (
+            f"- 【严格限制】只生成 {per_module_count} 条用例，不多不少"
+            if per_module_count > 0
+            else "- 生成 8-12 条用例，覆盖以下类型："
+        )
+
         prompt = f"""为页面模块「{module_name}」生成 UI 自动化测试用例。
 
 目标页面：{url or '（未提供）'}
-本模块关键元素：
+本模块真实页面元素（selector 来自实际页面抓取，必须直接使用，不得修改或替换）：
 {selectors_str}
 
 {doc_context}
 
-【CSS Selector 规范（必须遵守）】
-- 严禁使用 nth-child 选择器（如 :nth-child(1), div:nth-child(3) > a:nth-child(2)）！这些选择器极易因 DOM 结构变化而失效
-- 优先使用：id（#login-btn）、name、class（.submit-btn）、[data-*] 属性、[type=submit]、aria-label
-- 其次使用：语义化标签（button, input, a, form）配合属性值
-- 元素列表中如果只给出了 nth-child 选择器，请从元素描述中提取语义信息构造更好的选择器（例如：描述含"登录按钮" → 用 button:has-text("登录")）
-- 文本匹配选择器示例：button:has-text("登录"), a:has-text("首页"), input[placeholder="请输入用户名"]
+【Selector 使用规则（必须严格遵守）】
+- 步骤中的 selector 必须直接复制上方"【真实selector】"字段的值，不得自行编造
+- 如果一个步骤的目标元素在上方列表中有真实 selector，必须用那个，例如：
+    input[name="keyword"] → 直接写 selector: input[name="keyword"]
+    a.header2018-unloginlink.header2018-unloginlink1 → 直接写这个完整 selector
+- 断言步骤（验证文字/可见性）可以用 :has-text() 构造，如 p:has-text("错误提示")
+- 严禁使用 :nth-child、伪造的 #id、或任何未在上方列表中出现的 selector
 
 【生成要求】
-- 生成 8-12 条用例，覆盖以下类型：
+{count_hint}
   * P0-正向流程：标准操作路径，验证核心功能可用（2-3条）
   * P0-必填校验：空值/缺失必填项时的错误提示（2-3条）
   * P1-格式校验：非法格式输入（如邮箱缺@、手机号位数不足）（2-3条）
   * P1-边界值：最大/最小长度、特殊字符、空格处理（2-3条）
   * P2-异常场景：网络超时、重复提交、并发操作（1-2条）
-- 每个步骤必须包含具体 selector 和测试数据，示例：
-  "1. 找到用户名输入框（selector: #username），输入 'test@example.com'\\n2. 点击登录按钮（selector: button.submit）"
-- 预期结果必须可自动化断言，示例：
-  "页面跳转到 /home，顶部导航栏显示用户名 'test'"
-  "输入框下方显示红色提示'请输入有效的邮箱地址'"
-- 只针对「{module_name}」模块，不要生成其他模块的用例
+- 每个步骤格式：操作描述（selector: 真实selector值），示例：
+  "1. 找到关键词输入框（selector: input[name='keyword']），输入 '会计'
+   2. 点击搜索按钮（selector: input.header2018-submit）
+   3. 验证搜索结果出现（selector: .search-result-item）"
+- 校验/边界值用例也必须带 selector，不可只写"输入超长字符串"
+- 预期结果必须可自动化断言
+- 只针对「{module_name}」模块
 
 只输出纯JSON：
 {{
   "cases": [
     {{
-      "name": "登录-有效账号-登录成功",
+      "name": "搜索-关键词搜索-返回结果",
       "module": "{module_name}",
       "priority": "P0",
-      "preconditions": "用户已有有效账号，处于登录页",
-      "steps": "1. 找到用户名输入框（selector: #username），输入 'test@example.com'\\n2. 找到密码输入框（selector: #password），输入 'Pass1234'\\n3. 点击登录按钮（selector: button[type=submit]）",
-      "expected_results": "页面跳转到 /home，顶部导航栏显示用户名 'test'，URL包含 /home",
-      "element_selector": "button[type=submit]"
+      "preconditions": "用户在首页",
+      "steps": "1. 找到搜索框（selector: input[name=\\"keyword\\"]），输入 '会计'\\n2. 点击搜索按钮（selector: input.header2018-submit）\\n3. 验证搜索结果列表出现（selector: .result-list）",
+      "expected_results": "页面显示与'会计'相关的课程/讲师列表",
+      "element_selector": "input[name=\\"keyword\\"]"
     }}
   ]
 }}"""
@@ -1469,25 +1639,60 @@ class CaseGenerator:
     # 构建 prompt 辅助
     # ==================================================================
     def _build_elements_summary(self, elements: List[Dict[str, Any]]) -> str:
+        """构建给 LLM 的元素摘要文本（无编号版，用于不需要回查的场合）。"""
+        _, summary = self._build_indexed_elements(elements)
+        return summary
+
+    def _build_indexed_elements(
+        self, elements: List[Dict[str, Any]]
+    ) -> tuple:
+        """
+        构建带编号的元素列表，同时返回：
+          index_map: {编号(int) -> 元素 dict}  — 用于模块分组后回查真实 selector
+          summary:   str                        — 带编号的文本，传给 LLM
+
+        只选取有意义的交互元素（有 selector 且不是裸 tag 的），避免给 LLM
+        太多噪音，也避免 LLM 拿到裸 "a" / "button" 当作 selector 写进步骤。
+        """
         if not elements:
-            return "（无页面元素数据）"
-        # 按类型分组：交互元素（input/button/a/select 等）优先，文字节点补充语义
+            return {}, "（无页面元素数据）"
+
         interactive_tags = {"input", "button", "a", "select", "textarea"}
-        interactive = [e for e in elements if e.get("tag", "") in interactive_tags]
-        text_nodes   = [e for e in elements if e.get("tag", "") not in interactive_tags and e.get("text", "")]
-        # 最多取120个交互元素 + 100个文字节点，总量220；
-        # 列表型页面（名师专区/课程列表）以文字节点为主，确保每位教师的姓名/职称不丢失
-        selected = interactive[:120] + text_nodes[:100]
-        lines = []
-        for elem in selected:
+
+        # 过滤：保留交互元素，selector 不能是裸 tag（如 "a" "button"）
+        bare_tags = {"a", "button", "input", "select", "textarea", "div", "span", ""}
+        interactive = [
+            e for e in elements
+            if e.get("tag", "") in interactive_tags
+            and (e.get("selector", "") or "") not in bare_tags
+        ]
+        # 没有 selector 的但有语义信息的也保留（后面可用 :has-text 补）
+        interactive_no_sel = [
+            e for e in elements
+            if e.get("tag", "") in interactive_tags
+            and (e.get("selector", "") or "") in bare_tags
+            and ((e.get("text", "") or "").strip() or (e.get("placeholder", "") or "").strip())
+        ]
+        text_nodes = [
+            e for e in elements
+            if e.get("tag", "") not in interactive_tags and (e.get("text", "") or "").strip()
+        ]
+
+        selected = interactive[:120] + interactive_no_sel[:30] + text_nodes[:60]
+
+        index_map: dict = {}
+        lines: list = []
+        for idx, elem in enumerate(selected, start=1):
             tag = elem.get("tag", "")
             typ = elem.get("type", "")
-            text = (elem.get("text", "") or "").strip()[:30]
-            placeholder = (elem.get("placeholder", "") or "").strip()[:30]
-            label = (elem.get("label", "") or elem.get("aria_label", "") or "").strip()[:30]
+            text = (elem.get("text", "") or "").strip()[:40]
+            placeholder = (elem.get("placeholder", "") or "").strip()[:40]
+            label = (elem.get("label", "") or elem.get("aria_label", "") or "").strip()[:40]
             name = elem.get("name", "")
-            selector = elem.get("selector", "")
-            parts = [f"<{tag}"]
+            selector = (elem.get("selector", "") or "").strip()
+
+            # 构建给 LLM 的描述行（带编号）
+            parts = [f"[{idx:03d}] <{tag}"]
             if typ:
                 parts.append(f" type={typ}")
             if text:
@@ -1498,11 +1703,49 @@ class CaseGenerator:
                 parts.append(f" label={label!r}")
             if name:
                 parts.append(f" name={name!r}")
-            if selector and selector not in ("div", "span", "p", "li", "h1", "h2", "h3", "h4", "h5", "h6"):
+            if selector:
                 parts.append(f" selector={selector!r}")
             parts.append(">")
             lines.append("".join(parts))
-        return "\n".join(lines)
+
+            # 构建回查用的元素信息（含真实 selector 与语义）
+            index_map[idx] = {
+                "tag": tag,
+                "type": typ,
+                "text": text,
+                "placeholder": placeholder,
+                "label": label,
+                "name": name,
+                "selector": selector,
+            }
+
+        return index_map, "\n".join(lines)
+
+    def _resolve_module_elements(
+        self,
+        element_indices: List,           # LLM 返回的编号列表（可能含字符串或整数）
+        index_map: Dict[int, Dict],      # 编号→元素 dict
+    ) -> List[Dict]:
+        """
+        根据 LLM 返回的编号列表，从 index_map 中取出真实元素信息。
+        返回的每个元素 dict 包含 selector、text、tag 等真实字段。
+        """
+        result = []
+        seen_sels = set()
+        for raw in element_indices:
+            try:
+                idx = int(str(raw).strip())
+            except (ValueError, TypeError):
+                continue
+            elem = index_map.get(idx)
+            if not elem:
+                continue
+            sel = elem.get("selector", "")
+            # 去重，且跳过无意义的裸 tag selector
+            if sel and sel not in seen_sels:
+                seen_sels.add(sel)
+                result.append(elem)
+        return result
 
     def _build_doc_context(self, document_data: Optional[Dict[str, Any]]) -> str:
         if not document_data:

@@ -56,6 +56,7 @@ def _ai_case_response(record) -> AICaseFileResponse:
         case_count=record.case_count,
         has_md=bool(record.md_path),
         has_xmind=bool(record.xmind_path),
+        has_xlsx=bool(getattr(record, "xlsx_path", None)),
         modules=modules,
         created_at=record.created_at.isoformat() if record.created_at else "",
         doc_hash=record.doc_hash,
@@ -65,6 +66,191 @@ def _ai_case_response(record) -> AICaseFileResponse:
         gen_status=getattr(record, "gen_status", "done") or "done",
         gen_progress=getattr(record, "gen_progress", 0) or 0,
     )
+
+
+# ── Excel 文件生成工具函数 ────────────────────────────────────────────────────
+
+def _generate_excel_file(cases_data: dict, task_name: str, output_dir: str = None) -> str:
+    """从 cases_data 生成 Excel 文件，保存到磁盘，返回文件路径。"""
+    import os
+    from datetime import datetime
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.datavalidation import DataValidation
+
+    if output_dir is None:
+        output_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "ai_cases", "output")
+        os.makedirs(output_dir, exist_ok=True)
+
+    modules = (cases_data or {}).get("modules", [])
+
+    rows = []
+    for mod in modules:
+        mod_name = mod.get("name", "通用")
+        for case in mod.get("cases", []):
+            if case.get("status") == "deprecated":
+                continue
+            steps = case.get("steps", [])
+            steps_text = "\n".join(
+                f"{i+1}. {s}" for i, s in enumerate(steps)
+            ) if isinstance(steps, list) else str(steps)
+            rows.append({
+                "用例编号":   case.get("id", ""),
+                "所属模块":   mod_name,
+                "用例名称":   case.get("name", ""),
+                "优先级":     case.get("priority", "P1"),
+                "用例类型":   case.get("type", "功能测试"),
+                "测试方法":   case.get("test_method", ""),
+                "前置条件":   case.get("preconditions", ""),
+                "测试步骤":   steps_text,
+                "预期结果":   case.get("expected", ""),
+                "测试结果":   "",
+                "备注":       "",
+            })
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "测试用例"
+
+    HEADERS = ["用例编号", "所属模块", "用例名称", "优先级", "用例类型",
+               "测试方法", "前置条件", "测试步骤", "预期结果", "测试结果", "备注"]
+
+    from openpyxl.styles import Color as _Color
+    HEADER_BG   = "FF1D4ED8"
+    HEADER_FONT = Font(name="微软雅黑", bold=True, color=_Color(rgb="FFFFFFFF"), size=11)
+    CELL_FONT   = Font(name="微软雅黑", size=10)
+    ALT_BG      = PatternFill("solid", fgColor=_Color(rgb="FFEEF2FF"))
+    RESULT_BG   = PatternFill("solid", fgColor=_Color(rgb="FFFFF9E6"))
+    NOTE_BG     = PatternFill("solid", fgColor=_Color(rgb="FFF0FDF4"))
+
+    PRIORITY_COLOR = {
+        "P0": ("FFFF4D4F", "FFFFFFFF"),
+        "P1": ("FFFA8C16", "FFFFFFFF"),
+        "P2": ("FF52C41A", "FFFFFFFF"),
+    }
+
+    thin = Side(style="thin", color="FFC7D2FE")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    wrap   = Alignment(horizontal="left",   vertical="center", wrap_text=True)
+
+    ws.append(HEADERS)
+    for col_idx, header in enumerate(HEADERS, 1):
+        cell = ws.cell(row=1, column=col_idx)
+        cell.value = header
+        cell.font = HEADER_FONT
+        cell.fill = PatternFill("solid", fgColor=_Color(rgb=HEADER_BG))
+        cell.alignment = center
+        cell.border = border
+    ws.row_dimensions[1].height = 28
+
+    for row_idx, data in enumerate(rows, 2):
+        is_alt = (row_idx % 2 == 0)
+        for col_idx, key in enumerate(HEADERS, 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            cell.value = data[key]
+            cell.font = CELL_FONT
+            cell.border = border
+            if key == "优先级":
+                pval = data[key]
+                if pval in PRIORITY_COLOR:
+                    bg, fg = PRIORITY_COLOR[pval]
+                    cell.fill = PatternFill("solid", fgColor=_Color(rgb=bg))
+                    cell.font = Font(name="微软雅黑", bold=True, color=_Color(rgb=fg), size=10)
+                cell.alignment = center
+            elif key == "测试结果":
+                cell.fill = RESULT_BG
+                cell.alignment = center
+            elif key == "备注":
+                cell.fill = NOTE_BG
+                cell.alignment = wrap
+            elif key in ("用例编号", "所属模块", "用例类型", "测试方法"):
+                cell.alignment = center
+                if is_alt:
+                    cell.fill = ALT_BG
+            else:
+                cell.alignment = wrap
+                if is_alt:
+                    cell.fill = ALT_BG
+        step_lines = data["测试步骤"].count("\n") + 1
+        ws.row_dimensions[row_idx].height = max(20, min(step_lines * 16, 120))
+
+    result_col_letter = get_column_letter(HEADERS.index("测试结果") + 1)
+    data_end_row = max(len(rows) + 1, 2)
+    result_range = f"{result_col_letter}2:{result_col_letter}{data_end_row}"
+    dv = DataValidation(
+        type="list",
+        formula1='"Pass,Fail,NT,NA,Block"',
+        allow_blank=True,
+        showDropDown=False,
+        showErrorMessage=True,
+        errorTitle="输入无效",
+        error="请从下拉列表中选择：Pass / Fail / NT / NA / Block",
+    )
+    dv.sqref = result_range
+    ws.add_data_validation(dv)
+
+    last_col_letter = get_column_letter(len(HEADERS))
+    ws.auto_filter.ref = f"A1:{last_col_letter}1"
+    ws.freeze_panes = "A2"
+
+    COL_WIDTHS = {
+        "用例编号": 12, "所属模块": 14, "用例名称": 30, "优先级": 8,
+        "用例类型": 12, "测试方法": 14, "前置条件": 22, "测试步骤": 45,
+        "预期结果": 35, "测试结果": 12, "备注": 20,
+    }
+    for col_idx, header in enumerate(HEADERS, 1):
+        ws.column_dimensions[get_column_letter(col_idx)].width = COL_WIDTHS.get(header, 14)
+
+    # 说明 Sheet
+    ws_legend = wb.create_sheet(title="测试结果说明")
+    legend_items = [
+        ("Pass",  "FFFFFFFF", "FF389E0D", "通过"),
+        ("Fail",  "FFFFFFFF", "FFF5222D", "失败"),
+        ("NT",    "FFFFFFFF", "FFD48806", "未测试"),
+        ("NA",    "FFFFFFFF", "FF8C8C8C", "不适用"),
+        ("Block", "FFFFFFFF", "FFD46B08", "阻塞"),
+    ]
+    ws_legend.merge_cells("A1:C1")
+    title_cell = ws_legend["A1"]
+    title_cell.value = "测试结果颜色说明"
+    title_cell.font = Font(name="微软雅黑", bold=True, size=13, color=_Color(rgb="FFFFFFFF"))
+    title_cell.fill = PatternFill("solid", fgColor=_Color(rgb="FF1D4ED8"))
+    title_cell.alignment = Alignment(horizontal="center", vertical="center")
+    ws_legend.row_dimensions[1].height = 30
+    for ci, h in enumerate(["结果值", "含义", "颜色预览"], 1):
+        c = ws_legend.cell(row=2, column=ci)
+        c.value = h
+        c.font = Font(name="微软雅黑", bold=True, size=10, color=_Color(rgb="FF333333"))
+        c.fill = PatternFill("solid", fgColor=_Color(rgb="FFE8EFFE"))
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        c.border = border
+    ws_legend.row_dimensions[2].height = 22
+    for ri, (val, bg, fg, meaning) in enumerate(legend_items, 3):
+        c_val = ws_legend.cell(row=ri, column=1, value=val)
+        c_val.font = Font(name="微软雅黑", bold=True, size=13, color=_Color(rgb=fg))
+        c_val.fill = PatternFill("solid", fgColor=_Color(rgb=bg))
+        c_val.alignment = Alignment(horizontal="center", vertical="center")
+        c_val.border = border
+        c_mean = ws_legend.cell(row=ri, column=2, value=meaning)
+        c_mean.font = Font(name="微软雅黑", size=10)
+        c_mean.alignment = Alignment(horizontal="center", vertical="center")
+        c_mean.border = border
+        c_preview = ws_legend.cell(row=ri, column=3, value="")
+        c_preview.fill = PatternFill("solid", fgColor=_Color(rgb=bg))
+        c_preview.border = border
+        ws_legend.row_dimensions[ri].height = 28
+    ws_legend.column_dimensions["A"].width = 12
+    ws_legend.column_dimensions["B"].width = 12
+    ws_legend.column_dimensions["C"].width = 18
+
+    ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+    safe_name = task_name.replace("/", "_").replace("\\", "_").replace(":", "_")
+    filepath = os.path.join(output_dir, f"cases_{safe_name}_{ts}.xlsx")
+    wb.save(filepath)
+    logger.info(f"Excel 文件已生成: {filepath}")
+    return filepath
 
 
 # ── 后台生成任务 ──────────────────────────────────────────────────────────────
@@ -116,6 +302,17 @@ async def _do_generate_bg(
             record.doc_hash    = result.get("doc_hash")
             record.doc_content = result.get("doc_content")
             record.gen_status  = "done"
+
+            # Excel 格式：生成时勾选则产出 Excel 文件
+            if "excel" in (formats or []):
+                try:
+                    record.xlsx_path = _generate_excel_file(
+                        cases_data=result.get("cases_data") or {},
+                        task_name=task_name,
+                    )
+                except Exception as _xe:
+                    logger.warning(f"Excel 生成失败（非致命）: {_xe}")
+
             await bg_db.commit()
             await bg_db.refresh(record)
             await ws_manager.broadcast(
@@ -225,8 +422,11 @@ async def download_ai_case(record_id: int, format: str = "md", db: AsyncSession 
         file_path, media_type, ext = record.md_path, "text/markdown", ".md"
     elif format == "xmind":
         file_path, media_type, ext = record.xmind_path, "application/octet-stream", ".xmind"
+    elif format == "xlsx":
+        file_path = getattr(record, "xlsx_path", None)
+        media_type, ext = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xlsx"
     else:
-        raise HTTPException(status_code=400, detail="不支持的格式，请使用 md 或 xmind")
+        raise HTTPException(status_code=400, detail="不支持的格式，请使用 md、xmind 或 xlsx")
     if not file_path:
         raise HTTPException(status_code=404, detail=f"该记录未生成 {format} 文件")
 
@@ -244,13 +444,18 @@ async def download_ai_case(record_id: int, format: str = "md", db: AsyncSession 
             from skills.ai_case_generator import ai_case_generator
             ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
             if format == "md":
+                from skills.ai_case_generator import ai_case_generator
                 p = await ai_case_generator._save_markdown(cases_data, record.task_name, ts)
                 record.md_path = str(p)
-            else:
+            elif format == "xmind":
+                from skills.ai_case_generator import ai_case_generator
                 p = await ai_case_generator._save_xmind(cases_data, record.task_name, ts)
                 record.xmind_path = str(p)
+            else:
+                p = Path(_generate_excel_file(cases_data=cases_data, task_name=record.task_name))
+                record.xlsx_path = str(p)
             from sqlalchemy.orm.attributes import flag_modified
-            flag_modified(record, "md_path" if format == "md" else "xmind_path")
+            flag_modified(record, f"{'md' if format == 'md' else 'xmind' if format == 'xmind' else 'xlsx'}_path")
             await db.commit()
             logger.info(f"下载时文件不存在，已重新生成: record_id={record_id}, format={format}, path={p}")
         except Exception as e:

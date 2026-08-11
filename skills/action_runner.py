@@ -94,13 +94,14 @@ def resolve_vars(text: str, env: dict) -> str:
 class ActionRunner:
     """按 ActionStep 列表驱动 Playwright Page 执行 WebUI 用例。"""
 
-    def __init__(self, task_id: int, db_session=None, browser: str = "chromium"):
+    def __init__(self, task_id: int, db_session=None, browser: str = "chromium", should_stop_cb=None):
         self.task_id      = task_id
         self.db           = db_session
         self.browser      = browser
         self.env_vars: dict = {}
         self._alias_map: dict = {}   # name → selectors[]，懒加载
         self.step_callback = None    # async fn(step_info) — 步骤级进度推送
+        self._should_stop_cb = should_stop_cb  # Callable[[], bool] — 外部 stop 信号检查
 
     @staticmethod
     def _build_locator(ctx, selector: str):
@@ -195,6 +196,14 @@ class ActionRunner:
         step_results = []
         total_steps = len(steps)
         for step_idx, step in enumerate(steps):
+            # ── 每步骤前检查外部 stop 信号 ──
+            if self._should_stop_cb and self._should_stop_cb():
+                step_results.append(_step_result(step, False, "执行被用户停止"))
+                # 将剩余未执行步骤也标记为 skipped
+                for remaining_step in steps[step_idx + 1:]:
+                    step_results.append(_step_result(remaining_step, False, "执行被用户停止（未执行）"))
+                break
+
             ok, err = validate_step(step)
             if not ok:
                 step_results.append(_step_result(step, False, f"步骤定义错误: {err}"))

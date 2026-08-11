@@ -181,7 +181,8 @@ class UITestAgent:
         return document_data
 
     async def generate_cases(
-        self, task_id: int = None, progress_cb=None
+        self, task_id: int = None, progress_cb=None,
+        user_prompt: str = "", focus_modules=None, target_count: int = 0,
     ) -> List[Dict[str, Any]]:
         logger.info("Generating test cases...")
 
@@ -198,6 +199,9 @@ class UITestAgent:
             page_elements=state.page_elements,
             document_data=state.document_data,
             progress_cb=progress_cb,
+            user_prompt=user_prompt,
+            focus_modules=focus_modules or [],
+            target_count=target_count,
         )
 
         for idx, case in enumerate(cases):
