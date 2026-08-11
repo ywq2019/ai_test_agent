@@ -1309,7 +1309,16 @@ onUnmounted(() => {
   justify-content: center;
 }
 
-.detail-tabs { height: 100%; }
+.detail-tabs {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.detail-tabs :deep(.el-tabs__content) {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
 
 .tab-toolbar {
   display: flex;
