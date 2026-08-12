@@ -54,6 +54,7 @@ class CaseCreateRequest(BaseModel):
 
 
 class CaseUpdateRequest(BaseModel):
+    version: int = Field(0, ge=0, description="乐观锁版本号（0 表示跳过版本校验）")
     name: Optional[str] = None
     module: Optional[str] = None
     priority: Optional[str] = None
@@ -80,6 +81,7 @@ class CaseResponse(BaseModel):
     enabled: bool
     deprecated: bool = False
     source: Optional[str] = "manual"
+    version: int = 1
     # 方案一
     setup_steps: Optional[List[Any]] = None
     use_storage: bool = True
@@ -114,6 +116,7 @@ class ReportResponse(BaseModel):
     created_at: str = ""
     finished_at: str = ""
     browser: str = "chromium"
+    created_by: str = ""   # 执行人
 
 
 class CommandRequest(BaseModel):

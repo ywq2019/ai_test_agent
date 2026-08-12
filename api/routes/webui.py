@@ -368,6 +368,7 @@ def _case_resp(c) -> CaseResponse:
         enabled=c.enabled,
         deprecated=getattr(c, "deprecated", False) or False,
         source=getattr(c, "source", "manual") or "manual",
+        version=getattr(c, "version", 1) or 1,
         setup_steps=getattr(c, "setup_steps", None),
         use_storage=bool(getattr(c, "use_storage", False)),
     )
@@ -1114,7 +1115,14 @@ async def update_case(case_id: int, request: CaseUpdateRequest, db: AsyncSession
         await check_access(db, task, current_user, "任务")
 
     update_data = request.model_dump(exclude_unset=True)
+    update_data.pop("version", None)  # version 不直接写入，由后端自增
     logger.info(f"[update_case] case_id={case_id} keys={list(update_data.keys())} sj_in={'steps_json' in update_data} sj_val={'EMPTY' if update_data.get('steps_json') == [] else str(type(update_data.get('steps_json')))}")
+
+    # ── 乐观锁：版本号 > 0 且冲突时返回 409 ──
+    if request.version > 0 and request.version != case.version:
+        raise HTTPException(status_code=409, detail=f"版本冲突：当前版本 v{case.version}，传入 v{request.version}。请刷新后重试。")
+    if request.version > 0:
+        update_data["version"] = case.version + 1
 
     # 如果更新了 steps_json，同步生成 steps 可读文本
     if "steps_json" in update_data and update_data["steps_json"]:
@@ -1384,6 +1392,7 @@ async def _run_execution_bg(
     report_id: int, task_id: int, task_name: str,
     task_url: str, case_dicts: list, case_ids, browser: str,
     workspace_id: int = None,
+    executor: str = "",
     setup_case: dict = None,
     storage_state_path: str = None,
     storage_ttl_minutes: int = 60,
@@ -1496,6 +1505,7 @@ async def _run_execution_bg(
                             end_time=datetime.fromisoformat(r["end_time"]) if r.get("end_time") else None,
                             duration=r.get("duration", 0), error_message=r.get("error_message"),
                             screenshot_path=r.get("screenshot_path"), logs=r.get("logs"),
+                            executor=executor,
                         ))
                     try:
                         report_data = await uitest_agent.generate_report(task_name)
@@ -1616,6 +1626,7 @@ async def execute_cases(
             report_id=report.id, task_id=request.task_id, task_name=task_name,
             task_url=task_url, case_dicts=case_dicts, case_ids=request.case_ids, browser=request.browser,
             workspace_id=task.project_id,
+            executor=current_user.username,
             setup_case=setup_case_dict,
             storage_state_path=storage_state_path,
             storage_ttl_minutes=storage_ttl_minutes,
@@ -1653,6 +1664,7 @@ async def list_reports(workspace_id: int = None, task_id: int = None, db: AsyncS
             created_at=_fmt_cst(r.created_at),
             finished_at=_fmt_cst(r.finished_at) if r.finished_at else _fmt_cst(r.created_at),
             browser=r.browser or "chromium",
+            created_by=r.created_by or "",
         )
         for r in reports
     ]
@@ -1675,6 +1687,7 @@ async def get_report_by_id(report_id: int, db: AsyncSession = Depends(get_db), c
         created_at=_fmt_cst(report.created_at),
         finished_at=_fmt_cst(report.finished_at) if report.finished_at else _fmt_cst(report.created_at),
         browser=report.browser or "chromium",
+        created_by=report.created_by or "",
     )
 
 

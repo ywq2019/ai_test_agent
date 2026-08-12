@@ -1323,6 +1323,7 @@ const batchDeleting = ref(false)
 const caseForm = reactive({
   task_id: null, name: '', module: '通用', priority: 'P1',
   preconditions: '', steps: '', expected_results: '', enabled: true,
+  version: 1,
 })
 
 // ── AI 生成 ──
@@ -2126,8 +2127,10 @@ const saveCase = async () => {
   saving.value = true
   try {
     if (editingCase.value) {
-      await taskStore.updateCase(editingCase.value.id, caseForm)
+      await taskStore.updateCase(editingCase.value.id, { ...caseForm, version: caseForm.version })
       ElMessage.success('更新成功')
+      // 更新本地 version，下次保存用新版本号
+      caseForm.version = caseForm.version + 1
     } else {
       await taskStore.createCase(caseForm)
       ElMessage.success('创建成功')
@@ -2136,7 +2139,12 @@ const saveCase = async () => {
     showCreateDialog.value = false
     resetForm()
   } catch (e) {
+    const status = e?.response?.status
     const detail = e?.response?.data?.detail
+    if (status === 409) {
+      ElMessage.warning(detail || '该用例已被他人修改，请关闭对话框后重新打开编辑')
+      return
+    }
     const msg = Array.isArray(detail)
       ? detail.map(d => d.msg || JSON.stringify(d)).join('；')
       : (detail || e?.message || '未知错误')
@@ -2466,6 +2474,7 @@ const editCase = (row) => {
     task_id: row.task_id, name: row.name, module: row.module,
     priority: row.priority, preconditions: row.preconditions,
     steps: row.steps, expected_results: row.expected_results, enabled: row.enabled,
+    version: row.version || 1,
   })
   caseEditTab.value = 'info'
   stepsJson.value = []

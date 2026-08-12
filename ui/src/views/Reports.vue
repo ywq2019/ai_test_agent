@@ -59,6 +59,7 @@
                 </div>
                 <div class="report-item-meta">
                   <span title="报告 ID">#{{ r.report_id }}</span>
+                  <span v-if="r.created_by" title="执行人">{{ r.created_by }}</span>
                   <span>{{ formatDate(r.created_at) }}</span>
                 </div>
                 <div class="report-item-stats">

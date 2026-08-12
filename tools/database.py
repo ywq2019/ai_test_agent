@@ -74,6 +74,9 @@ class TestCase(Base):
     deprecated = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    # ── 乐观锁版本号，每次更新 +1 ──
+    version = Column(Integer, default=1, nullable=False)
+
     # ── 方案C：结构化执行字段 ─────────────────────────────────────────────────
     # 录制/AI生成的结构化步骤列表，格式见 tools/action_schema.py ActionStep
     steps_json = Column(JSON, nullable=True)
@@ -549,6 +552,8 @@ async def init_database():
         "ALTER TABLE test_tasks ADD COLUMN doc_hash VARCHAR(64)",
         # test_cases 废弃字段（兼容旧库）
         "ALTER TABLE test_cases ADD COLUMN deprecated BOOLEAN DEFAULT 0",
+        # test_cases 乐观锁版本号（兼容旧库）
+        "ALTER TABLE test_cases ADD COLUMN version INTEGER DEFAULT 1",
         # 权限隔离：created_by 字段（NULL = 历史数据，对所有用户可见）
         "ALTER TABLE test_tasks ADD COLUMN created_by VARCHAR(100)",
         "ALTER TABLE ai_case_files ADD COLUMN created_by VARCHAR(100)",
