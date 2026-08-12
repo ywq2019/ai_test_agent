@@ -31,12 +31,13 @@ except ImportError:
 
 from tools.action_schema import validate_step
 
-# 截图保存目录（用 settings 绝对路径，避免相对路径随 cwd 漂移）
+# 截图保存目录（必须与 main.py 的 StaticFiles mount 路径一致）
 try:
     from tools.config import settings as _settings
-    SCREENSHOT_DIR = Path(_settings.SCREENSHOT_DIR)
+    import os as _os
+    SCREENSHOT_DIR = Path(_os.path.abspath(_settings.SCREENSHOT_DIR))
 except Exception:
-    SCREENSHOT_DIR = Path(__file__).parent.parent / "reports" / "screenshots"
+    SCREENSHOT_DIR = Path(__file__).parent.parent / "screenshots"
 SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -163,7 +164,7 @@ class ActionRunner:
             for r in rows.fetchall():
                 sels = r.selectors if isinstance(r.selectors, list) else _j.loads(r.selectors or "[]")
                 self._alias_map[r.name] = sels
-            logger.debug(f"[ActionRunner] task={self.task_id} 加载 {len(self._alias_map)} 个元素别名")
+            logger.info(f"[ActionRunner] task={self.task_id} 加载 {len(self._alias_map)} 个元素别名: {list(self._alias_map.keys())}")
         except Exception as e:
             logger.warning(f"[ActionRunner] 加载元素别名失败: {e}")
 
@@ -177,9 +178,9 @@ class ActionRunner:
         await self._load_aliases()
         sels = self._alias_map.get(alias_name)
         if sels:
-            logger.debug(f"[ActionRunner] 别名 @{alias_name} 展开为 {sels}")
+            logger.info(f"[ActionRunner] 别名 @{alias_name} 展开为 {sels}")
             return sels[0], sels
-        logger.warning(f"[ActionRunner] 别名 @{alias_name} 未找到，保留原始 selector")
+        logger.warning(f"[ActionRunner] 别名 @{alias_name} 未找到(task={self.task_id}, 库中有{list(self._alias_map.keys())})，保留原始 selector")
         return selector, [selector]
 
     def _rv(self, text: str) -> str:
@@ -322,9 +323,9 @@ class ActionRunner:
             selector = used_selector
 
         try:
-            await self._dispatch(action, page, ctx, selector, value, url, expected, timeout)
+            shot = await self._dispatch(action, page, ctx, selector, value, url, expected, timeout)
             duration = (time.monotonic() - t0) * 1000
-            return _step_result(step, True, duration_ms=duration)
+            return _step_result(step, True, duration_ms=duration, screenshot=shot)
 
         except Exception as e:
             duration = (time.monotonic() - t0) * 1000
@@ -334,14 +335,14 @@ class ActionRunner:
             if ("strict mode violation" in err_str or "resolved to" in err_str) and selector:
                 first_selector = f"{selector} >> nth=0"
                 try:
-                    await self._dispatch(action, page, ctx, first_selector, value, url, expected, timeout)
+                    shot = await self._dispatch(action, page, ctx, first_selector, value, url, expected, timeout)
                     duration = (time.monotonic() - t0) * 1000
                     logger.info(
                         f"[strict mode fallback] step={step.get('id')} "
                         f"selector={selector!r} 匹配多个元素，降级为 nth=0"
                     )
                     step["selector"] = first_selector
-                    return _step_result(step, True, duration_ms=duration)
+                    return _step_result(step, True, duration_ms=duration, screenshot=shot)
                 except Exception:
                     pass
 
@@ -356,14 +357,14 @@ class ActionRunner:
                     try:
                         # AI 修复用较短超时验证，避免再等 30 秒
                         _fix_timeout = min(timeout, 10000)
-                        await self._dispatch(action, page, page, fixed_selector, value, url, expected, _fix_timeout)
+                        shot = await self._dispatch(action, page, page, fixed_selector, value, url, expected, _fix_timeout)
                         duration = (time.monotonic() - t0) * 1000
                         logger.info(
                             f"[AI selector fix] step={step.get('id')} "
                             f"原: {selector!r} → 修复: {fixed_selector!r}"
                         )
                         step["selector"] = fixed_selector
-                        return _step_result(step, True, duration_ms=duration)
+                        return _step_result(step, True, duration_ms=duration, screenshot=shot)
                     except Exception:
                         pass
 
@@ -372,7 +373,7 @@ class ActionRunner:
                 fname = f"step_{step.get('id', 'unknown')}_{int(time.time())}.png"
                 spath = SCREENSHOT_DIR / fname
                 await page.screenshot(path=str(spath))
-                screenshot_path = str(spath)
+                screenshot_path = f"/screenshots/{fname}"
             except Exception:
                 pass
             return _step_result(step, False,
@@ -484,11 +485,8 @@ class ActionRunner:
 
     async def _dispatch(self, action: str, page: "Page", ctx,
                         selector: str, value: str, url: str,
-                        expected: str, timeout: int) -> None:
-        """按 action 类型路由到 Playwright 调用。
-        page: 始终是主 Page 对象（navigate/assert_url 等使用）
-        ctx:  执行上下文，主页面时等于 page，iframe 时是 FrameLocator 链
-        """
+                        expected: str, timeout: int) -> str:
+        """按 action 类型路由到 Playwright 调用。返回截图路径（仅 screenshot action 非空）。"""
         kw = {"timeout": timeout}
 
         if action == "navigate":
@@ -583,6 +581,7 @@ class ActionRunner:
             if not fname.endswith(".png"):
                 fname += ".png"
             await page.screenshot(path=str(SCREENSHOT_DIR / fname))
+            return f"/screenshots/{fname}"
 
         elif action == "evaluate":
             await page.evaluate(value)
@@ -612,3 +611,4 @@ class ActionRunner:
 
         else:
             raise ValueError(f"未知 action 类型: {action!r}")
+        return ""

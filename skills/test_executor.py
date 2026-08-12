@@ -162,6 +162,7 @@ class TestExecutor:
                 snap_path=snap_path,
                 ttl_minutes=storage_ttl_minutes,
                 progress_callback=progress_callback,
+                task_id=_task_id,
             )
 
         try:
@@ -433,12 +434,14 @@ class TestExecutor:
                     f"case_{case.get('id', 'unknown')}_{status_tag}_"
                     f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.png"
                 )
-                screenshot_path = str(Path(screenshots_dir) / screenshot_filename)
+                local_path = str(Path(screenshots_dir) / screenshot_filename)
                 try:
-                    await bt.take_screenshot(screenshot_path)
+                    await bt.take_screenshot(local_path)
                 except Exception as se:
                     logger.warning(f"Screenshot failed: {se}")
                     screenshot_path = None
+                else:
+                    screenshot_path = f"/screenshots/{screenshot_filename}"
 
             end_time = datetime.utcnow()
             status = "passed" if not error_message else "failed"
@@ -491,6 +494,7 @@ class TestExecutor:
         snap_path: Path,
         ttl_minutes: int,
         progress_callback: Optional[Callable] = None,
+        task_id: int = 0,
     ) -> Optional[str]:
         """
         确保 storage_state 快照存在且在有效期内。
@@ -535,7 +539,16 @@ class TestExecutor:
                 return None
 
             from skills.action_runner import ActionRunner
-            runner = ActionRunner(task_id=0, browser=browser_type)
+            runner = ActionRunner(task_id=task_id, browser=browser_type)
+            # 为 setup case 加载元素别名库（别名按 task_id 隔离）
+            from tools.database import async_session_maker
+            try:
+                async with async_session_maker() as _ses:
+                    runner.db = _ses
+                    await runner._load_aliases()
+                    runner.db = None
+            except Exception:
+                pass
             setup_payload = dict(setup_case)
             setup_payload["steps_json"] = steps_json
             result = await runner.run_case(setup_payload, bt.page)

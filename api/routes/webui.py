@@ -88,11 +88,12 @@ router = APIRouter()
 
 
 def _task_resp(task) -> "TaskResponse":
-    """统一构建 TaskResponse，包含 setup_case_id / storage_ttl_minutes。"""
+    """统一构建 TaskResponse，包含 setup_case_id / storage_ttl_minutes / page_elements。"""
     return TaskResponse(
         id=task.id, name=task.name, url=task.url, status=task.status,
         browser=task.browser, environment=task.environment,
         document_path=getattr(task, "document_path", None),
+        page_elements=getattr(task, "page_elements", None) or [],
         created_at=task.created_at.isoformat(),
         updated_at=task.updated_at.isoformat() if task.updated_at else None,
         setup_case_id=getattr(task, "setup_case_id", None),
@@ -631,6 +632,7 @@ async def plan_scenes(task_id: int, request: dict = None,
     try:
         from tools.llm_client import call_llm
         from skills.prompt_loader import get_system, render_user
+        from sqlalchemy.orm.attributes import flag_modified
         import json as _json, re as _re
 
         system_prompt = get_system("ui_case_gen.yaml", "plan_scenes")
@@ -720,17 +722,20 @@ async def plan_scenes(task_id: int, request: dict = None,
         new_scenes = [s for s in new_scenes if isinstance(s, dict)]
 
         # ── 5. 标准化字段 ────────────────────────────────────────────────────
+        # 已有场景的录制状态按场景名保留：重新规划（非追加）时 LLM 可能重排顺序，
+        # 已录制过的场景只要名称仍在，就不能被重置为待录制
+        existing_plan = list(getattr(task, "scene_plan", None) or [])
+        recorded_by_name = {s.get("name", ""): True for s in existing_plan if s.get("recorded")}
         for i, s in enumerate(new_scenes):
             s.setdefault("id", f"scene_{i+1:02d}")
             s.setdefault("priority", "P1")
             s.setdefault("dimension", "")
             s.setdefault("steps_desc", [])
             s.setdefault("expected", "")
-            s["recorded"] = False
+            s["recorded"] = recorded_by_name.get(s.get("name", ""), False)
 
         # ── 6. 追加模式：保留已录制场景，合并新场景 ──────────────────────────
         if append_mode:
-            existing_plan = list(getattr(task, "scene_plan", None) or [])
             recorded_scenes = [s for s in existing_plan if s.get("recorded")]
             # 去重：新场景名与已有场景名相同则跳过
             existing_names_set = {s["name"] for s in existing_plan}
@@ -745,6 +750,7 @@ async def plan_scenes(task_id: int, request: dict = None,
 
         # ── 7. 持久化 ────────────────────────────────────────────────────────
         task.scene_plan = scenes
+        flag_modified(task, "scene_plan")
         await db.commit()
 
         logger.info(
@@ -769,6 +775,8 @@ async def get_scene_plan(task_id: int,
         raise HTTPException(status_code=404, detail="任务不存在")
     await check_access(db, task, current_user, "任务")
     scenes = getattr(task, "scene_plan", None) or []
+    recorded_ids = [s.get("id") for s in scenes if s.get("recorded")]
+    logger.info(f"[get_scene_plan] task={task_id} total={len(scenes)} recorded={recorded_ids}")
     return {"task_id": task_id, "url": task.url or "", "scenes": scenes}
 
 
@@ -789,13 +797,19 @@ async def mark_scene_recorded(task_id: int, body: dict,
     await check_access(db, task, current_user, "任务")
 
     scenes = list(getattr(task, "scene_plan", None) or [])
+    found = False
     for s in scenes:
         if s.get("id") == scene_id:
             s["recorded"] = recorded
+            found = True
             break
+    # 直接赋值并显式标记 JSON 列已变更，绕过 SQLAlchemy 变更检测
     task.scene_plan = scenes
+    from sqlalchemy.orm.attributes import flag_modified
+    flag_modified(task, "scene_plan")
     await db.commit()
-    return {"task_id": task_id, "scene_id": scene_id, "recorded": recorded}
+    logger.info(f"[mark_scene_recorded] task={task_id} scene={scene_id} recorded={recorded} found={found}")
+    return {"task_id": task_id, "scene_id": scene_id, "recorded": recorded, "found": found}
 
 
 
@@ -1100,11 +1114,13 @@ async def update_case(case_id: int, request: CaseUpdateRequest, db: AsyncSession
         await check_access(db, task, current_user, "任务")
 
     update_data = request.model_dump(exclude_unset=True)
+    logger.info(f"[update_case] case_id={case_id} keys={list(update_data.keys())} sj_in={'steps_json' in update_data} sj_val={'EMPTY' if update_data.get('steps_json') == [] else str(type(update_data.get('steps_json')))}")
 
     # 如果更新了 steps_json，同步生成 steps 可读文本
     if "steps_json" in update_data and update_data["steps_json"]:
         from tools.action_schema import steps_to_description
         update_data["steps"] = steps_to_description(update_data["steps_json"])
+        logger.info(f"[update_case] 已生成 steps 文本: {update_data['steps'][:80]}...")
 
     for key, value in update_data.items():
         setattr(case, key, value)
@@ -2329,12 +2345,24 @@ async def test_llm_connection(request: LLMTestRequest):
             except Exception:
                 last_err = "响应不是有效 JSON"
                 continue
-            if data.get("choices"):
-                reply = data["choices"][0].get("message", {}).get("content", "")
-                return {"success": True, "model": test_model, "message": f"连接成功，模型回复: {reply[:50]}"}
-            if data.get("content"):
-                reply = data["content"][0].get("text", "") if isinstance(data["content"], list) else str(data["content"])
-                return {"success": True, "model": test_model, "message": f"连接成功，模型回复: {reply[:50]}"}
+            # 兼容 OpenAI 格式 choices；choices[0] / message.content 可能为 None
+            # （如 deepseek-reasoner 等推理模型 content 为 null，内容在 reasoning_content）
+            choices = data.get("choices") or []
+            if choices and isinstance(choices[0], dict):
+                msg = choices[0].get("message") or {}
+                if isinstance(msg, dict):
+                    reply = msg.get("content") or msg.get("reasoning_content") or ""
+                    if reply:
+                        return {"success": True, "model": test_model, "message": f"连接成功，模型回复: {reply[:50]}"}
+            # 兼容 Anthropic 格式 content
+            content_val = data.get("content")
+            if content_val:
+                if isinstance(content_val, list) and content_val and isinstance(content_val[0], dict):
+                    reply = content_val[0].get("text") or ""
+                else:
+                    reply = str(content_val)
+                if reply:
+                    return {"success": True, "model": test_model, "message": f"连接成功，模型回复: {reply[:50]}"}
             last_err = f"响应格式未知: {str(data)[:200]}"
     return {"success": False, "error": last_err}
 

@@ -1485,11 +1485,21 @@ const saveRecording = async () => {
     // 场景录制完成：标记并重新打开场景抽屉
     if (recordingSceneId.value) {
       const sceneId = recordingSceneId.value
-      const scene = scenes.value.find(s => s.id === sceneId)
-      if (scene) scene.recorded = true
-      try { await caseApi.markSceneRecorded(filterTaskId.value, sceneId, true) } catch {}
       recordingSceneId.value = null
       _pendingSceneName.value = ''
+      console.log('[saveRecording] 开始标记场景录制:', { taskId: filterTaskId.value, sceneId })
+      try {
+        const r = await caseApi.markSceneRecorded(filterTaskId.value, sceneId, true)
+        console.log('[saveRecording] markSceneRecorded 后端响应:', r)
+      } catch (e) {
+        console.warn('[saveRecording] markSceneRecorded 失败:', e)
+      }
+      // 强制从后端重载两份场景数据
+      console.log('[saveRecording] 重载场景数据...')
+      await loadPersistedScenes()
+      await loadScenePlan()
+      console.log('[saveRecording] scenes 重载后:', { len: scenes.value.length, recorded: scenes.value.filter(s=>s.recorded).map(s=>s.id) })
+      console.log('[saveRecording] scenePlanCache 重载后:', { len: scenePlanCache.value.length, recorded: scenePlanCache.value.filter(s=>s.recorded).map(s=>s.id) })
       setTimeout(() => { scenePlannerVisible.value = true }, 300)
     }
   } catch (e) { ElMessage.error('保存失败：' + e.message) }
@@ -1548,6 +1558,9 @@ const editingSceneId      = ref(null)
 const expandedSceneId     = ref(null)
 const _pendingSceneName   = ref('')
 
+// 抽屉打开时总是从后端加载最新场景（含录制状态），避免展示过期数据
+watch(scenePlannerVisible, (v) => { if (v) loadPersistedScenes() })
+
 const sceneDimensions = [
   { name: '核心业务流程', type: 'success' },
   { name: '表单验证',     type: 'warning' },
@@ -1582,6 +1595,12 @@ const parseCurrentPage = async () => {
 }
 
 const openScenePlanner = () => { scenePlannerVisible.value = true }
+
+// 场景覆盖页跳转到场景规划抽屉（去 AI 规划场景 / 重新规划）
+const goScenePlanner = async () => {
+  scenePlannerVisible.value = true
+  await loadPersistedScenes()
+}
 
 const loadPersistedScenes = async () => {
   if (!filterTaskId.value) return
@@ -2153,6 +2172,31 @@ const caseEditTab = ref('info')
 const stepsJson   = ref([])
 const stepsLoading = ref(false)
 
+// 从 stepsJson 实时生成可读文本，同步到基本信息 Tab 的「测试步骤」
+function _stepsToText(arr) {
+  return arr.map((s, i) => {
+    const a = s.action || ''
+    const d = s.description || ''
+    const sel = s.selector || ''
+    const val = s.value || ''
+    if (d) return `${i + 1}. ${d}` + ((a === 'fill' || a === 'type' || a === 'select') && val && !d.includes('=') ? ` = ${val}` : '')
+    const m = { navigate: `导航到 ${s.url || ''}`, click: `点击 ${sel}`, dblclick: `双击 ${sel}`,
+      rightclick: `右键 ${sel}`, fill: `填写 ${sel} = ${val}`, type: `输入 ${sel} = ${val}`,
+      select: `选择 ${sel} → ${val}`, check: `勾选 ${sel}`, uncheck: `取消勾选 ${sel}`, hover: `悬停 ${sel}`,
+      press: `按键 ${val}`, scroll: `滚动到 ${sel}`, wait_for: `等待 ${sel || s.url || ''}`,
+      assert_text: `断言 ${sel} 文本 = ${s.expected || ''}`, assert_visible: `断言 ${sel} 可见`,
+      assert_hidden: `断言 ${sel} 不可见`, assert_url: `断言 URL = ${s.expected || ''}`,
+      assert_title: `断言标题 = ${s.expected || ''}`, screenshot: `截图`, evaluate: `执行 JS`,
+    }
+    return `${i + 1}. ${m[a] || a}`
+  }).join('\n')
+}
+
+// 步骤编辑器内变更后，实时同步可读文本到基本信息 Tab（空时不覆盖原有文字）
+watch(stepsJson, (val) => {
+  if (editingCase.value && val.length > 0) caseForm.steps = _stepsToText(val)
+}, { deep: true })
+
 // ── 前置步骤（方案一） ────────────────────────────────────────────────────────
 const setupStepsJson = ref([])
 const caseUseStorage = ref(true)
@@ -2408,7 +2452,7 @@ const saveSteps = async (silent = false) => {
   try {
     const updated = await taskStore.updateCase(editingCase.value.id, { steps_json: stepsJson.value })
     // 后端自动把 steps_json 转成可读文字写入 steps 字段，同步到基础信息 Tab
-    if (updated?.steps) caseForm.steps = updated.steps
+    caseForm.steps = updated?.steps || ''
     if (!silent) ElMessage.success('步骤已保存')
   } catch (e) {
     ElMessage.error('保存失败: ' + (e?.response?.data?.detail || e.message))

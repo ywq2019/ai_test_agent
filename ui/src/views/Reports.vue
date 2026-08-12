@@ -122,6 +122,13 @@
                         <span class="step-dur">{{ s.duration_ms }}ms</span>
                         <span v-if="s.warning" class="step-msg step-warn-text">⚠ {{ s.warning }}</span>
                         <span v-if="s.error" class="step-msg step-err-text">{{ s.error }}</span>
+                        <img
+                          v-if="s.screenshot"
+                          :src="getFullUrl(s.screenshot)"
+                          class="step-thumb"
+                          @click="viewScreenshot(s.screenshot, s.description || '步骤截图')"
+                          title="点击查看大图"
+                        />
                       </div>
                     </div>
                     <div v-else class="step-panel" style="color:#909399;text-align:center;padding:12px;">暂无步骤记录</div>
@@ -142,9 +149,15 @@
                     <span :style="{ color: row.status === 'failed' ? '#f56c6c' : '' }">{{ row.error_message || '-' }}</span>
                   </template>
                 </el-table-column>
-                <el-table-column label="截图" width="75" align="center">
+                <el-table-column label="截图" width="90" align="center">
                   <template #default="{ row }">
-                    <el-button v-if="row.screenshot" type="primary" link size="small" @click="viewScreenshot(row.screenshot, row.case_name)">查看</el-button>
+                    <img
+                      v-if="row.screenshot"
+                      :src="getFullUrl(row.screenshot)"
+                      class="case-thumb"
+                      @click="viewScreenshot(row.screenshot, row.case_name)"
+                      title="点击查看大图"
+                    />
                     <span v-else style="color:#c0c4cc;">-</span>
                   </template>
                 </el-table-column>
@@ -184,6 +197,7 @@ import { useAuthStore } from '../stores/auth'
 import { useWorkspaceStore } from '../stores/workspace'
 import WorkspaceRequired from '../components/WorkspaceRequired.vue'
 import { reportApi } from '../api'
+import api from '../api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 const route = useRoute()
@@ -304,9 +318,25 @@ const deleteBatch = async () => {
   } catch (e) { /* cancelled */ }
 }
 
-const exportReport = () => {
+const exportReport = async () => {
   if (!currentReport.value) return
-  window.open(`/api/v1/reports/${currentReport.value.report_id}/export`, '_blank')
+  const rid = currentReport.value.report_id
+  try {
+    const blob = await api.get(`/reports/${rid}/export`, { responseType: 'blob', timeout: 60000 })
+    const url = URL.createObjectURL(new Blob([blob], { type: 'text/html' }))
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `report_${rid}.html`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    setTimeout(() => URL.revokeObjectURL(url), 10000)
+  } catch (e) {
+    const msg = e.response?.data
+      ? await e.response.data.text?.().catch(() => '') || e.message
+      : e.message
+    ElMessage.error('HTML 导出失败：' + msg)
+  }
 }
 
 const viewScreenshot = (path, title = '') => {
@@ -409,4 +439,18 @@ onMounted(async () => {
 .step-msg { font-size: 11px; word-break: break-all; flex-shrink: 0; max-width: 300px; }
 .step-warn-text { color: #e6a23c; }
 .step-err-text { color: #f56c6c; }
+
+/* 截图缩略图 */
+.step-thumb {
+  width: 80px; height: 50px; object-fit: cover; border-radius: 4px;
+  border: 1px solid #e4e7ed; cursor: pointer; flex-shrink: 0;
+  transition: transform .15s, box-shadow .15s;
+}
+.step-thumb:hover { transform: scale(2.2); box-shadow: 0 4px 16px rgba(0,0,0,.18); z-index: 10; position: relative; }
+.case-thumb {
+  width: 60px; height: 40px; object-fit: cover; border-radius: 3px;
+  border: 1px solid #e4e7ed; cursor: pointer; vertical-align: middle;
+  transition: transform .15s;
+}
+.case-thumb:hover { transform: scale(3.5); box-shadow: 0 4px 16px rgba(0,0,0,.18); z-index: 10; position: relative; }
 </style>
