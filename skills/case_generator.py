@@ -17,14 +17,17 @@ from loguru import logger
 from skills.step_hardener import harden_and_enrich
 
 
-def _make_step_json(action: str, selector: str = "", value: str = "", description: str = "") -> dict:
+def _make_step_json(action: str, selector: str = "", value: str = "", description: str = "", frame_selectors: list = None) -> dict:
     """构建结构化的步骤 JSON 对象（与 tools/action_schema.py 兼容）。"""
-    return {
+    step = {
         "action": action,
         "selector": selector,
         "value": value,
         "description": description or f"{action} {selector}",
     }
+    if frame_selectors:
+        step["frame_selectors"] = frame_selectors
+    return step
 
 
 class CaseGenerator:
@@ -56,11 +59,48 @@ class CaseGenerator:
                 return ""
             return sel
 
+        # ── 辅助：提取 selector（括号/引号平衡扫描，避免 [name="x"] 被截断） ──
+        def _extract_selector(text: str) -> str:
+            m = _re.search(r'selector\s*[:：=]?\s*', text, _re.IGNORECASE)
+            if not m:
+                return ""
+            depth = 0
+            out = []
+            for ch in text[m.end():]:
+                if ch in '([{':
+                    depth += 1
+                elif ch in ')]}':
+                    if depth == 0:
+                        break
+                    depth -= 1
+                if depth == 0 and ch in '，。；;、\n）】':
+                    break
+                out.append(ch)
+            sel = ''.join(out).strip()
+            return _re.sub(r'[，。；;、\s]+$', '', sel).strip()
+
+        # ── 辅助：提取 iframe 多层路径（frame: a >> b） ──
+        def _extract_frame(text: str) -> list:
+            m = _re.search(r'frame\s*[:：=]\s*', text, _re.IGNORECASE)
+            if not m:
+                return []
+            out = []
+            for ch in text[m.end():]:
+                if ch in '，,。；;、\n）)】]':
+                    break
+                out.append(ch)
+            path = ''.join(out).strip()
+            path = _re.sub(r'[，,。；;、\s]+$', '', path)
+            if not path:
+                return []
+            # >> 为显式多层分隔符，顺序从外到内
+            parts = [p.strip().strip('"\'「」『』') for p in path.split('>>') if p.strip()]
+            return [p for p in parts if p]
+
         result = []
         # 按换行或数字编号拆分步骤
         raw_steps = _re.split(r'\n\s*(?=\d+[\.\、\)）]\s*)|(?<=\n)\s*(?=\d+[\.\、\)）])', steps_text)
         if len(raw_steps) <= 1:
-            # 没有编号前缀，尝试按 \n 拆分
             raw_steps = [s.strip() for s in steps_text.split('\n') if s.strip()]
 
         for step_text in raw_steps:
@@ -70,29 +110,34 @@ class CaseGenerator:
             # 去掉步骤编号前缀（1. / 1、 / 1) / Step 1: 等）
             step_text = _re.sub(r'^(?:步骤?\s*)?\d+\s*[\.\、\)：:\-]\s*', '', step_text).strip()
 
-            # 提取 selector
-            sel_match = _re.search(r'selector[\s:：]*([^\s,，)\n\]]+)', step_text, _re.IGNORECASE)
-            selector = sel_match.group(1).strip().rstrip(')）') if sel_match else ""
-            # 清理常见尾部符号
-            selector = _re.sub(r'[)）\]】]+$', '', selector)
-            # 过滤 nth-child 等脆弱选择器
-            selector = _clean_sel(selector)
+            # 提取 iframe 多层路径（frame: a >> b），并剔除 frame 标注避免污染解析
+            frame_selectors = _extract_frame(step_text)
+            step_text_clean = _re.sub(
+                r'frame\s*[:：=]\s*[^，,。；;、\n）)】]*', ' ', step_text, flags=_re.IGNORECASE
+            )
 
-            # 提取引号中的值
-            val_match = _re.search(r"[''「「\"\"]([^''」」\"\"]+)[''」」\"\"]", step_text)
-            value = val_match.group(1) if val_match else ""
+            # 提取 selector 与 value
+            selector = _clean_sel(_extract_selector(step_text_clean))
+            val_match = _re.search(
+                r'(?:输入|填写|键入|fill|type|enter)\s*[:：]?\s*["\'「『]([^"\'」』]+)["\'」』]',
+                step_text_clean, _re.IGNORECASE
+            )
+            value = val_match.group(1).strip() if val_match else ""
             if not value:
-                # 尝试匹配 "输入 xxx" 后面的内容（无引号）
-                m2 = _re.search(r'输入\s+([^\s,，。；;，]+(?:[\.\-\w]+)?)', step_text)
+                m2 = _re.search(r'(?:输入|填写|键入)\s*([^\s,，。；;、]+(?:[\.\-\w]+)?)', step_text_clean)
                 if m2 and m2.group(1) not in ('数据', '内容', '文本', '信息'):
                     value = m2.group(1)
 
             # ── 动作判定 ──
-            text_lower = step_text.lower()
+            # 先剔除 "（selector: xxx）" 标注，避免英文动作关键词（select/check/type）
+            # 误命中 "selector:" 字样本身导致动作归类错误。
+            action_text = _re.sub(r'[（(]\s*selector\s*[:：=]\s*[^）)]*[）)]', ' ', step_text_clean, flags=_re.IGNORECASE)
+            action_text = _re.sub(r'selector\s*[:：=]\s*[^\s,，。；;、)]+', ' ', action_text, flags=_re.IGNORECASE)
+            text_lower = action_text.lower()
 
             if any(kw in text_lower for kw in ['导航', '跳转', '打开页面', '进入', 'navigate', 'goto']):
                 # 提取 URL
-                url_m = _re.search(r'(https?://[^\s,，。]+)', step_text)
+                url_m = _re.search(r'(https?://[^\s,，。]+)', step_text_clean)
                 action = "navigate"
                 the_url = url_m.group(1) if url_m else ""
                 if not the_url and not selector:
@@ -103,48 +148,57 @@ class CaseGenerator:
             elif any(kw in text_lower for kw in ['输入', '填写', '键入', 'fill', 'type', 'enter']):
                 if not selector:
                     # 没有 selector 但有输入操作 → 尝试从上下文推断
-                    prev_sel = _re.search(r'(?:找到|定位|选择|点击)\s*[^,，。]*(?:selector[:\s]*)?([^\s,，)]+)', step_text)
+                    prev_sel = _re.search(r'(?:找到|定位|选择|点击)\s*[^,，。]*(?:selector[:\s]*)?([^\s,，)]+)', step_text_clean)
                     if prev_sel:
                         selector = prev_sel.group(1)
                 if selector:
                     result.append(_make_step_json("fill", selector, value or "test",
-                                                   f"输入 {value or selector}"))
+                                                   f"输入 {value or selector}",
+                                                   frame_selectors=frame_selectors))
                 else:
                     # 无 selector 的输入不可执行，标记待补充
                     result.append(_make_step_json("fill", "", value or "test",
-                                                   f"[需补充selector] 输入 {value or ''}"))
+                                                   f"[需补充selector] 输入 {value or ''}",
+                                                   frame_selectors=frame_selectors))
 
             elif any(kw in text_lower for kw in ['点击', '单击', '按下', 'click', 'press', 'tap']):
                 if selector:
                     result.append(_make_step_json("click", selector, "",
-                                                   f"点击 {selector}"))
+                                                   f"点击 {selector}",
+                                                   frame_selectors=frame_selectors))
                 else:
                     # 尝试提取点击目标
-                    click_target = _re.search(r'(?:点击|单击|按下)\s*[""「「]?([^""」」，,，。；;\n]+)', step_text)
+                    click_target = _re.search(r'(?:点击|单击|按下)\s*[""「「]?([^""」」，,，。；;\n]+)', step_text_clean)
                     desc = click_target.group(1) if click_target else ""
-                    result.append(_make_step_json("click", "", "", f"[需补充selector] 点击 {desc or '目标元素'}"))
+                    result.append(_make_step_json("click", "", "", f"[需补充selector] 点击 {desc or '目标元素'}",
+                                                   frame_selectors=frame_selectors))
 
             elif any(kw in text_lower for kw in ['选择', '下拉', 'select', 'pick']):
                 result.append(_make_step_json("select", selector, value or "1",
-                                               f"选择 {value or selector}"))
+                                               f"选择 {value or selector}",
+                                               frame_selectors=frame_selectors))
 
             elif any(kw in text_lower for kw in ['悬停', 'hover', 'mouseover']):
                 result.append(_make_step_json("hover", selector, "",
-                                               f"悬停 {selector}"))
+                                               f"悬停 {selector}",
+                                               frame_selectors=frame_selectors))
 
             elif any(kw in text_lower for kw in ['断言', '验证', '检查', '确认', 'assert', 'verify', 'check', 'expect']):
                 if any(kw in text_lower for kw in ['包含', 'contain', '显示', 'display', '出现', 'visible']):
                     result.append(_make_step_json("assert_text", selector, value or "",
-                                                   f"验证 {selector} 包含 {value or '预期内容'}"))
+                                                   f"验证 {selector} 包含 {value or '预期内容'}",
+                                                   frame_selectors=frame_selectors))
                 elif any(kw in text_lower for kw in ['可见', 'visible']):
                     result.append(_make_step_json("assert_visible", selector, "",
-                                                   f"验证 {selector} 可见"))
+                                                   f"验证 {selector} 可见",
+                                                   frame_selectors=frame_selectors))
                 elif any(kw in text_lower for kw in ['url', '地址', '跳转', '页面']):
                     result.append(_make_step_json("assert_url", "", value or "",
                                                    f"验证 URL 包含 {value or '预期路径'}"))
                 else:
                     result.append(_make_step_json("assert_text", selector, value or "",
-                                                   f"验证 {selector or '页面'} {value or '符合预期'}"))
+                                                   f"验证 {selector or '页面'} {value or '符合预期'}",
+                                                   frame_selectors=frame_selectors))
 
             elif any(kw in text_lower for kw in ['等待', 'wait', 'sleep', '延迟']):
                 val = value if value else "1"
@@ -159,7 +213,8 @@ class CaseGenerator:
 
             elif selector:
                 # 有 selector 但没有明确动作 → 默认 click
-                result.append(_make_step_json("click", selector, "", f"操作 {selector}"))
+                result.append(_make_step_json("click", selector, "", f"操作 {selector}",
+                                               frame_selectors=frame_selectors))
 
         return result
 
@@ -235,7 +290,7 @@ class CaseGenerator:
                 for case in cases:
                     if case.get("steps_json"):
                         try:
-                            case["steps_json"] = await harden_and_enrich(case["steps_json"], use_ai=True)
+                            case["steps_json"] = await harden_and_enrich(case["steps_json"], use_ai=True, page_elements=page_elements)
                             hardened_count += 1
                         except Exception as e:
                             logger.warning(f"用例「{case.get('name','')}」健壮化失败: {e}")
@@ -259,7 +314,7 @@ class CaseGenerator:
                 for c in doc_cases:
                     if c.get("steps_json"):
                         try:
-                            c["steps_json"] = await harden_and_enrich(c["steps_json"], use_ai=True)
+                            c["steps_json"] = await harden_and_enrich(c["steps_json"], use_ai=True, page_elements=page_elements)
                         except Exception as e:
                             logger.warning(f"用例「{c.get('name','')}」健壮化失败: {e}")
                 await _p(100, f"生成完成，共 {len(doc_cases)} 条用例")
@@ -290,7 +345,7 @@ class CaseGenerator:
         if has_steps:
             for c in has_steps:
                 try:
-                    c["steps_json"] = await harden_and_enrich(c["steps_json"], use_ai=True)
+                    c["steps_json"] = await harden_and_enrich(c["steps_json"], use_ai=True, page_elements=page_elements)
                 except Exception as e:
                     logger.warning(f"用例「{c.get('name','')}」健壮化失败: {e}")
         # ── 无特定元素可生成时，返回页面级基础用例 ──
@@ -549,6 +604,7 @@ class CaseGenerator:
                 tag   = e.get("tag", "")
                 typ   = e.get("type", "")
                 label = (e.get("label", "") or "").strip()[:40]
+                frame = e.get("frame_selectors") or []
 
                 # 构建人类可读的描述 + 必须使用的真实 selector
                 desc_parts = []
@@ -574,9 +630,11 @@ class CaseGenerator:
                     sel_candidates.append(f'[name="{name}"]')
 
                 if sel_candidates:
+                    frame_hint = f"  [iframe: {' > '.join(frame)}]" if frame else ""
                     elem_lines.append(
                         f"  • {tag}[{typ}] {desc} → 【真实selector】{sel_candidates[0]}"
                         + (f"  备选: {sel_candidates[1]}" if len(sel_candidates) > 1 else "")
+                        + frame_hint
                     )
             else:
                 # 旧格式：直接是 selector 字符串
@@ -610,6 +668,9 @@ class CaseGenerator:
     a.header2018-unloginlink.header2018-unloginlink1 → 直接写这个完整 selector
 - 断言步骤（验证文字/可见性）可以用 :has-text() 构造，如 p:has-text("错误提示")
 - 严禁使用 :nth-child、伪造的 #id、或任何未在上方列表中出现的 selector
+- 如果目标元素带有 [iframe: ...] 标注，说明它在 iframe 内，步骤里必须额外写 frame 路径：
+    frame: iframe#payment >> iframe#inner
+  （多层用 >> 连接，顺序从外到内；frame 值必须复制上方 [iframe: ...] 标注，不得编造）
 
 【生成要求】
 {count_hint}
@@ -621,7 +682,8 @@ class CaseGenerator:
 - 每个步骤格式：操作描述（selector: 真实selector值），示例：
   "1. 找到关键词输入框（selector: input[name='keyword']），输入 '会计'
    2. 点击搜索按钮（selector: input.header2018-submit）
-   3. 验证搜索结果出现（selector: .search-result-item）"
+   3. 填写邮箱（selector: input[name='email']，frame: iframe#payment），输入 'a@b.com'
+   4. 验证搜索结果出现（selector: .search-result-item）"
 - 校验/边界值用例也必须带 selector，不可只写"输入超长字符串"
 - 预期结果必须可自动化断言
 - 只针对「{module_name}」模块
@@ -1690,6 +1752,7 @@ class CaseGenerator:
             label = (elem.get("label", "") or elem.get("aria_label", "") or "").strip()[:40]
             name = elem.get("name", "")
             selector = (elem.get("selector", "") or "").strip()
+            frame_selectors = elem.get("frame_selectors") or []
 
             # 构建给 LLM 的描述行（带编号）
             parts = [f"[{idx:03d}] <{tag}"]
@@ -1705,6 +1768,8 @@ class CaseGenerator:
                 parts.append(f" name={name!r}")
             if selector:
                 parts.append(f" selector={selector!r}")
+            if frame_selectors:
+                parts.append(f" frame={frame_selectors!r}")
             parts.append(">")
             lines.append("".join(parts))
 
@@ -1717,6 +1782,7 @@ class CaseGenerator:
                 "label": label,
                 "name": name,
                 "selector": selector,
+                "frame_selectors": frame_selectors,
             }
 
         return index_map, "\n".join(lines)

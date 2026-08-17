@@ -597,6 +597,18 @@
             <el-button size="small" type="primary" plain @click="addStep">
               <el-icon><Plus /></el-icon>添加步骤
             </el-button>
+            <el-dropdown trigger="click" @command="insertControlFlow" style="margin-left:4px">
+              <el-button size="small" type="primary" plain>
+                插入控制流<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+              </el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="if">if 块（条件分支）</el-dropdown-item>
+                  <el-dropdown-item command="ifelse">if-else 块（二分支）</el-dropdown-item>
+                  <el-dropdown-item command="while">while 块（循环轮询）</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
             <el-button size="small" :loading="stepsLoading" @click="reloadSteps" :disabled="!editingCase">
               <el-icon><Refresh /></el-icon>重新加载
             </el-button>
@@ -615,7 +627,7 @@
           </div>
           <div v-else-if="!stepsJson.length" style="text-align:center;padding:40px 0">
             <el-empty description="暂无结构化步骤">
-              <el-button size="small" type="primary" @click="addStep">添加第一个步骤</el-button>
+              <el-button size="small" type="primary" @click="addStep()">添加第一个步骤</el-button>
             </el-empty>
           </div>
           <div v-else class="step-table">
@@ -631,7 +643,57 @@
             </div>
 
             <div v-for="(step, idx) in stepsJson" :key="step.id || idx" class="step-row"
-              :class="{ 'step-row-danger': step.robustness === 'D', 'step-row-auto': step._auto_inserted }">
+              :class="{ 'step-row-danger': step.robustness === 'D', 'step-row-auto': step._auto_inserted, 'step-row-control': isControlFlow(step.action) }">
+
+              <!-- 控制流步骤（if / else / endif / while / endwhile） -->
+              <template v-if="isControlFlow(step.action)">
+                <div class="step-col ctrl-block" :style="{ marginLeft: (stepIndents[idx] || 0) * 24 + 'px' }">
+                  <el-tag size="small" :type="ctrlTagType(step.action)" effect="dark" disable-transitions>
+                    {{ ctrlLabel(step.action) }}
+                  </el-tag>
+                  <el-autocomplete
+                    v-if="step.action === 'if' || step.action === 'while'"
+                    v-model="step.condition" size="small" class="ctrl-condition"
+                    placeholder='条件表达式，如 visible("#submit") or url contains "login"'
+                    :fetch-suggestions="queryConditionSuggestions" :trigger-on-focus="true"
+                    @focus="loadEnvVars"
+                    @select="onConditionSelect(step, $event)" @change="saveSteps(true)">
+                    <template #default="{ item }">
+                      <div class="cond-suggest">
+                        <code>{{ item.value }}</code>
+                        <span>{{ item.desc }}</span>
+                      </div>
+                    </template>
+                  </el-autocomplete>
+                  <template v-if="step.action === 'while'">
+                    <span class="ctrl-param">max_iter</span>
+                    <el-input-number v-model="step.max_iter" size="small" :min="1" :max="10000" :step="1"
+                      controls-position="right" style="width:90px" @change="saveSteps(true)" />
+                    <span class="ctrl-param">delay_ms</span>
+                    <el-input-number v-model="step.delay_ms" size="small" :min="0" :max="600000" :step="100"
+                      controls-position="right" style="width:110px" @change="saveSteps(true)" />
+                  </template>
+                  <span v-else-if="step.action === 'else' || step.action === 'endif' || step.action === 'endwhile'"
+                    class="ctrl-desc">{{ ctrlDesc(step.action) }}</span>
+                  <el-dropdown trigger="click" @command="insertAt(idx, $event)">
+                    <el-button size="small" type="primary" plain title="在下方插入">+ 插入</el-button>
+                    <template #dropdown>
+                      <el-dropdown-menu>
+                        <el-dropdown-item command="step">添加步骤</el-dropdown-item>
+                        <el-dropdown-item command="if" divided>if 块</el-dropdown-item>
+                        <el-dropdown-item command="ifelse">if-else 块</el-dropdown-item>
+                        <el-dropdown-item command="while">while 块</el-dropdown-item>
+                      </el-dropdown-menu>
+                    </template>
+                  </el-dropdown>
+                  <el-button size="small" type="danger" link class="ctrl-del" @click="removeStep(idx)">
+                    <el-icon><Delete /></el-icon>
+                  </el-button>
+                </div>
+              </template>
+
+              <!-- 普通步骤 -->
+              <template v-else>
 
               <!-- 序号 -->
               <div class="step-col col-num">
@@ -730,6 +792,21 @@
                     placeholder="selector，@ 触发别名补全"
                     :aliases="aliasList"
                     @change="updateStepGrade(step); saveSteps(true)" />
+                <!-- iframe 多层路径（可编辑） -->
+                <div style="display:flex;align-items:center;gap:4px;margin-top:4px;flex-wrap:wrap">
+                  <template v-if="(step.frame_selectors || []).length">
+                    <span style="font-size:11px;color:#909399;flex-shrink:0">iframe:</span>
+                    <el-input v-for="(f, fi) in step.frame_selectors" :key="fi"
+                      v-model="step.frame_selectors[fi]" size="small" style="width:110px"
+                      placeholder="iframe selector" @change="saveSteps(true)" />
+                    <el-button size="small" link type="danger"
+                      @click="removeFrameSelector(step, step.frame_selectors.length - 1)"
+                      title="移除最内层 iframe">×</el-button>
+                  </template>
+                  <el-button size="small" text type="primary"
+                    @click="addFrameSelector(step)" title="添加 iframe 层级"
+                    style="font-size:11px;padding:2px 5px">+ iframe</el-button>
+                </div>
                 </template>
                 <!-- navigate/assert_url 用 url/expected 字段 -->
                 <template v-else-if="step.action === 'navigate'">
@@ -740,14 +817,34 @@
 
               <!-- Value / Expected -->
               <div class="step-col col-value">
-                <el-input
+                <el-autocomplete
                   v-if="needsValue(step.action)"
                   v-model="step.value" size="small"
-                  :placeholder="valuePlaceholder(step.action)" />
-                <el-input
+                  :placeholder="valuePlaceholder(step.action)"
+                  :fetch-suggestions="queryEnvValueSuggestions" :trigger-on-focus="true"
+                  @focus="loadEnvVars"
+                  @select="onEnvValueSelect(step, 'value', $event)" @change="saveSteps(true)">
+                  <template #default="{ item }">
+                    <div class="cond-suggest">
+                      <code>{{ item.value }}</code>
+                      <span>{{ item.desc }}</span>
+                    </div>
+                  </template>
+                </el-autocomplete>
+                <el-autocomplete
                   v-else-if="needsExpected(step.action)"
                   v-model="step.expected" size="small"
-                  :placeholder="'期望：' + (step.action === 'assert_url' ? 'URL 关键词' : '文本/正则')" />
+                  :placeholder="'期望：' + (step.action === 'assert_url' ? 'URL 关键词' : '文本/正则')"
+                  :fetch-suggestions="queryEnvValueSuggestions" :trigger-on-focus="true"
+                  @focus="loadEnvVars"
+                  @select="onEnvValueSelect(step, 'expected', $event)" @change="saveSteps(true)">
+                  <template #default="{ item }">
+                    <div class="cond-suggest">
+                      <code>{{ item.value }}</code>
+                      <span>{{ item.desc }}</span>
+                    </div>
+                  </template>
+                </el-autocomplete>
                 <span v-else style="color:#c0c4cc;font-size:12px">—</span>
               </div>
 
@@ -768,14 +865,25 @@
                   <el-button size="small" :disabled="idx === stepsJson.length - 1"
                     @click="moveStep(idx, 1)" title="下移">↓</el-button>
                 </el-button-group>
-                <el-button size="small" type="danger" plain @click="removeStep(idx)"
-                  style="margin-left:4px"><el-icon><Delete /></el-icon></el-button>
+                <el-dropdown trigger="click" @command="insertAt(idx, $event)">
+                  <el-button size="small" type="primary" plain title="在下方插入">+</el-button>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item command="step">添加步骤</el-dropdown-item>
+                      <el-dropdown-item command="if" divided>if 块</el-dropdown-item>
+                      <el-dropdown-item command="ifelse">if-else 块</el-dropdown-item>
+                      <el-dropdown-item command="while">while 块</el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
+                <el-button size="small" type="danger" plain @click="removeStep(idx)"><el-icon><Delete /></el-icon></el-button>
               </div>
+              </template>
             </div>
           </div>
 
           <!-- 末尾快速添加步骤按钮 -->
-          <div class="add-step-btn" @click="addStep">
+          <div class="add-step-btn" @click="addStep()">
             <el-icon><Plus /></el-icon>
             <span>添加步骤</span>
           </div>
@@ -1173,13 +1281,31 @@
             <span class="scene-toolbar-tip">点击「录制」完成场景覆盖</span>
           </div>
           <div class="scene-toolbar-right">
-            <el-button size="small" plain :loading="scenePlanning" @click="planScenes(true)" class="scene-toolbar-btn">
-              <el-icon><Plus /></el-icon>追加场景
+            <el-button size="small" plain
+              :loading="scenePlanning && scenePlanningMode === 'append'"
+              :disabled="scenePlanning"
+              @click="planScenes(true)" class="scene-toolbar-btn">
+              <el-icon><Plus /></el-icon>
+              <span v-if="scenePlanning && scenePlanningMode === 'append'">追加中…</span>
+              <span v-else>追加场景</span>
             </el-button>
-            <el-button size="small" text type="danger" @click="resetScenes" class="scene-toolbar-btn-danger">
-              <el-icon><Refresh /></el-icon>重新规划
+            <el-button size="small" text type="danger"
+              :loading="scenePlanning && scenePlanningMode === 'replan'"
+              :disabled="scenePlanning"
+              @click="resetScenes" class="scene-toolbar-btn-danger">
+              <el-icon><Refresh /></el-icon>
+              <span v-if="scenePlanning && scenePlanningMode === 'replan'">规划中…</span>
+              <span v-else>重新规划</span>
             </el-button>
           </div>
+        </div>
+
+        <!-- 进度提示条 -->
+        <div v-if="scenePlanning" class="scene-planning-banner">
+          <el-icon class="is-loading"><Loading /></el-icon>
+          <span>{{ scenePlanningMode === 'append' ? 'AI 正在追加场景，约需 15-30 秒，请稍候…'
+            : scenePlanningMode === 'replan' ? 'AI 正在重新规划场景，约需 15-30 秒，请稍候…'
+            : 'AI 正在生成场景，约需 15-30 秒，请稍候…' }}</span>
         </div>
 
         <!-- 场景卡片列表 -->
@@ -1475,12 +1601,15 @@ const saveRecording = async () => {
   try {
     const name = recordingCaseName.value.trim() || ''
     const pageTitle = recordedSteps.value[0]?.url || document.title
-    await recordingApi.save(filterTaskId.value, recordedSteps.value, name, pageTitle)
-    ElMessage.success(`已保存为用例「${name || '自动命名'}」`)
+    const replaceCaseId = _pendingReplaceCaseId.value
+    await recordingApi.save(filterTaskId.value, recordedSteps.value, name, pageTitle, replaceCaseId)
+    ElMessage.success(replaceCaseId ? `已替换原用例「${name || '自动命名'}」` : `已保存为用例「${name || '自动命名'}」`)
     recordingDialogVisible.value = false
     recordedSteps.value = []
     recordingCaseName.value = ''
     _recordingSessionId = null
+    _pendingReplaceCaseId.value = null
+    if (replaceCaseId) _pendingSceneName.value = ''
     // 刷新用例列表
     await taskStore.fetchCases(filterTaskId.value)
     // 场景录制完成：标记并重新打开场景抽屉
@@ -1515,7 +1644,8 @@ const newEnvVar  = ref({ key: '', value: '', is_secret: false })
 
 const loadEnvVars = async () => {
   if (!filterTaskId.value) return
-  try { envVars.value = await envVarApi.list(filterTaskId.value) } catch {}
+  try { envVars.value = await envVarApi.list(filterTaskId.value) }
+  catch (e) { console.error('[loadEnvVars] 加载环境变量失败', e) }
 }
 const saveEnvVar = async () => {
   if (!newEnvVar.value.key.trim()) { ElMessage.warning('Key 不能为空'); return }
@@ -1552,12 +1682,14 @@ const exportPytest = async () => {
 // ── AI 场景规划 ──────────────────────────────────────────────────────────────
 const scenePlannerVisible = ref(false)
 const scenePlanning       = ref(false)
+const scenePlanningMode   = ref('')   // 'generate' | 'append' | 'replan'
 const sceneDescription    = ref('')
 const scenes              = ref([])
 const recordingSceneId    = ref(null)
 const editingSceneId      = ref(null)
 const expandedSceneId     = ref(null)
 const _pendingSceneName   = ref('')
+const _pendingReplaceCaseId = ref(null)   // 重录失败用例：保存时覆盖该 case，而非新增
 
 // 抽屉打开时总是从后端加载最新场景（含录制状态），避免展示过期数据
 watch(scenePlannerVisible, (v) => { if (v) loadPersistedScenes() })
@@ -1611,9 +1743,10 @@ const loadPersistedScenes = async () => {
   } catch {}
 }
 
-const planScenes = async (append = false) => {
+const planScenes = async (append = false, mode = '') => {
   if (!filterTaskId.value) return
   scenePlanning.value = true
+  scenePlanningMode.value = mode || (append ? 'append' : 'generate')
   try {
     const res = await caseApi.planScenes(filterTaskId.value, { description: sceneDescription.value, append })
     scenes.value = res.scenes || []
@@ -1624,18 +1757,19 @@ const planScenes = async (append = false) => {
     }
   } catch (e) {
     ElMessage.error('场景规划失败：' + (e?.response?.data?.detail || e?.message || ''))
-  } finally { scenePlanning.value = false }
+  } finally {
+    scenePlanning.value = false
+    scenePlanningMode.value = ''
+  }
 }
 
 const resetScenes = async () => {
   try {
     await ElMessageBox.confirm(
-      '重新规划会清空所有未录制的场景（已录制的会保留），确认继续？',
+      '重新规划会保留已录制的场景（锁定不替换），未录制的场景将被 AI 重新生成并替换。确认继续？',
       '重新规划', { type: 'warning', confirmButtonText: '确认', cancelButtonText: '取消' }
     )
-    scenes.value = scenes.value.filter(s => s.recorded)
-    if (!scenes.value.length) scenes.value = []
-    sceneDescription.value = ''
+    await planScenes(false, 'replan')
   } catch {}
 }
 
@@ -1994,7 +2128,9 @@ function sourceLabel(source) {
 
 // ── AI 规划场景 / 录制 已内嵌，原跳转函数替换 ──
 const reRecordCase = (row) => {
+  recordingSceneId.value = null   // 重录失败用例时清除残留的场景录制状态，避免误触发场景标记
   _pendingSceneName.value = row.name
+  _pendingReplaceCaseId.value = row.id
   startRecording()
 }
 
@@ -2018,7 +2154,12 @@ const loadScenePlan = async () => {
 }
 
 // 任务切换时清空场景缓存
-watch(filterTaskId, () => { scenePlanCache.value = [] })
+watch(filterTaskId, () => {
+  scenePlanCache.value = []
+  // 切换任务后，环境变量/别名库是任务级数据，清空避免跨任务联想错乱
+  envVars.value = []
+  aliasList.value = []
+})
 
 // 场景覆盖统计
 const sceneStats = computed(() => {
@@ -2289,6 +2430,8 @@ watch(caseEditTab, async (tab) => {
         aliasList.value = res.data || res
       } catch (_) {}
     }
+    // 预加载环境变量供条件表达式 {{变量}} 联想使用
+    if (filterTaskId.value) loadEnvVars()
   }
 })
 
@@ -2434,17 +2577,219 @@ const onSetupActionChange = (step) => {
 }
 
 // 步骤操作
-const addStep = () => {
-  const newStep = {
-    id: `s${String(stepsJson.value.length + 1).padStart(3, '0')}`,
-    action: 'click', selector: '', selectors: [], value: '',
-    url: '', expected: '', description: '', timeout: 30000,
-    optional: false, robustness: 'D',
+const isControlFlow = (action) => ['if','else','endif','while','endwhile'].includes(action)
+
+const ctrlLabel = (action) => ({
+  if: 'if 条件', else: 'else 否则', endif: 'endif 结束条件',
+  while: 'while 循环', endwhile: 'endwhile 结束循环',
+}[action] || action)
+
+const ctrlTagType = (action) => ({
+  if: 'primary', else: 'warning', endif: 'info',
+  while: 'success', endwhile: 'info',
+}[action] || 'info')
+
+const ctrlDesc = (action) => ({
+  else: '否则分支（与上方 if 配对）',
+  endif: '结束条件块',
+  endwhile: '结束循环块',
+}[action] || '')
+
+// 计算每个步骤的缩进层级（if/while 内缩进 1 层，else 与 if 对齐）
+const stepIndents = computed(() => {
+  const arr = stepsJson.value
+  const indents = new Array(arr.length).fill(0)
+  const stack = []
+  for (let i = 0; i < arr.length; i++) {
+    const a = arr[i].action
+    if (a === 'else') {
+      indents[i] = stack.length ? stack[stack.length - 1].depth : 0
+    } else if (a === 'endif' || a === 'endwhile') {
+      if (stack.length) stack.pop()
+      indents[i] = stack.length
+    } else if (a === 'if' || a === 'while') {
+      indents[i] = stack.length
+      stack.push({ depth: stack.length })
+    } else {
+      indents[i] = stack.length
+    }
   }
-  stepsJson.value.push(newStep)
+  return indents
+})
+
+const _newStep = (action = 'click') => ({
+  action, selector: '', selectors: [], value: '',
+  url: '', expected: '', description: '', timeout: 30000,
+  optional: false, robustness: 'D', frame_selectors: [],
+})
+
+const _ctrlStep = (action, extra = {}) => ({ action, condition: '', ...extra })
+
+const _buildControlFlowSteps = (type) => {
+  if (type === 'if') return [_ctrlStep('if'), _newStep('click'), _ctrlStep('endif')]
+  if (type === 'ifelse') return [_ctrlStep('if'), _newStep('click'), _ctrlStep('else'), _newStep('click'), _ctrlStep('endif')]
+  if (type === 'while') return [_ctrlStep('while', { max_iter: 10, delay_ms: 1000 }), _newStep('click'), _ctrlStep('endwhile')]
+  return []
+}
+
+// 统一插入：atIndex 为 null 时追加末尾；否则插入到 atIndex 步骤之后
+const _insertSteps = (atIndex, newSteps) => {
+  if (!newSteps.length) return
+  const used = new Set(stepsJson.value.map(s => s.id))
+  let n = stepsJson.value.length + 1
+  const freshId = () => {
+    let id = `s${String(n).padStart(3, '0')}`
+    while (used.has(id)) { n += 1; id = `s${String(n).padStart(3, '0')}` }
+    used.add(id)
+    return id
+  }
+  for (const s of newSteps) s.id = freshId()
+  if (atIndex == null) stepsJson.value.push(...newSteps)
+  else stepsJson.value.splice(atIndex + 1, 0, ...newSteps)
+}
+
+const addStep = (atIndex = null) => _insertSteps(atIndex, [_newStep('click')])
+
+// 插入控制流块：atIndex 为 null 时追加末尾；否则插入到 atIndex 步骤之后
+const insertControlFlow = (type, atIndex = null) => {
+  _insertSteps(atIndex, _buildControlFlowSteps(type))
+}
+
+// 行内「+ 插入」下拉命令分发
+const insertAt = (idx, cmd) => {
+  if (cmd === 'step') addStep(idx)
+  else insertControlFlow(cmd, idx)
+}
+
+// ── 条件表达式自动联想 ────────────────────────────────────────────────
+const CONDITION_SUGGESTIONS = [
+  { value: 'visible(', desc: '元素可见' },
+  { value: 'hidden(',  desc: '元素隐藏' },
+  { value: 'exists(',  desc: '元素存在' },
+  { value: 'count(',   desc: '元素数量' },
+  { value: 'text(',    desc: '元素文本' },
+  { value: 'contains(', desc: '包含' },
+  { value: 'url',      desc: '当前 URL' },
+  { value: 'title',    desc: '页面标题' },
+  { value: 'and',      desc: '且' },
+  { value: 'or',       desc: '或' },
+  { value: 'not',      desc: '非' },
+]
+let _conditionSnapshot = ''
+let _valueSnapshot = ''
+
+// 提取条件输入末尾正在输入的不完整片段（{{变量 / @别名 / 英文单词）
+const _currentToken = (expr) => {
+  const s = expr || ''
+  const env = s.match(/\{\{[\w]*$/)
+  if (env) return { start: s.length - env[0].length, token: env[0] }
+  const alias = s.match(/@[\w]*$/)
+  if (alias) return { start: s.length - alias[0].length, token: alias[0] }
+  const word = s.match(/[A-Za-z_][A-Za-z0-9_]*$/)
+  if (word) return { start: s.length - word[0].length, token: word[0] }
+  return { start: s.length, token: '' }
+}
+
+const queryConditionSuggestions = (queryString, cb) => {
+  _conditionSnapshot = queryString || ''
+  const s = queryString || ''
+
+  // @元素别名
+  if (/@[\w]*$/.test(s)) {
+    const prefix = (s.match(/@([\w]*)$/) || [])[1].toLowerCase()
+    return cb(aliasList.value
+      .filter(a => (a.name || '').toLowerCase().startsWith(prefix))
+      .map(a => ({ value: '@' + a.name, desc: a.description || (a.selectors || [])[0] || '元素别名' })))
+  }
+
+  // {{环境变量}}
+  if (/\{\{[\w]*$/.test(s)) {
+    const prefix = (s.match(/\{\{([\w]*)$/) || [])[1].toLowerCase()
+    return cb(envVars.value
+      .filter(e => (e.key || '').toLowerCase().startsWith(prefix))
+      .map(e => ({ value: '{{' + e.key + '}}', desc: e.is_secret ? '******' : (e.value || '') })))
+  }
+
+  // 函数 / 页面属性 / 逻辑
+  const m = s.match(/[A-Za-z_]*$/)
+  const prefix = m ? m[0].toLowerCase() : ''
+  cb(CONDITION_SUGGESTIONS.filter(c =>
+    c.value.toLowerCase().startsWith(prefix) && c.value.toLowerCase() !== prefix))
+}
+
+const onConditionSelect = (step, item) => {
+  const base = _conditionSnapshot || ''
+  const { start } = _currentToken(base)
+  step.condition = base.slice(0, start) + item.value
+  _conditionSnapshot = ''
+  saveSteps(true)
+}
+
+// Value / Expected 输入框的环境变量联想（仅 {{变量}}）
+const queryEnvValueSuggestions = (queryString, cb) => {
+  _valueSnapshot = queryString || ''
+  const s = queryString || ''
+  if (/\{\{[\w]*$/.test(s)) {
+    const prefix = (s.match(/\{\{([\w]*)$/) || [])[1].toLowerCase()
+    return cb(envVars.value
+      .filter(e => (e.key || '').toLowerCase().startsWith(prefix))
+      .map(e => ({ value: '{{' + e.key + '}}', desc: e.is_secret ? '******' : (e.value || '') })))
+  }
+  cb([])
+}
+
+const onEnvValueSelect = (step, field, item) => {
+  const base = _valueSnapshot || ''
+  const { start } = _currentToken(base)
+  step[field] = base.slice(0, start) + item.value
+  _valueSnapshot = ''
+  saveSteps(true)
+}
+
+// 配对校验：返回错误信息，合法时返回 null
+const validateControlFlow = () => {
+  const stack = []
+  for (let i = 0; i < stepsJson.value.length; i++) {
+    const a = stepsJson.value[i].action
+    if (a === 'if' || a === 'while') {
+      if (!(stepsJson.value[i].condition || '').trim()) {
+        return `第 ${i + 1} 步「${a}」缺少条件表达式`
+      }
+      stack.push({ action: a, idx: i })
+    } else if (a === 'else') {
+      const top = stack[stack.length - 1]
+      if (!top || top.action !== 'if') return `第 ${i + 1} 步「else」没有匹配的 if`
+      if (top.elseSeen) return `第 ${i + 1} 步出现重复的「else」`
+      top.elseSeen = true
+    } else if (a === 'endif') {
+      const top = stack.pop()
+      if (!top || top.action !== 'if') return `第 ${i + 1} 步「endif」没有匹配的 if`
+    } else if (a === 'endwhile') {
+      const top = stack.pop()
+      if (!top || top.action !== 'while') return `第 ${i + 1} 步「endwhile」没有匹配的 while`
+    }
+  }
+  if (stack.length) {
+    const top = stack[stack.length - 1]
+    return `第 ${top.idx + 1} 步「${top.action}」缺少对应的结束标记`
+  }
+  return null
 }
 
 const removeStep = (idx) => { stepsJson.value.splice(idx, 1) }
+
+// iframe 多层路径编辑（从外到内）
+const addFrameSelector = (step) => {
+  if (!Array.isArray(step.frame_selectors)) step.frame_selectors = []
+  step.frame_selectors.push('')
+}
+
+const removeFrameSelector = (step, idx) => {
+  if (!Array.isArray(step.frame_selectors)) return
+  step.frame_selectors.splice(idx, 1)
+  if (!step.frame_selectors.length) delete step.frame_selectors
+  saveSteps(true)
+}
 
 const moveStep = (idx, dir) => {
   const arr = stepsJson.value
@@ -2456,9 +2801,21 @@ const moveStep = (idx, dir) => {
 // 保存步骤（步骤编辑器 Tab 专用按钮）
 const saveSteps = async (silent = false) => {
   if (!editingCase.value) return
+  if (!silent) {
+    const err = validateControlFlow()
+    if (err) { ElMessage.error('控制流校验失败：' + err); return }
+  }
   saving.value = true
   try {
-    const updated = await taskStore.updateCase(editingCase.value.id, { steps_json: stepsJson.value })
+    // 清理空的 iframe 层级，避免执行时 frame_locator('') 报错
+    const cleanSteps = stepsJson.value.map(s => {
+      const fs = (s.frame_selectors || []).map(f => (f || '').trim()).filter(Boolean)
+      const out = { ...s }
+      if (fs.length) out.frame_selectors = fs
+      else delete out.frame_selectors
+      return out
+    })
+    const updated = await taskStore.updateCase(editingCase.value.id, { steps_json: cleanSteps })
     // 后端自动把 steps_json 转成可读文字写入 steps 字段，同步到基础信息 Tab
     caseForm.steps = updated?.steps || ''
     if (!silent) ElMessage.success('步骤已保存')
@@ -2480,7 +2837,7 @@ const editCase = (row) => {
   stepsJson.value = []
   // 加载前置步骤和 use_storage
   setupStepsJson.value = (row.setup_steps || []).map(s => ({ ...s }))
-  caseUseStorage.value = row.use_storage !== false
+  caseUseStorage.value = row.use_storage === true
   showCreateDialog.value = true
 }
 
@@ -2884,7 +3241,7 @@ watch(() => wsStore.initialized, async (ready) => {
 
 .step-row {
   display: grid;
-  grid-template-columns: 32px 52px 130px 1fr 140px 130px 80px;
+  grid-template-columns: 32px 52px 130px 1fr 140px 120px 160px;
   gap: 6px; align-items: center;
   padding: 6px 8px; border-radius: 6px;
   border: 1px solid #f0f0f0; background: #fff;
@@ -2893,6 +3250,21 @@ watch(() => wsStore.initialized, async (ready) => {
 .step-row:hover { background: #fafbff; }
 .step-row-danger { border-color: #fde2e2; background: #fff8f8; }
 .step-row-auto   { border-style: dashed; opacity: .85; }
+
+/* 控制流步骤 */
+.step-row-control { display: block; background: #fafcff; border-color: #d6e4ff; }
+.step-row-control:hover { background: #f5f9ff; }
+.ctrl-block { display: flex; align-items: center; gap: 8px; width: 100%; }
+.ctrl-block .el-tag { flex-shrink: 0; font-weight: 600; }
+.ctrl-condition { max-width: 460px; }
+.ctrl-param { font-size: 11px; color: #909399; flex-shrink: 0; }
+.ctrl-desc { font-size: 12px; color: #909399; }
+.ctrl-del { margin-left: auto; flex-shrink: 0; }
+
+/* 条件表达式联想下拉 */
+.cond-suggest { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.cond-suggest code { font-family: ui-monospace, Consolas, monospace; color: #409eff; font-size: 12px; flex-shrink: 0; }
+.cond-suggest span { font-size: 12px; color: #909399; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .step-col { overflow: hidden; }
 .col-num  { display: flex; justify-content: center; }
@@ -3121,6 +3493,20 @@ watch(() => wsStore.initialized, async (ready) => {
   font-size: 12px; color: #f56c6c;
 }
 .scene-toolbar-btn-danger:hover { background: #fff0f0; }
+
+.scene-planning-banner {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px;
+  margin: 0 0 12px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #eef4ff 0%, #e7f0ff 100%);
+  border: 1px solid #c7dbff;
+  color: #2c5af0;
+  font-size: 13px;
+  font-weight: 500;
+  flex-shrink: 0;
+}
+.scene-planning-banner .el-icon { font-size: 15px; }
 
 .scene-scrollbar { flex: 1; overflow: hidden; }
 .scene-list { display: flex; flex-direction: column; gap: 10px; padding: 2px 2px 12px; }

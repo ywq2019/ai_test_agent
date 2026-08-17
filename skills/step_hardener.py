@@ -364,13 +364,77 @@ def harden_steps(steps: list) -> list:
 
 # ── 5. AI 增强（可选，LLM 批量生成候选） ──────────────────────────────────────
 
-async def ai_enrich_selectors(steps: list, timeout_secs: int = 30) -> list:
+def _build_elements_summary(page_elements: Optional[list]) -> str:
+    """把页面元素压缩成给 LLM 的候选 selector 摘要（仅保留有真实 selector 的交互元素）。"""
+    if not page_elements:
+        return ""
+    bare_tags = {"a", "button", "input", "select", "textarea", "div", "span", ""}
+    lines = []
+    for e in page_elements[:200]:
+        selector = (e.get("selector") or "").strip()
+        if not selector or selector in bare_tags:
+            continue
+        tag = e.get("tag", "")
+        text = (e.get("text") or "").strip()[:40]
+        placeholder = (e.get("placeholder") or "").strip()[:40]
+        label = (e.get("label") or e.get("aria_label") or "").strip()[:40]
+        name = (e.get("name") or "").strip()
+        frame = (e.get("frame_selectors") or [])
+        parts = [f"<{tag}"]
+        if text:
+            parts.append(f" text={text!r}")
+        if placeholder:
+            parts.append(f" placeholder={placeholder!r}")
+        if label:
+            parts.append(f" label={label!r}")
+        if name:
+            parts.append(f" name={name!r}")
+        if frame:
+            parts.append(f" frame={frame!r}")
+        parts.append(f" selector={selector!r}>")
+        lines.append("".join(parts))
+    return "\n".join(lines)
+
+
+def _slice_json_array(text: str) -> str:
+    """从文本中截取第一个完整 JSON 数组（按括号/字符串配对），找不到返回空串。"""
+    start = text.find('[')
+    if start < 0:
+        return ""
+    depth = 0
+    in_str = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == '\\':
+                escape = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == '[':
+            depth += 1
+        elif ch == ']':
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return ""
+
+
+async def ai_enrich_selectors(steps: list, timeout_secs: int = 30, page_elements: Optional[list] = None) -> list:
     """
-    对规则推导覆盖不足的步骤，让 LLM 根据 description/value/action 生成候选 selector。
+    对规则推导覆盖不足的步骤，让 LLM 生成候选 selector。
 
     覆盖两类场景：
     1. robustness=D 且 selectors ≤1（有 selector 但等级低）
     2. selector 为空 且 description/value 有语义信息（AI 生成用例常见）
+
+    传入 page_elements 时，LLM 会优先从真实页面元素里匹配 selector（准确率更高）；
+    未传时退化为按 description/value 语义推断。
 
     失败时静默返回原列表，不影响主流程。
     """
@@ -394,6 +458,8 @@ async def ai_enrich_selectors(steps: list, timeout_secs: int = 30) -> list:
     if not need_ai:
         return steps
 
+    elements_summary = _build_elements_summary(page_elements)
+
     try:
         from tools.llm_client import call_llm
 
@@ -402,45 +468,92 @@ async def ai_enrich_selectors(steps: list, timeout_secs: int = 30) -> list:
         for idx, (i, s) in enumerate(need_ai):
             # 对空 selector 的步骤，description 是主要信息源
             desc = s.get("description", "").replace("[需补充selector]", "").strip()
-            step_lines.append(
+            frame = s.get("frame_selectors") or []
+            line = (
                 f"{idx+1}. action={s['action']} "
                 f"selector={s.get('selector','')!r} "
                 f"description={desc!r} "
                 f"value={s.get('value','')!r}"
             )
+            if frame:
+                line += f" frame={frame!r}"
+            step_lines.append(line)
 
-        system = (
-            "You are a Playwright/Selenium selector expert. "
-            "For each step, generate 3-5 CSS selectors ordered by stability:\n"
-            "  Priority 1: [data-testid=...], [aria-label=...], [name=...], [placeholder=...]\n"
-            "  Priority 2: button:has-text('...'), input:has-text('...'), :has-text('...')\n"
-            "  Priority 3: .className, tag[attr=...]\n"
-            "  Priority 4: #id\n"
-            "When selector is empty, infer from description and value fields.\n"
-            "Output ONLY valid JSON array of arrays (one inner array per step). No explanation."
-        )
-        user = (
-            "Generate selectors for these test steps:\n"
-            + "\n".join(step_lines)
-            + "\n\nOutput format: [[\"sel1\",\"sel2\",...], [\"sel1\",...], ...]"
-            + "\nOne inner array per step, same order. Return [] for navigate/wait steps."
-        )
+        if elements_summary:
+            system = (
+                "You are a Playwright/Selenium selector expert. "
+                "For each step, generate 3-5 CSS selectors ordered by stability.\n"
+                "  Priority 1: [data-testid=...], [aria-label=...], [name=...], [placeholder=...]\n"
+                "  Priority 2: button:has-text('...'), input:has-text('...'), :has-text('...')\n"
+                "  Priority 3: .className, tag[attr=...]\n"
+                "  Priority 4: #id\n"
+                "STRICT RULE: only pick selectors that appear in the 'Available page elements' list. "
+                "Do NOT invent selectors not present in that list. "
+                "Match each step to the most semantically relevant element (by text/placeholder/name/label). "
+                "If the matched element carries a 'frame' field, it lives inside iframe(s); "
+                "copy that exact frame array into the output 'frame' field. "
+                "If no element matches a step, return selectors=[] for that step.\n"
+                "Output ONLY valid JSON array of objects. No explanation."
+            )
+            user = (
+                "Generate selectors for these test steps:\n"
+                + "\n".join(step_lines)
+                + "\n\nAvailable page elements (only use selectors from here):\n"
+                + elements_summary
+                + "\n\nOutput format (one object per step, same order): "
+                + '[{"selectors": ["sel1","sel2",...], "frame": ["iframe#a", "iframe#b"]}, ...]'
+                + "\n'frame' is optional; use [] when the element is not inside an iframe."
+            )
+        else:
+            system = (
+                "You are a Playwright/Selenium selector expert. "
+                "For each step, generate 3-5 CSS selectors ordered by stability:\n"
+                "  Priority 1: [data-testid=...], [aria-label=...], [name=...], [placeholder=...]\n"
+                "  Priority 2: button:has-text('...'), input:has-text('...'), :has-text('...')\n"
+                "  Priority 3: .className, tag[attr=...]\n"
+                "  Priority 4: #id\n"
+                "When selector is empty, infer from description and value fields.\n"
+                "Output ONLY valid JSON array of objects. No explanation."
+            )
+            user = (
+                "Generate selectors for these test steps:\n"
+                + "\n".join(step_lines)
+                + "\n\nOutput format (one object per step, same order): "
+                + '[{"selectors": ["sel1","sel2",...], "frame": []}, ...]'
+                + "\nUse 'frame': [] unless the step already provided a frame path."
+            )
 
         raw = await call_llm(system, user, max_tokens=1200, timeout_secs=timeout_secs)
         raw = raw.strip()
 
-        # 提取 JSON 数组
-        m = re.search(r'\[\s*\[[\s\S]*\]\s*\]', raw)
-        if not m:
+        # 提取 JSON 数组（兼容对象数组 [{"selectors":...}] 与旧版嵌套数组 [[...]]）
+        seg = _slice_json_array(raw)
+        if not seg:
             return steps
-
-        ai_candidates: list[list[str]] = json.loads(m.group(0))
+        try:
+            ai_candidates = json.loads(seg)
+        except json.JSONDecodeError:
+            return steps
+        if not isinstance(ai_candidates, list):
+            return steps
 
         steps_result = deepcopy(steps)
         for idx, (i, _) in enumerate(need_ai):
             if idx >= len(ai_candidates):
                 break
-            new_cands = [c.strip() for c in ai_candidates[idx] if c.strip()]
+            item = ai_candidates[idx]
+            if isinstance(item, dict):
+                new_cands = [c.strip() for c in (item.get("selectors") or []) if isinstance(c, str) and c.strip()]
+                frame = item.get("frame") or item.get("frame_selectors") or []
+            else:
+                # 兼容旧版纯数组格式
+                new_cands = [c.strip() for c in (item or []) if isinstance(c, str) and c.strip()]
+                frame = []
+            # 保留/回填 iframe 路径（LLM 返回非空时优先）
+            if frame and isinstance(frame, list):
+                cleaned_frame = [str(f).strip() for f in frame if str(f).strip()]
+                if cleaned_frame:
+                    steps_result[i]["frame_selectors"] = cleaned_frame
             if not new_cands:
                 continue
             existing = steps_result[i].get("selectors") or []
@@ -469,12 +582,13 @@ async def ai_enrich_selectors(steps: list, timeout_secs: int = 30) -> list:
 
 # ── 6. 便捷入口：harden_and_ai_enrich ────────────────────────────────────────
 
-async def harden_and_enrich(steps: list, use_ai: bool = True) -> list:
+async def harden_and_enrich(steps: list, use_ai: bool = True, page_elements: Optional[list] = None) -> list:
     """
     完整健壮化流程：规则健壮化 → (可选) AI 增强 D 级 selector。
     recording/save 接口调用此函数。
+    page_elements 传入后，AI 增强会优先从真实页面元素匹配 selector。
     """
     hardened = harden_steps(steps)
     if use_ai:
-        hardened = await ai_enrich_selectors(hardened)
+        hardened = await ai_enrich_selectors(hardened, page_elements=page_elements)
     return hardened

@@ -6,7 +6,7 @@ from typing import List
 
 
 class Settings(BaseSettings):
-    APP_NAME: str = "自动化UI测试Agent"
+    APP_NAME: str = "AI测试工具平台"
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = True
 
@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     CORS_ORIGINS: List[str] = ["*"]
 
     DATABASE_URL: str = "sqlite+aiosqlite:///./uitest_agent.db"
+
+    # Redis 连接串（ARQ 任务队列）。留空则任务队列降级为 BackgroundTasks。
+    # Docker 部署时设为 redis://redis:6379/0
+    REDIS_URL: str = ""
 
     AI_API_KEY: str = ""
     AI_API_URL: str = "https://api.deepseek.com"
@@ -39,13 +43,12 @@ class Settings(BaseSettings):
     LLM_CONCURRENCY: int = 6        # 全局 LLM 并发上限
     LLM_SEM_TIMEOUT: int = 60       # LLM Semaphore 等待超时（秒），超时返回"系统繁忙"
     MAX_ACTIVE_GENERATE: int = 3    # 同时进行的 AI 生成任务上限，超出返回 429
+    MAX_ACTIVE_EXECUTE: int = 5     # 同时进行的 UI 测试执行任务上限，超出返回 429
 
-    # ── ARQ 任务队列（可选，需 Redis）──────────────────────────────────────────
-    # 留空时任务队列降级为 FastAPI BackgroundTasks（进程内，重启任务丢失）
-    # 填写 Redis URL 后，AI 生成 / WebUI 执行 / 渗透扫描 改走 ARQ，支持多 worker 横向扩展
-    REDIS_URL: str = ""              # 例：redis://localhost:6379/0
-    ARQ_MAX_JOBS: int = 20           # ARQ worker 最大并发 job 数
-    ARQ_JOB_TIMEOUT: int = 3600      # 单个 job 超时（秒），默认 1 小时
+    # ── 数据库连接池（仅 PostgreSQL 生效）──────────────────────────────────────
+    DB_ECHO: bool = False          # SQL 日志回显（默认关闭，生产性能敏感）
+    DB_POOL_SIZE: int = 20         # 连接池大小
+    DB_MAX_OVERFLOW: int = 30      # 连接池溢出上限
 
     # ── 告警推送 ───────────────────────────────────────────────────────────────
     # 支持钉钉/企业微信/飞书 Webhook；留空则关闭告警

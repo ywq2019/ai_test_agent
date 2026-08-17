@@ -188,56 +188,175 @@ class ActionRunner:
         return resolve_vars(text, self.env_vars)
 
     async def run_case(self, case: dict, page: "Page") -> dict:
-        """执行单条用例，返回 case_result 字典。"""
+        """执行单条用例，返回 case_result 字典。
+
+        第一阶段支持控制流：扁平 steps_json 先 unflatten 成树，再按树遍历执行
+        （if/else、while）；纯线性用例（无控制流关键字）行为与之前完全一致。
+        """
+        from skills.control_flow import unflatten
+
         steps: list = case.get("steps_json") or []
         if not steps:
             logger.warning(f"[ActionRunner] case={case.get('id')} steps_json 为空，跳过")
             return _case_result(case, [], self.browser)
 
+        try:
+            tree = unflatten(steps)
+        except ValueError as e:
+            logger.warning(f"[ActionRunner] case={case.get('id')} 控制流配置错误: {e}")
+            return _case_result(
+                case,
+                [_step_result({"action": "if", "description": "控制流解析"}, False, f"控制流配置错误: {e}")],
+                self.browser,
+            )
+
         step_results = []
-        total_steps = len(steps)
-        for step_idx, step in enumerate(steps):
-            # ── 每步骤前检查外部 stop 信号 ──
-            if self._should_stop_cb and self._should_stop_cb():
-                step_results.append(_step_result(step, False, "执行被用户停止"))
-                # 将剩余未执行步骤也标记为 skipped
-                for remaining_step in steps[step_idx + 1:]:
-                    step_results.append(_step_result(remaining_step, False, "执行被用户停止（未执行）"))
-                break
-
-            ok, err = validate_step(step)
-            if not ok:
-                step_results.append(_step_result(step, False, f"步骤定义错误: {err}"))
-                if not step.get("optional"):
-                    break
-                continue
-
-            # 步骤开始前推送进度
-            if self.step_callback:
-                try:
-                    await self.step_callback({
-                        "type":        "step_start",
-                        "case_id":     case.get("id"),
-                        "case_name":   case.get("name", ""),
-                        "step_idx":    step_idx + 1,
-                        "step_total":  total_steps,
-                        "action":      step.get("action", ""),
-                        "description": step.get("description", "") or step.get("selector", ""),
-                    })
-                except Exception:
-                    pass
-
-            sr = await self._run_step(step, page)
-            step_results.append(sr)
-
-            if not sr["passed"] and not step.get("optional"):
-                logger.info(
-                    f"[ActionRunner] case={case.get('id')} 步骤 {step.get('id')} "
-                    f"(action={step.get('action')}) 失败，终止"
-                )
-                break
-
+        state = {
+            "case":       case,
+            "page":       page,
+            "results":    step_results,
+            "leaf_total": self._count_leaf_steps(tree),
+            "leaf_idx":   0,
+            "stop":       False,
+        }
+        await self._run_node(tree, state)
         return _case_result(case, step_results, self.browser)
+
+    @staticmethod
+    def _count_leaf_steps(node: dict) -> int:
+        """统计树中叶子步骤数（用于进度 total 的静态估计）。"""
+        t = node["type"]
+        if t == "step":
+            return 1
+        if t == "root":
+            return sum(ActionRunner._count_leaf_steps(c) for c in node.get("children", []))
+        if t == "if":
+            return max(
+                sum(ActionRunner._count_leaf_steps(c) for c in node.get("then", [])),
+                sum(ActionRunner._count_leaf_steps(c) for c in node.get("else", [])),
+            )
+        if t == "while":
+            return sum(ActionRunner._count_leaf_steps(c) for c in node.get("body", []))
+        return 0
+
+    async def _run_node(self, node: dict, state: dict) -> None:
+        """递归执行树节点。"""
+        t = node["type"]
+        if t == "root":
+            for child in node.get("children", []):
+                if state["stop"]:
+                    break
+                await self._run_node(child, state)
+        elif t == "step":
+            await self._run_step_node(node["step"], state)
+        elif t == "if":
+            await self._run_if(node, state)
+        elif t == "while":
+            await self._run_while(node, state)
+
+    async def _run_step_node(self, step: dict, state: dict) -> None:
+        """执行单个叶子步骤（原 run_case 循环体的逻辑）。"""
+        if state["stop"]:
+            return
+        case = state["case"]
+
+        # ── 每步骤前检查外部 stop 信号 ──
+        if self._should_stop_cb and self._should_stop_cb():
+            state["results"].append(_step_result(step, False, "执行被用户停止"))
+            state["stop"] = True
+            return
+
+        ok, err = validate_step(step)
+        if not ok:
+            state["results"].append(_step_result(step, False, f"步骤定义错误: {err}"))
+            if not step.get("optional"):
+                state["stop"] = True
+            return
+
+        # 步骤开始前推送进度
+        state["leaf_idx"] += 1
+        if self.step_callback:
+            try:
+                await self.step_callback({
+                    "type":        "step_start",
+                    "case_id":     case.get("id"),
+                    "case_name":   case.get("name", ""),
+                    "step_idx":    state["leaf_idx"],
+                    "step_total":  state["leaf_total"],
+                    "action":      step.get("action", ""),
+                    "description": step.get("description", "") or step.get("selector", ""),
+                })
+            except Exception:
+                pass
+
+        sr = await self._run_step(step, state["page"])
+        state["results"].append(sr)
+
+        if not sr["passed"] and not step.get("optional"):
+            logger.info(
+                f"[ActionRunner] case={case.get('id')} 步骤 {step.get('id')} "
+                f"(action={step.get('action')}) 失败，终止"
+            )
+            state["stop"] = True
+
+    async def _run_if(self, node: dict, state: dict) -> None:
+        """执行 if/else 分支。"""
+        from skills.control_flow import ConditionEvaluator
+        condition = node.get("condition", "")
+        try:
+            truthy = await ConditionEvaluator(state["page"]).eval(condition, self.env_vars)
+        except Exception as e:
+            state["results"].append(_step_result(
+                {"action": "if", "condition": condition}, False, f"条件求值失败: {e}"))
+            state["stop"] = True
+            return
+
+        branch = node.get("then", []) if truthy else node.get("else", [])
+        for child in branch:
+            if state["stop"]:
+                break
+            await self._run_node(child, state)
+
+    async def _run_while(self, node: dict, state: dict) -> None:
+        """执行 while 循环（含 max_iter 防死循环 + delay_ms）。"""
+        from skills.control_flow import ConditionEvaluator
+        condition = node.get("condition", "")
+        max_iter = int(node.get("max_iter") or 100)
+        delay_ms = int(node.get("delay_ms") or 0)
+        evaluator = ConditionEvaluator(state["page"])
+        iterations = 0
+
+        while not state["stop"]:
+            if self._should_stop_cb and self._should_stop_cb():
+                state["stop"] = True
+                break
+
+            try:
+                truthy = await evaluator.eval(condition, self.env_vars)
+            except Exception as e:
+                state["results"].append(_step_result(
+                    {"action": "while", "condition": condition}, False, f"循环条件求值失败: {e}"))
+                state["stop"] = True
+                break
+
+            if not truthy:
+                break
+
+            iterations += 1
+            if iterations > max_iter:
+                state["results"].append(_step_result(
+                    {"action": "while", "condition": condition}, False,
+                    f"循环超过最大次数 {max_iter}，疑似死循环"))
+                state["stop"] = True
+                break
+
+            for child in node.get("body", []):
+                if state["stop"]:
+                    break
+                await self._run_node(child, state)
+
+            if delay_ms:
+                await asyncio.sleep(delay_ms / 1000)
 
     async def _run_step(self, step: dict, page: "Page") -> dict:
         """执行单个步骤，返回 step_result 字典。支持 selectors 多候选回退 + iframe。"""

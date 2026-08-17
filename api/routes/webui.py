@@ -21,6 +21,40 @@ _TZ_CST = timezone(timedelta(hours=8))
 _running_tasks: set = set()       # 正在执行中的 task_id 集合
 _running_tasks_lock = asyncio.Lock()  # 保护 set 的读写
 
+# ── 全局执行任务并发计数 ────────────────────────────────────────────────────────
+# 限制同时运行的 UI 测试执行任务总数（跨 task）。5-10 人同时触发执行时，
+# 防止创建过多 Playwright 后台任务导致内存/CPU 峰值。超出上限返回 429。
+from tools.config import settings as _cfg_settings
+_MAX_ACTIVE_EXECUTE = _cfg_settings.MAX_ACTIVE_EXECUTE
+_active_execute_count = 0
+_active_execute_lock = asyncio.Lock()
+
+
+async def _acquire_execute_slot() -> bool:
+    """尝试获取一个执行任务槽位。返回 True 成功，False 已满。"""
+    global _active_execute_count
+    async with _active_execute_lock:
+        if _active_execute_count >= _MAX_ACTIVE_EXECUTE:
+            return False
+        _active_execute_count += 1
+        return True
+
+
+async def _release_execute_slot() -> None:
+    """释放一个执行任务槽位。"""
+    global _active_execute_count
+    async with _active_execute_lock:
+        _active_execute_count = max(0, _active_execute_count - 1)
+
+
+async def _run_multi_browser_bg_with_slot(*args, **kwargs):
+    """包装多浏览器后台执行：确保执行槽位在任务结束后释放。"""
+    from skills.parallel_runner import run_multi_browser_bg
+    try:
+        await run_multi_browser_bg(*args, **kwargs)
+    finally:
+        await _release_execute_slot()
+
 
 def _fmt_cst(dt) -> str:
     """将 UTC naive datetime 格式化为 CST（UTC+8）可读字符串。"""
@@ -635,6 +669,7 @@ async def plan_scenes(task_id: int, request: dict = None,
         from skills.prompt_loader import get_system, render_user
         from sqlalchemy.orm.attributes import flag_modified
         import json as _json, re as _re
+        import asyncio as _asyncio
 
         system_prompt = get_system("ui_case_gen.yaml", "plan_scenes")
         user_prompt = render_user("ui_case_gen.yaml", "plan_scenes",
@@ -646,7 +681,18 @@ async def plan_scenes(task_id: int, request: dict = None,
             scene_count=scene_count,
         )
 
-        raw = await call_llm(system_prompt, user_prompt, max_tokens=4000, timeout_secs=120)
+        # reasoner 模型（如 deepseek-v4-pro）reasoning 可能占用较多 token 导致 content 为空，
+        # 增大 max_tokens 并对空响应重试，避免后续 JSON 解析报 "Expecting value"
+        raw = ""
+        for _retry in range(2):
+            raw = await call_llm(system_prompt, user_prompt, max_tokens=8000, timeout_secs=120)
+            if raw and raw.strip():
+                break
+            logger.warning(f"[plan_scenes] AI 返回空内容，第 {_retry + 1} 次重试")
+            await _asyncio.sleep(2)
+
+        if not raw or not raw.strip():
+            raise RuntimeError("AI 返回空内容，请稍后重试")
 
         # 提取 JSON，多级修复保障：
         # 1. 去掉首尾 markdown 代码块
@@ -709,7 +755,13 @@ async def plan_scenes(task_id: int, request: dict = None,
             s4 = _repair_truncated_json(s3)
             return __json.loads(s4)   # 若仍失败则抛出，外层捕获
 
-        data = _try_parse(json_str)
+        try:
+            data = _try_parse(json_str)
+        except Exception as _pe:
+            logger.error(
+                f"[plan_scenes] JSON 解析失败，AI 原始响应前 500 字: {raw[:500]!r}"
+            )
+            raise _pe
 
         # LLM 有时直接返回数组 [{...}, {...}] 而不是 {"scenes": [...]}
         if isinstance(data, list):
@@ -723,31 +775,33 @@ async def plan_scenes(task_id: int, request: dict = None,
         new_scenes = [s for s in new_scenes if isinstance(s, dict)]
 
         # ── 5. 标准化字段 ────────────────────────────────────────────────────
-        # 已有场景的录制状态按场景名保留：重新规划（非追加）时 LLM 可能重排顺序，
-        # 已录制过的场景只要名称仍在，就不能被重置为待录制
         existing_plan = list(getattr(task, "scene_plan", None) or [])
-        recorded_by_name = {s.get("name", ""): True for s in existing_plan if s.get("recorded")}
         for i, s in enumerate(new_scenes):
             s.setdefault("id", f"scene_{i+1:02d}")
             s.setdefault("priority", "P1")
             s.setdefault("dimension", "")
             s.setdefault("steps_desc", [])
             s.setdefault("expected", "")
-            s["recorded"] = recorded_by_name.get(s.get("name", ""), False)
+            s.setdefault("recorded", False)
 
-        # ── 6. 追加模式：保留已录制场景，合并新场景 ──────────────────────────
+        # ── 6. 追加 / 重新规划 ────────────────────────────────────────────────
         if append_mode:
-            recorded_scenes = [s for s in existing_plan if s.get("recorded")]
-            # 去重：新场景名与已有场景名相同则跳过
-            existing_names_set = {s["name"] for s in existing_plan}
-            fresh = [s for s in new_scenes if s["name"] not in existing_names_set]
-            # 重新编号
-            merged = recorded_scenes + fresh
+            # 追加模式：保留全部原有场景（含未录制），仅追加不重名的新场景
+            existing_names_set = {s.get("name", "") for s in existing_plan}
+            fresh = [s for s in new_scenes if s.get("name", "") not in existing_names_set]
+            merged = existing_plan + fresh
             for i, s in enumerate(merged, 1):
                 s["id"] = f"scene_{i:02d}"
             scenes = merged
         else:
-            scenes = new_scenes
+            # 重新规划模式：已录制场景锁定、不参与替换（原样保留），
+            # 未录制场景被 AI 新生成的场景替换，与锁定场景同名的新场景跳过
+            locked = [s for s in existing_plan if s.get("recorded")]
+            locked_names = {s.get("name", "") for s in locked}
+            fresh = [s for s in new_scenes if s.get("name", "") not in locked_names]
+            scenes = locked + fresh
+            for i, s in enumerate(scenes, 1):
+                s["id"] = f"scene_{i:02d}"
 
         # ── 7. 持久化 ────────────────────────────────────────────────────────
         task.scene_plan = scenes
@@ -1549,7 +1603,8 @@ async def _run_execution_bg(
             "error": str(e)
         }, workspace_id)
     finally:
-        # 无论成功/失败，释放执行锁
+        # 无论成功/失败，释放执行锁和执行槽位
+        await _release_execute_slot()
         async with _running_tasks_lock:
             _running_tasks.discard(task_id)
 
@@ -1565,6 +1620,13 @@ async def execute_cases(
             raise HTTPException(status_code=409,
                                 detail="该任务正在执行中，请等待完成后再触发")
         _running_tasks.add(request.task_id)
+
+    # ── 全局执行并发上限（跨 task 总并发）──
+    if not await _acquire_execute_slot():
+        async with _running_tasks_lock:
+            _running_tasks.discard(request.task_id)
+        raise HTTPException(status_code=429,
+                            detail=f"系统执行任务数已达上限（{_MAX_ACTIVE_EXECUTE}），请稍后再试")
 
     try:
         result = await db.execute(select(TestCase).where(TestCase.task_id == request.task_id))
@@ -1634,10 +1696,12 @@ async def execute_cases(
         return {"report_id": report.id, "status": "running", "total": len(case_dicts),
                 "message": f"开始执行 {len(case_dicts)} 个用例，请通过 WebSocket 接收进度"}
     except HTTPException:
+        await _release_execute_slot()
         async with _running_tasks_lock:
             _running_tasks.discard(request.task_id)
         raise
     except Exception:
+        await _release_execute_slot()
         async with _running_tasks_lock:
             _running_tasks.discard(request.task_id)
         raise
@@ -2683,6 +2747,7 @@ async def recording_save(body: dict,
     steps   = body.get("steps", [])
     page_title = body.get("page_title", "")
     name    = body.get("name", "")
+    replace_case_id = body.get("replace_case_id") or body.get("case_id")
 
     if not task_id:
         raise HTTPException(status_code=400, detail="task_id 不能为空")
@@ -2696,21 +2761,43 @@ async def recording_save(body: dict,
     await check_access(db, task, current_user, "任务")
 
     # ── 步骤处理流水线 ──
-    # 1. 智能补全：断言 + wait + 名称 + 预期结果（原有逻辑）
+    # 1. 智能补全：断言 + wait + 预期结果
     enriched_steps = enrich_recorded_steps(steps, page_title)
-    if not name:
-        name = generate_case_name(enriched_steps, page_title)
     expected = generate_expected_results(enriched_steps)
 
     # 2. AI 健壮化：selector 多候选推导 + 评级 + 关键操作后断言插入
     try:
-        enriched_steps = await harden_and_enrich(enriched_steps, use_ai=True)
+        enriched_steps = await harden_and_enrich(enriched_steps, use_ai=True, page_elements=task.page_elements or [])
     except Exception as _he:
         logger.warning(f"[recording/save] 健壮化失败（静默跳过）: {_he}")
 
     # 将 ActionStep 列表转换为可读文本，存入 steps 字段（兼容旧版报告显示）
     steps_text = steps_to_description(enriched_steps)
 
+    # ── 覆盖模式：重录失败用例 → 替换原用例而非新增 ──
+    if replace_case_id:
+        case_result = await db.execute(
+            select(TestCase).where(TestCase.id == int(replace_case_id), TestCase.task_id == task_id)
+        )
+        case = case_result.scalar_one_or_none()
+        if not case:
+            raise HTTPException(status_code=404, detail="要替换的用例不存在或不属于当前任务")
+        # 用录制结果替换步骤与来源，保留原模块/优先级/前置条件等元信息
+        case.name = name or case.name
+        case.steps = steps_text
+        case.steps_json = enriched_steps
+        case.expected_results = expected
+        case.source = "recorded"
+        case.deprecated = False
+        case.enabled = True
+        case.version = (case.version or 0) + 1
+        await db.commit()
+        await db.refresh(case)
+        return {"case_id": case.id, "steps_count": len(enriched_steps), "message": f"已用录制步骤替换用例「{case.name}」"}
+
+    # ── 新增模式 ──
+    if not name:
+        name = generate_case_name(enriched_steps, page_title)
     case = TestCase(
         task_id=task_id,
         name=name,
@@ -2739,8 +2826,6 @@ async def execute_multi_browser(
     current_user: User = Depends(get_current_user),
 ):
     """多浏览器并行执行：每个浏览器独立生成一条 TestReport。"""
-    from skills.parallel_runner import run_multi_browser_bg
-
     task_id  = int(body.get("task_id", 0))
     browsers = body.get("browsers", ["chromium"])
     case_ids = body.get("case_ids") or None
@@ -2796,8 +2881,13 @@ async def execute_multi_browser(
         await db.refresh(report)
         report_ids[browser] = report.id
 
+    # ── 全局执行并发上限（跨 task 总并发）──
+    if not await _acquire_execute_slot():
+        raise HTTPException(status_code=429,
+                            detail=f"系统执行任务数已达上限（{_MAX_ACTIVE_EXECUTE}），请稍后再试")
+
     background_tasks.add_task(
-        run_multi_browser_bg,
+        _run_multi_browser_bg_with_slot,
         task_id=task_id,
         task_url=task.url,
         task_name=task.name,

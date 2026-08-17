@@ -845,14 +845,14 @@ async def create_script(data: dict, db: AsyncSession = Depends(get_db),
 
 @router.post("/api-test/scripts/test")
 async def test_script(data: dict):
-    from skills.param_resolver import _exec_custom_fn
+    from skills.param_resolver import _exec_custom_fn_core
     name   = data.get("name", "test_fn")
     code   = data.get("code", "")
     args_str = data.get("args", "")
-    result = _exec_custom_fn(name, args_str, [{"name": name, "code": code}])
-    if result is None:
-        return {"ok": False, "error": "脚本执行失败：未定义同名函数或 result 变量"}
-    return {"ok": True, "result": result}
+    r = _exec_custom_fn_core(name, args_str, [{"name": name, "code": code}])
+    if not r["ok"]:
+        return {"ok": False, "error": f"脚本执行失败：{r['error']}"}
+    return {"ok": True, "result": r["result"]}
 
 
 @router.post("/api-test/scripts/ai-generate")
@@ -865,7 +865,7 @@ async def ai_generate_script(data: dict):
         raise HTTPException(status_code=400, detail="prompt 不能为空")
     if not settings.AI_API_KEY:
         raise HTTPException(status_code=400, detail="未配置 AI API Key，请先在 LLM 配置页面填写")
-    available_modules = "hashlib, json, time, random, string, uuid, base64, os, re, requests"
+    available_modules = "hashlib, json, time, random, string, uuid, base64, re, requests, urllib.parse"
     system_prompt = (
         f"你是一个资深 Python 工程师，专门为 API 接口测试框架编写参数生成脚本。\n\n"
         f"## 执行环境约束\n- 可用模块：{available_modules}\n- 函数接收可变参数 `*args`\n"

@@ -323,6 +323,7 @@ extract_requirements:
     已生成的测试用例名称（供参考粒度对齐）：
     {cases_hint}
 
+    {batch_hint}
     需求文档：
     ---
     {content}

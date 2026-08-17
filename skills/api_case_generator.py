@@ -328,12 +328,15 @@ class ApiCaseGenerator:
                 all_cases.extend(r)
 
         for i, c in enumerate(all_cases):
-            c.setdefault("name", f"TC{i+1:03d}")
-            c.setdefault("description", "")
             c.setdefault("module", "通用")
-            c.setdefault("priority", "P1")
             c.setdefault("method", "GET")
             c.setdefault("path", "/")
+            if not c.get("name"):
+                module = c.get("module") or "API"
+                scenario = c.get("scenario") or ""
+                c["name"] = f"{module}-{scenario}" if scenario else f"{module}-{c.get('method')} {c.get('path')}"
+            c.setdefault("description", "")
+            c.setdefault("priority", "P1")
             c.setdefault("headers", {})
             c.setdefault("params", {})
             c.setdefault("body", None)
@@ -408,9 +411,9 @@ class ApiCaseGenerator:
                         else:
                             logger.warning(f"Dropped hallucinated group: '{name}' (not found in content)")
                 if valid:
-                    return valid[:10]
+                    return valid
                 logger.warning(f"All {len(data)} groups filtered out as hallucinations, falling back to single group")
-            return data[:10] if data else []
+            return data[:30] if data else []
         except Exception as e:
             logger.warning(f"Group extraction failed: {e}")
         return []
@@ -579,21 +582,27 @@ class ApiCaseGenerator:
         prompt = (
             f"API: {method} {path}, module: {name}, params: {', '.join(param_keys)}\n"
             "List the test scenarios needed for this API as a JSON array of Chinese strings.\n"
-            "Include: normal flow, auth failures, missing required params, boundary values.\n"
-            "Max 8 scenarios. Output JSON array only."
+            "Cover: normal flow, auth failures, missing required params, invalid types, "
+            "boundary values, and pagination/sort/filter when applicable.\n"
+            "Decide the number based on the API's real complexity: more params/branches "
+            "=> more scenarios, simple read-only query => fewer. "
+            "Do not pad with redundant scenarios. Output JSON array only."
         )
         try:
             from tools.llm_client import call_llm
             raw = await call_llm(
                 "Output a JSON array of Chinese test scenario names only. No explanation.",
                 prompt,
-                max_tokens=600,
+                max_tokens=900,
                 timeout_secs=30,
             )
             scenes = self._extract_json(raw)
             if isinstance(scenes, list) and scenes and all(isinstance(s, str) for s in scenes):
-                logger.info(f"AI planned {len(scenes)} scenes for '{name}': {scenes}")
-                return scenes[:8]
+                # 去重，仅保留防御性上限防止 LLM 异常输出过多
+                seen: set = set()
+                uniq = [s for s in scenes if not (s in seen or seen.add(s))]
+                logger.info(f"AI planned {len(uniq)} scenes for '{name}': {uniq}")
+                return uniq[:30]
         except Exception as e:
             logger.warning(f"Scene analysis failed for '{name}': {e}")
         return self._DEFAULT_SCENES
@@ -705,6 +714,21 @@ class ApiCaseGenerator:
         path = probe_hint.get("path", "/")
         method = probe_hint.get("method", "GET")
 
+        # 从 probe_hint 提取请求体与业务 headers（curl 输入时存在）
+        real_body = probe_hint.get("body")
+        real_body_type = probe_hint.get("body_type", "json")
+        body_desc = ""
+        if real_body is not None:
+            body_str = json.dumps(real_body, ensure_ascii=False) if isinstance(real_body, (dict, list)) else str(real_body)
+            body_desc = f"Body({real_body_type}): {body_str}"
+
+        hint_headers = probe_hint.get("headers") or {}
+        biz_headers = {k: v for k, v in hint_headers.items()
+                       if k.lower() not in ('host', 'user-agent', 'accept', 'accept-encoding',
+                                             'connection', 'content-length', 'cache-control',
+                                             'content-type')}
+        headers_desc = "Headers: " + json.dumps(biz_headers, ensure_ascii=False) if biz_headers else ""
+
         # ── 将预探测结果注入 prompt，让 LLM 基于真实响应生成断言 ──
         probe = group.get("_probe")
         probe_section = self._build_probe_section(probe) if probe else ""
@@ -712,14 +736,23 @@ class ApiCaseGenerator:
         prompt_parts = []
         if probe_section:
             prompt_parts.append(probe_section)
-        prompt_parts.append(
-            f"Generate 1 test case. API: {method} {path}. "
-            f"Module: {name}. Base URL: {base_url}.\n"
-            f"Params: {params_line}\n"
-            f"Scenario: {scenario}\n"
+
+        info_lines = [
+            f"Generate 1 test case. API: {method} {path}.",
+            f"Module: {name}. Base URL: {base_url}.",
+            f"Params: {params_line}",
+        ]
+        if body_desc:
+            info_lines.append(body_desc)
+        if headers_desc:
+            info_lines.append(headers_desc)
+        info_lines.append(f"Scenario: {scenario}")
+        info_lines.append(
             "Rules: name=中文(接口功能-场景), all params required, "
-            "use exact param values above, auth failure params set to empty string."
+            "use exact param values above, auth failure params set to empty string, "
+            "include the request body for POST/PUT/PATCH requests."
         )
+        prompt_parts.append("\n".join(info_lines))
         prompt = "\n".join(prompt_parts)
         try:
             raw = await self._call_api(_get_system_prompt(), prompt)
@@ -738,8 +771,17 @@ class ApiCaseGenerator:
                 # 始终用 group 名覆盖 module，防止 LLM 编造其它模块
                 if name:
                     case["module"] = name
+                # name 缺失时按「模块-场景」命名，避免落到 TC00x 编号兜底
+                if not case.get("name"):
+                    case["name"] = f"{name}-{scenario}"
                 if not case.get("body_type") and case.get("body"):
                     case["body_type"] = "json"
+                # POST/PUT/PATCH 正常流：LLM 漏掉 body 时回填 curl 真实请求体
+                if (method in ("POST", "PUT", "PATCH") and real_body is not None
+                        and not case.get("body") and "正常" in scenario):
+                    case["body"] = real_body
+                    if not case.get("body_type"):
+                        case["body_type"] = real_body_type
                 if case.get("path"):
                     return case
             logger.warning(f"Single case parse failed for '{name}/{scenario}', raw[:200]: {raw[:200]}")
@@ -1420,10 +1462,14 @@ Base URL（如有）：{base_url or '（未提供，path 请使用相对路径�
 
         # 统一字段默认值
         for i, c in enumerate(cases):
-            c.setdefault("name", f"TC{i+1:03d}")
             c.setdefault("module", "代码分析")
             c.setdefault("method", "POST")
             c.setdefault("path", "/")
+            c.setdefault("scenario", "正常流")
+            if not c.get("name"):
+                module = c.get("module") or "代码分析"
+                scenario = c.get("scenario") or ""
+                c["name"] = f"{module}-{scenario}" if scenario else f"{module}-用例{i+1}"
             c.setdefault("params", {})
             c.setdefault("body", None)
             c.setdefault("headers", {})
@@ -1431,7 +1477,6 @@ Base URL（如有）：{base_url or '（未提供，path 请使用相对路径�
             c.setdefault("priority", "P1")
             c.setdefault("description", "")
             c.setdefault("enabled", True)
-            c.setdefault("scenario", "正常流")
 
         await _p(100, f"代码分析完成，生成 {len(cases)} 条用例")
         logger.info(f"从代码生成用例: {len(cases)} 条")

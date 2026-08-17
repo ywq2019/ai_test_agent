@@ -174,6 +174,7 @@ Playwright 驱动浏览器，以「AI 场景规划 → 录制 → 健壮化 → 
 | **多浏览器并行** | 同一批用例同时在 Chromium / Firefox / WebKit 执行，各出一份报告 |
 | **元素别名库** | selector 命名为别名，步骤编辑器 `@` 触发补全，变更只改别名库 |
 | **变量替换** | `{{变量名}}` 语法从任务环境变量表替换，支持多环境参数化 |
+| **控制流** | 步骤编辑器支持插入 `if / else / endif`（条件分支）与 `while / endwhile`（循环轮询），条件 DSL 用 `ast` 白名单安全求值，`max_iter` 防死循环 |
 | **pytest 导出** | 一键导出为标准 Python Playwright 测试脚本（zip 包） |
 
 > 📖 步骤编辑详细说明请参阅 [WebUI 步骤编辑操作手册](./docs/webui-step-editor-guide.md)
@@ -195,7 +196,7 @@ Playwright 驱动浏览器，以「AI 场景规划 → 录制 → 健壮化 → 
 | 输入源 | 说明 |
 | --- | --- |
 | Swagger / OpenAPI | 解析接口定义，真实探测获取响应结构，自动生成正常 / 异常 / 边界用例 |
-| Curl 命令 | 粘贴 curl，自动解析 method/URL/headers/body，注入精确数据生成用例 |
+| Curl 命令 | 粘贴 curl，自动解析 method/URL/headers/body，请求体精确注入生成用例（含业务 headers），场景数量按接口复杂度动态规划，用例按「模块-场景」功能命名 |
 | 自然语言描述 | 描述接口行为，AI 推理补全请求体、断言与边界 |
 | 代码（Python/Java/Go/Node/PHP） | 静态分析业务代码，提取接口调用生成用例 |
 | Postman/HAR 导入 | 解析 Postman Collection 或 HAR 文件，直接导入为用例 |
@@ -208,7 +209,7 @@ Playwright 驱动浏览器，以「AI 场景规划 → 录制 → 健壮化 → 
 | --- | --- |
 | 全局变量池 | `{{gvar:name}}` 语法引用跨用例共享变量，支持提取表达式写回 |
 | 内置函数 | `{{uuid()}}`、`{{timestamp()}}` 等动态值生成，开箱即用 |
-| 自定义脚本函数 | 支持 Python 脚本扩展参数化逻辑，满足复杂签名/加密场景 |
+| 自定义脚本函数 | 支持 Python 脚本扩展参数化逻辑，满足复杂签名/加密场景；请求体（JSON/raw）同样支持 `{{脚本函数()}}` 占位符 |
 | 前置依赖 | 配置登录前置用例，自动提取 Token；鉴权失败自动重试，无需手动维护 Cookie |
 | **CSV 数据驱动** | 上传 CSV 文件，每行数据作为独立参数组执行一次用例，支持多行批量验证 |
 
@@ -448,11 +449,12 @@ ai_test_agent/
 │   ├── test_executor.py         # TestExecutor：批量执行调度，task_id 状态隔离
 │   ├── parallel_runner.py       # 多浏览器并行执行调度
 │   ├── ai_case_generator.py     # 文档驱动用例生成（RAG + 并发控制 + JSON 修复 + 覆盖度优化）
-│   ├── api_case_generator.py    # 接口用例 AI 生成（Swagger/代码/描述）
+│   ├── api_case_generator.py    # 接口用例 AI 生成（Swagger/Curl/描述/代码）
 │   ├── api_executor.py          # 接口用例执行引擎
 │   ├── api_load_tester.py       # 压力测试引擎
 │   ├── csv_driver.py            # CSV 数据驱动解析
 │   ├── import_parser.py         # Postman / HAR 导入解析
+│   ├── control_flow.py          # WebUI 用例控制流（if/else + while，扁平↔树转换 + 条件求值）
 │   ├── param_resolver.py        # 参数化解析（全局变量池 / 内置函数 / 自定义脚本）
 │   ├── pentest_engine.py        # 渗透测试扫描引擎（12 模块，AI 修复建议）
 │   ├── rag.py                   # RAG 向量检索（pgvector / 关键词降级）
@@ -491,7 +493,8 @@ ai_test_agent/
 │   └── api/index.js             # Axios 封装 + 401 拦截器
 ├── tests/                       # 单元测试
 └── docs/
-    └── webui-step-editor-guide.md  # WebUI 步骤编辑操作手册（action/selector/expected 详解）
+    ├── webui-step-editor-guide.md      # WebUI 步骤编辑操作手册（action/selector/expected 详解）
+    └── webui-control-flow-design.md    # WebUI 控制流设计（if/while/for/try/goto 完整规划）
 ```
 
 ---

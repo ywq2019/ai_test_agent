@@ -18,6 +18,7 @@ from loguru import logger
 
 PING_INTERVAL = 30   # 每30秒发一次 ping
 PING_TIMEOUT  = 90   # 等待 pong 最多90秒（LLM 调用可能需要60+秒）
+SEND_TIMEOUT  = 10   # 单条消息发送超时（秒），超时视为死连接，避免慢连接阻塞广播
 
 
 class WebSocketManager:
@@ -55,6 +56,38 @@ class WebSocketManager:
     def record_pong(self, websocket: WebSocket):
         self._last_pong[websocket] = asyncio.get_event_loop().time()
 
+    # ── 内部辅助：并发发送与连接清理 ──────────────────────────────────────
+
+    def _cleanup_connection(self, client_id: str, conn: WebSocket):
+        """从管理器中移除一个连接的所有状态（连接集合、pong 时间、工作空间）。"""
+        if client_id in self.active_connections:
+            self.active_connections[client_id].discard(conn)
+            if not self.active_connections[client_id]:
+                del self.active_connections[client_id]
+        self._last_pong.pop(conn, None)
+        self._conn_workspace.pop(conn, None)
+
+    async def _send_many(self, targets: list, message: dict, timeout: float = SEND_TIMEOUT) -> list:
+        """并发向多个 (client_id, conn) 目标发送同一消息。
+
+        用 asyncio.gather 并发发送，避免单个慢连接串行阻塞其余连接的广播。
+        返回发送失败/超时的目标列表，由调用方负责清理。
+        """
+        if not targets:
+            return []
+
+        async def _send_one(target):
+            client_id, conn = target
+            try:
+                await asyncio.wait_for(conn.send_json(message), timeout=timeout)
+                return None
+            except Exception as e:
+                logger.warning(f"WebSocket 发送失败，标记断开 {client_id}: {e}")
+                return target
+
+        results = await asyncio.gather(*(_send_one(t) for t in targets))
+        return [r for r in results if r is not None]
+
     # ── 消息发送 ──────────────────────────────────────────────────────────
 
     async def send_personal_message(self, message: dict, websocket: WebSocket):
@@ -66,32 +99,21 @@ class WebSocketManager:
     async def broadcast(self, message: dict, client_id: str = "default"):
         if client_id not in self.active_connections:
             return
-        dead = []
-        for conn in self.active_connections[client_id]:
-            try:
-                await conn.send_json(message)
-            except Exception as e:
-                logger.error(f"Failed to broadcast to {client_id}: {e}")
-                dead.append(conn)
-        for conn in dead:
-            self.active_connections[client_id].discard(conn)
-            self._last_pong.pop(conn, None)
-            self._conn_workspace.pop(conn, None)
+        targets = [(client_id, conn) for conn in list(self.active_connections[client_id])]
+        dead = await self._send_many(targets, message)
+        for client_id, conn in dead:
+            self._cleanup_connection(client_id, conn)
 
     async def broadcast_all(self, message: dict):
         """广播给所有已连接的客户端（不区分工作空间）。兼容旧逻辑。"""
-        for client_id, connections in list(self.active_connections.items()):
-            dead = []
-            for conn in connections:
-                try:
-                    await conn.send_json(message)
-                except Exception as e:
-                    logger.error(f"Failed to broadcast_all to {client_id}: {e}")
-                    dead.append(conn)
-            for conn in dead:
-                self.active_connections[client_id].discard(conn)
-                self._last_pong.pop(conn, None)
-                self._conn_workspace.pop(conn, None)
+        targets = [
+            (client_id, conn)
+            for client_id, connections in self.active_connections.items()
+            for conn in list(connections)
+        ]
+        dead = await self._send_many(targets, message)
+        for client_id, conn in dead:
+            self._cleanup_connection(client_id, conn)
 
     async def broadcast_to_workspace(self, message: dict, workspace_id: int = None):
         """
@@ -100,20 +122,15 @@ class WebSocketManager:
         - workspace_id>0: 只发给订阅了该空间的连接，或 ws=0 的管理员
         """
         ws = workspace_id or 0
+        targets = []
         for client_id, connections in list(self.active_connections.items()):
-            dead = []
             for conn in connections:
                 conn_ws = self._conn_workspace.get(conn, 0)
                 if ws == 0 or conn_ws == 0 or conn_ws == ws:
-                    try:
-                        await conn.send_json(message)
-                    except Exception as e:
-                        logger.error(f"Failed to broadcast_to_workspace to {client_id}: {e}")
-                        dead.append(conn)
-            for conn in dead:
-                self.active_connections[client_id].discard(conn)
-                self._last_pong.pop(conn, None)
-                self._conn_workspace.pop(conn, None)
+                    targets.append((client_id, conn))
+        dead = await self._send_many(targets, message)
+        for client_id, conn in dead:
+            self._cleanup_connection(client_id, conn)
 
     # ── 心跳 ──────────────────────────────────────────────────────────────
 
@@ -131,27 +148,28 @@ class WebSocketManager:
             if not self.active_connections:
                 continue
             now = asyncio.get_event_loop().time()
-            dead: list[tuple[str, WebSocket]] = []
 
-            for client_id, connections in list(self.active_connections.items()):
-                for conn in list(connections):
-                    try:
-                        await conn.send_json({"type": "ping"})
-                    except Exception:
-                        dead.append((client_id, conn))
-                        continue
-                    last = self._last_pong.get(conn, now)
-                    if now - last > PING_INTERVAL + PING_TIMEOUT:
-                        logger.warning(f"WebSocket pong timeout, closing: {client_id}")
-                        dead.append((client_id, conn))
+            targets = [
+                (client_id, conn)
+                for client_id, connections in list(self.active_connections.items())
+                for conn in list(connections)
+            ]
+
+            # 并发发送 ping，避免单个慢连接阻塞其余连接的心跳
+            dead = await self._send_many(targets, {"type": "ping"})
+
+            # 对仍存活的连接，检查 pong 是否超时
+            dead_ids = {id(conn) for _, conn in dead}
+            for client_id, conn in targets:
+                if id(conn) in dead_ids:
+                    continue
+                last = self._last_pong.get(conn, now)
+                if now - last > PING_INTERVAL + PING_TIMEOUT:
+                    logger.warning(f"WebSocket pong timeout, closing: {client_id}")
+                    dead.append((client_id, conn))
 
             for client_id, conn in dead:
-                if client_id in self.active_connections:
-                    self.active_connections[client_id].discard(conn)
-                    if not self.active_connections[client_id]:
-                        del self.active_connections[client_id]
-                self._last_pong.pop(conn, None)
-                self._conn_workspace.pop(conn, None)
+                self._cleanup_connection(client_id, conn)
                 try:
                     await conn.close()
                 except Exception:

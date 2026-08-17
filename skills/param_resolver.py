@@ -165,16 +165,29 @@ def _apply_fn(fn_name: str, raw_args: str) -> str:
         return f'{{{{{fn_name}({raw_args})}}}}'
 
 
-def _exec_custom_fn(fn_name: str, raw_args: str, custom_scripts: List[Dict]) -> Optional[str]:
-    """执行自定义脚本函数，返回字符串结果；找不到或出错返回 None。"""
+def _exec_custom_fn_core(fn_name: str, raw_args: str, custom_scripts: List[Dict]) -> Dict[str, Any]:
+    """执行自定义脚本函数，返回 {"ok": bool, "result": str, "error": str}。"""
     script = next((s for s in custom_scripts if s.get('name') == fn_name), None)
     if not script:
-        return None
+        return {"ok": False, "result": None, "error": f"未找到脚本函数 `{fn_name}`"}
 
     args = [a.strip() for a in raw_args.split(',') if a.strip()] if raw_args.strip() else []
     code = script.get('code', '')
 
-    # 允许的模块白名单（严格限制，禁止 __import__ 和 os 防止 RCE）
+    # 允许脚本函数内部 import 的安全模块白名单（禁止 os 防止 RCE）
+    import builtins
+    _allowed_imports = {
+        'hashlib', 'json', 'time', 'random', 'string', 'uuid',
+        'base64', 're', 'urllib', 'requests',
+    }
+
+    def _safe_import(name, globals=None, locals=None, fromlist=(), level=0):
+        root = name.split('.')[0]
+        if root not in _allowed_imports:
+            raise ImportError(f"module '{root}' is not allowed in sandbox")
+        return builtins.__import__(name, globals, locals, fromlist, level)
+
+    # 允许的模块白名单（严格限制，禁止 os 防止 RCE）
     safe_globals: Dict[str, Any] = {
         '__builtins__': {
             'str': str, 'int': int, 'float': float, 'bool': bool, 'bytes': bytes,
@@ -184,7 +197,7 @@ def _exec_custom_fn(fn_name: str, raw_args: str, custom_scripts: List[Dict]) -> 
             'zip': zip, 'map': map, 'filter': filter, 'any': any, 'all': all,
             'isinstance': isinstance, 'type': type, 'repr': repr, 'print': print,
             'True': True, 'False': False, 'None': None,
-            # 注意：__import__ 和 os 不在此列表中，防止用户脚本执行任意系统命令
+            '__import__': _safe_import,
         },
         'args': args,
         'time': time,
@@ -194,7 +207,7 @@ def _exec_custom_fn(fn_name: str, raw_args: str, custom_scripts: List[Dict]) -> 
         'json': json,
         'uuid': _uuid_module,
         're': re,
-        # os 和 __import__ 已移除，如需扩展功能请在此显式添加具体安全函数
+        'string': string,
     }
     # 补充常用标准库（直接注入模块引用，不依赖 __import__）
     import urllib.parse as _urllib_parse
@@ -212,15 +225,27 @@ def _exec_custom_fn(fn_name: str, raw_args: str, custom_scripts: List[Dict]) -> 
         # 优先：代码中定义了同名函数
         if fn_name in local_vars and callable(local_vars[fn_name]):
             result = local_vars[fn_name](*args)
-            return str(result)
+            return {"ok": True, "result": str(result), "error": None}
         # 备选：代码直接设置了 result 变量
         if 'result' in local_vars:
-            return str(local_vars['result'])
-        logger.warning(f"custom script '{fn_name}': neither function nor result defined")
-        return None
+            return {"ok": True, "result": str(local_vars['result']), "error": None}
+        # 备选：代码里定义了唯一一个用户函数（AI 生成时函数名可能不一致），直接调用它
+        import types as _types
+        user_funcs = [
+            v for k, v in local_vars.items()
+            if isinstance(v, _types.FunctionType) and not k.startswith('__')
+        ]
+        if len(user_funcs) == 1:
+            return {"ok": True, "result": str(user_funcs[0](*args)), "error": None}
+        return {"ok": False, "result": None, "error": f"代码中未找到函数 `{fn_name}`，也未设置 `result` 变量"}
     except Exception as e:
-        logger.warning(f"custom script '{fn_name}' exec error: {e}")
-        return None
+        return {"ok": False, "result": None, "error": f"{type(e).__name__}: {e}"}
+
+
+def _exec_custom_fn(fn_name: str, raw_args: str, custom_scripts: List[Dict]) -> Optional[str]:
+    """执行自定义脚本函数，返回字符串结果；找不到或出错返回 None。"""
+    r = _exec_custom_fn_core(fn_name, raw_args, custom_scripts)
+    return r["result"] if r["ok"] else None
 
 
 def resolve_str(val: str, var_store: Optional[Dict] = None, custom_scripts: Optional[List] = None) -> Any:

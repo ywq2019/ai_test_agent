@@ -17,7 +17,8 @@
 9. [变量替换语法](#9-变量替换语法)
 10. [frame 内元素操作](#10-frame-内元素操作)
 11. [步骤编辑实战示例](#11-步骤编辑实战示例)
-12. [常见问题 FAQ](#12-常见问题-faq)
+12. [控制流（if / else / while）](#12-控制流if--else--while)
+13. [常见问题 FAQ](#13-常见问题-faq)
 
 ---
 
@@ -793,7 +794,80 @@ url:      {{base_url}}/users/{{user_id}}/profile
 
 ---
 
-## 12. 常见问题 FAQ
+## 12. 控制流（if / else / while）
+
+步骤编辑器支持在用例中插入控制流块，让用例从「线性逐步执行」升级为条件分支与循环轮询。控制流以扁平步骤形式存储（`if / else / endif`、`while / endwhile` 关键字），执行引擎自动转换为嵌套树执行。
+
+### 12.1 插入控制流
+
+在步骤编辑器工具栏点击「插入控制流」下拉按钮，可选三种块：
+
+| 类型 | 生成步骤 | 用途 |
+| --- | --- | --- |
+| if 块 | `if` … `endif` | 条件满足时执行内部步骤 |
+| if-else 块 | `if` … `else` … `endif` | 二分支：满足执行 then，否则执行 else |
+| while 块 | `while` … `endwhile` | 条件满足时循环执行内部步骤（轮询等待） |
+
+也可以在任意步骤行的「+ 插入」下拉中，选择插入位置后添加控制流块。
+
+### 12.2 条件表达式语法
+
+`if` / `while` 步骤的 condition 输入框支持声明式 DSL，基于 `ast` 白名单安全求值（禁用 `eval`）：
+
+- 元素查询：`exists(sel)`、`visible(sel)`、`hidden(sel)`、`count(sel)`、`text(sel)`
+- 页面属性：`url`、`title`
+- 比较：`==`、`!=`、`>`、`<`、`>=`、`<=`
+- 逻辑：`and`、`or`、`not`、括号
+- 包含：`contains(a, b)` 或 `a contains b`
+- 变量：`{{key}}` 先替换为环境变量值再比较
+
+```
+visible("button[type=submit]")
+not exists(".result-loaded")
+count(".todo-item") > 0 and text(".status") contains "成功"
+url contains "login"
+```
+
+> selector 参数可以不加引号（`visible(#submit)` 会自动引号化），但推荐加引号避免歧义。
+
+### 12.3 while 参数
+
+`while` 步骤额外提供两个参数：
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `max_iter` | 10 | 最大循环次数，防止死循环 |
+| `delay_ms` | 1000 | 每轮循环结束后等待的毫秒数 |
+
+### 12.4 控制流示例
+
+```
+# if：页面有提交按钮才点击
+if          condition: visible("button[type=submit]")
+click       selector: button[type=submit]
+endif
+
+# if-else：登录成功跳转，失败截图
+if          condition: visible("[data-testid='dashboard']")
+assert_url  expected: **/dashboard**
+else
+screenshot  value: login-failed.png
+endif
+
+# while：轮询等待结果加载
+while       condition: not exists(".result-loaded")  max_iter: 10  delay_ms: 1000
+wait        value: 1000
+endwhile
+```
+
+### 12.5 校验与边界
+
+- 保存时自动校验控制流块配对（`if` 必须有 `endif`，`else` 必须在 `if` 内，`while` 必须有 `endwhile`），不配对会报错并阻止保存。
+- `for / endfor / break / continue / elseif / try / goto / label` 已在设计文档规划（详见 `docs/webui-control-flow-design.md`），当前版本暂不支持，执行时遇到会明确报错而非静默当普通步骤执行。
+
+---
+
+## 13. 常见问题 FAQ
 
 ### Q1: 录制的步骤执行时找不到元素，怎么办？
 
@@ -885,4 +959,4 @@ button:has-text("删除（确认）")
 
 ---
 
-*文档版本：2026-08-06 | 对应平台版本：P2+*
+*文档版本：2026-08-17 | 对应平台版本：P2+*

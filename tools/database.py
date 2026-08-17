@@ -14,7 +14,16 @@ try:
 except ImportError:
     _PGVECTOR_AVAILABLE = False
 
-engine = create_async_engine(settings.DATABASE_URL, echo=settings.DEBUG)
+# 连接池配置：PostgreSQL 下启用连接池 + pre_ping，避免 5-10 人并发时连接池耗尽；
+# SQLite 不设置 pool_size（避免加剧写锁竞争，且 aiosqlite 默认 NullPool 更稳）。
+_engine_kwargs = {"echo": settings.DB_ECHO}
+if "postgresql" in settings.DATABASE_URL:
+    _engine_kwargs.update({
+        "pool_size": settings.DB_POOL_SIZE,
+        "max_overflow": settings.DB_MAX_OVERFLOW,
+        "pool_pre_ping": True,   # 使用前校验连接有效性，避免空闲连接被服务端断开
+    })
+engine = create_async_engine(settings.DATABASE_URL, **_engine_kwargs)
 
 async_session_maker = async_sessionmaker(
     engine,
@@ -91,9 +100,9 @@ class TestCase(Base):
     # 在 steps_json 执行前先跑这些步骤（如导航到特定页面、展开弹窗等），
     # 与 steps_json 共用同一个 Page，不产生独立用例依赖
     setup_steps = Column(JSON, nullable=True)
-    # 是否在执行前加载 task 级 storage_state 快照（默认 True）
-    # 设为 False 则该用例始终以干净状态运行（如登录用例本身）
-    use_storage = Column(Boolean, default=True, nullable=False)
+    # 是否在执行前加载 task 级 storage_state 快照（默认 False，需手动开启）
+    # 设为 True 时执行前加载登录态快照；False 则以干净状态运行（如登录用例本身）
+    use_storage = Column(Boolean, default=False, nullable=False)
 
     # ── 权限与隔离 ──
     created_by = Column(String(100), nullable=True, index=True)

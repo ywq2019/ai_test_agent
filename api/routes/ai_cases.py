@@ -1220,58 +1220,85 @@ async def _do_extract_requirements_bg(record_id: int, username: str) -> None:
 
             await _push(20, "正在调用 AI 提取需求条目，请稍候...")
 
-            # 提取是单次 AI 调用，用心跳推进度条（20→88，每2s +2），避免进度卡死
-            import asyncio as _asyncio
-            _stop_heartbeat = _asyncio.Event()
-            async def _heartbeat():
-                pct = 22
-                stages = [
-                    "正在理解需求文档结构...",
-                    "正在识别功能模块边界...",
-                    "正在提取可测试的需求条目...",
-                    "正在归类需求优先级...",
-                    "正在生成需求 ID 和描述...",
-                    "即将完成，请稍候...",
-                ]
-                idx = 0
-                while not _stop_heartbeat.is_set() and pct < 88:
-                    await _asyncio.sleep(2)
-                    if _stop_heartbeat.is_set():
-                        break
-                    pct = min(pct + 3, 88)
-                    stage = stages[min(idx, len(stages) - 1)]
-                    idx += 1
-                    await _push(pct, stage)
-            heartbeat_task = _asyncio.create_task(_heartbeat())
+            _SEG_THRESHOLD = 15000   # 超过此字数启用分段提取，避免单次调用超时/截断（与分段批大小对齐）
 
-            try:
-                system_prompt = get_system("ai_case_gen.yaml", "extract_requirements")
-                user_prompt = render_user("ai_case_gen.yaml", "extract_requirements",
-                                          modules_hint=modules_hint,
-                                          cases_hint=cases_hint,
-                                          content=doc_content[:30000])
-                raw = await ai_case_generator._run_claude_subprocess(system_prompt, user_prompt, timeout_secs=180)
-                data = _json.loads(raw)
-                requirements = data.get("requirements", [])
-            except _json.JSONDecodeError as e:
-                _stop_heartbeat.set()
-                heartbeat_task.cancel()
-                logger.error(f"需求提取返回非法 JSON: record_id={record_id}, err={e}")
-                await _push(0, "AI 返回格式异常，请稍后重试", error=True)
-                return
-            except Exception as e:
-                _stop_heartbeat.set()
-                heartbeat_task.cancel()
-                logger.exception("需求提取失败: record_id={}", record_id)
-                await _push(0, f"需求提取失败: {e}", error=True)
-                return
-            finally:
-                _stop_heartbeat.set()
-                heartbeat_task.cancel()
+            if len(doc_content) <= _SEG_THRESHOLD:
+                # 小文档：单次提取，用心跳推进度条（20→88，每2s +2），避免进度卡死
+                import asyncio as _asyncio
+                _stop_heartbeat = _asyncio.Event()
+                async def _heartbeat():
+                    pct = 22
+                    stages = [
+                        "正在理解需求文档结构...",
+                        "正在识别功能模块边界...",
+                        "正在提取可测试的需求条目...",
+                        "正在归类需求优先级...",
+                        "正在生成需求 ID 和描述...",
+                        "即将完成，请稍候...",
+                    ]
+                    idx = 0
+                    while not _stop_heartbeat.is_set() and pct < 88:
+                        await _asyncio.sleep(2)
+                        if _stop_heartbeat.is_set():
+                            break
+                        pct = min(pct + 3, 88)
+                        stage = stages[min(idx, len(stages) - 1)]
+                        idx += 1
+                        await _push(pct, stage)
+                heartbeat_task = _asyncio.create_task(_heartbeat())
+
                 try:
-                    await heartbeat_task
-                except _asyncio.CancelledError:
-                    pass
+                    system_prompt = get_system("ai_case_gen.yaml", "extract_requirements")
+                    user_prompt = render_user("ai_case_gen.yaml", "extract_requirements",
+                                              modules_hint=modules_hint,
+                                              cases_hint=cases_hint,
+                                              batch_hint="",
+                                              content=doc_content)
+                    raw = await ai_case_generator._run_claude_subprocess(
+                        system_prompt, user_prompt, timeout_secs=300, retries=1
+                    )
+                    data = _json.loads(raw)
+                    requirements = data.get("requirements", [])
+                except _json.JSONDecodeError as e:
+                    _stop_heartbeat.set()
+                    heartbeat_task.cancel()
+                    logger.error(f"需求提取返回非法 JSON: record_id={record_id}, err={e}")
+                    await _push(0, "AI 返回格式异常，请稍后重试", error=True)
+                    return
+                except Exception as e:
+                    _stop_heartbeat.set()
+                    heartbeat_task.cancel()
+                    logger.exception("需求提取失败: record_id={}", record_id)
+                    import httpx as _httpx
+                    if isinstance(e, _httpx.TimeoutException):
+                        await _push(0, "AI 提取需求超时，请稍后重试，或缩小需求文档范围后重新提取", error=True)
+                    else:
+                        await _push(0, f"需求提取失败: {e}", error=True)
+                    return
+                finally:
+                    _stop_heartbeat.set()
+                    heartbeat_task.cancel()
+                    try:
+                        await heartbeat_task
+                    except _asyncio.CancelledError:
+                        pass
+            else:
+                # 大文档：分段并发提取（内部按批次推送真实进度）
+                try:
+                    requirements = await ai_case_generator.extract_requirements_segmented(
+                        content=doc_content,
+                        modules_hint=modules_hint,
+                        cases_hint=cases_hint,
+                        on_progress=_push,
+                    )
+                except Exception as e:
+                    logger.exception("需求提取失败: record_id={}", record_id)
+                    import httpx as _httpx
+                    if isinstance(e, _httpx.TimeoutException):
+                        await _push(0, "AI 提取需求超时，请稍后重试，或缩小需求文档范围后重新提取", error=True)
+                    else:
+                        await _push(0, f"需求提取失败: {e}", error=True)
+                    return
 
             if not requirements:
                 await _push(0, "AI 未能从文档中提取到需求条目，请检查文档内容", error=True)

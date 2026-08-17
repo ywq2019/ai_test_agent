@@ -1747,18 +1747,22 @@ const showScriptDialog = async () => {
 const builtinFnList = ref([])
 const loadBuiltinFns = async () => {
   if (builtinFnList.value.length) return
+  // 内置函数与脚本函数独立加载，脚本函数失败不影响内置函数显示
   try {
     const builtin = await apiTestApi.listBuiltinFunctions()
-    const custom = currentProject.value
-      ? await scriptApi.list(currentProject.value.id)
-      : []
-    const customItems = custom.map(s => ({
-      value: `{{${s.name}()}}`,
-      desc: s.description || '自定义脚本',
-      category: '自定义',
-    }))
-    builtinFnList.value = [...builtin, ...customItems]
-  } catch { /* 静默失败 */ }
+    builtinFnList.value = [...builtin]
+  } catch (e) { console.error('[loadBuiltinFns] 加载内置函数失败', e) }
+  if (currentProject.value) {
+    try {
+      const custom = await scriptApi.list(currentProject.value.id)
+      const customItems = custom.map(s => ({
+        value: `{{${s.name}()}}`,
+        desc: s.description || '自定义脚本',
+        category: '自定义',
+      }))
+      builtinFnList.value = [...builtinFnList.value, ...customItems]
+    } catch (e) { console.error('[loadBuiltinFns] 加载脚本函数失败', e) }
+  }
 }
 const insertFn = (row, fnValue) => { row.value = (row.value || '') + fnValue }
 const insertBodyFn = (fnValue) => { caseForm.bodyStr += fnValue }

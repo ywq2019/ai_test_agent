@@ -227,80 +227,9 @@ class BrowserTool:
 
         elements_script = """
         () => {
-            const elements = [];
             const viewW = window.innerWidth;
             const viewH = window.innerHeight;
             const interactiveTags = ['input', 'button', 'a', 'select', 'textarea', 'option', 'table', 'img', 'iframe'];
-
-            // ── 第一批：真正的交互元素 ──
-            document.querySelectorAll(interactiveTags.join(',')).forEach(el => {
-                const tag = el.tagName.toLowerCase();
-                const rect = el.getBoundingClientRect();
-
-                // 跳过不可见元素
-                if (rect.width <= 0 || rect.height <= 0) return;
-                const style = window.getComputedStyle(el);
-                if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) < 0.1) return;
-
-                // 跳过全屏容器 (div/span > 80%视口)
-                if (rect.width > viewW * 0.8 && rect.height > viewH * 0.8) return;
-
-                const type = el.type || '';
-                const role = el.getAttribute('role') || '';
-                const id = el.id || '';
-                const name = el.name || '';
-                const text = (el.innerText || el.value || '').trim();
-                const placeholder = el.placeholder || '';
-                const href = el.href || '';
-
-                elements.push({
-                    tag, type, role, id, name,
-                    text: text.substring(0, 100),
-                    placeholder, href,
-                    x: rect.x, y: rect.y,
-                    width: rect.width, height: rect.height,
-                    selector: get_selector(el)
-                });
-            });
-
-            // ── 第二批：有交互属性的 div/span（role=button, tabindex, onclick, data-* 等）──
-            document.querySelectorAll('div, span, li').forEach(el => {
-                const hasInteraction =
-                    el.getAttribute('role') === 'button' ||
-                    el.hasAttribute('tabindex') ||
-                    el.hasAttribute('onclick') ||
-                    el.hasAttribute('data-testid') ||
-                    el.hasAttribute('data-action') ||
-                    el.className && (
-                        el.className.includes('btn') ||
-                        el.className.includes('click') ||
-                        el.className.includes('tab') ||
-                        el.className.includes('menu') ||
-                        el.className.includes('card') ||
-                        el.className.includes('item')
-                    );
-
-                if (!hasInteraction) return;
-
-                const rect = el.getBoundingClientRect();
-                if (rect.width <= 0 || rect.height <= 0) return;
-                const style = window.getComputedStyle(el);
-                if (style.display === 'none' || style.visibility === 'hidden') return;
-
-                const tag = el.tagName.toLowerCase();
-                const text = (el.innerText || '').trim();
-                if (!text) return;  // 无文本的交互 div 不收录
-
-                elements.push({
-                    tag, type: '', role: el.getAttribute('role') || '',
-                    id: el.id || '', name: el.getAttribute('data-testid') || '',
-                    text: text.substring(0, 100),
-                    placeholder: '', href: '',
-                    x: rect.x, y: rect.y,
-                    width: rect.width, height: rect.height,
-                    selector: get_selector(el)
-                });
-            });
 
             // ── Selector 生成（优先级：data-testid > id > aria-label > name > placeholder > class > tag）──
             function get_selector(el) {
@@ -325,11 +254,109 @@ class BrowserTool:
                 return el.tagName.toLowerCase();
             }
 
-            // ── 去重：相同 selector + 相同 text → 只保留可见的 ──
+            // ── 收集单个文档内的交互元素（frameSelectors 为当前 frame 路径）──
+            function scanDoc(doc, frameSelectors) {
+                const out = [];
+
+                // 第一批：真正的交互元素
+                doc.querySelectorAll(interactiveTags.join(',')).forEach(el => {
+                    const tag = el.tagName.toLowerCase();
+                    const rect = el.getBoundingClientRect();
+
+                    // 跳过不可见元素
+                    if (rect.width <= 0 || rect.height <= 0) return;
+                    const style = window.getComputedStyle(el);
+                    if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) < 0.1) return;
+
+                    // 跳过全屏容器 (div/span > 80%视口)
+                    if (rect.width > viewW * 0.8 && rect.height > viewH * 0.8) return;
+
+                    const type = el.type || '';
+                    const role = el.getAttribute('role') || '';
+                    const id = el.id || '';
+                    const name = el.name || '';
+                    const text = (el.innerText || el.value || '').trim();
+                    const placeholder = el.placeholder || '';
+                    const href = el.href || '';
+
+                    out.push({
+                        tag, type, role, id, name,
+                        text: text.substring(0, 100),
+                        placeholder, href,
+                        x: rect.x, y: rect.y,
+                        width: rect.width, height: rect.height,
+                        selector: get_selector(el),
+                        frame_selectors: frameSelectors
+                    });
+                });
+
+                // 第二批：有交互属性的 div/span/li
+                doc.querySelectorAll('div, span, li').forEach(el => {
+                    const hasInteraction =
+                        el.getAttribute('role') === 'button' ||
+                        el.hasAttribute('tabindex') ||
+                        el.hasAttribute('onclick') ||
+                        el.hasAttribute('data-testid') ||
+                        el.hasAttribute('data-action') ||
+                        el.className && (
+                            el.className.includes('btn') ||
+                            el.className.includes('click') ||
+                            el.className.includes('tab') ||
+                            el.className.includes('menu') ||
+                            el.className.includes('card') ||
+                            el.className.includes('item')
+                        );
+
+                    if (!hasInteraction) return;
+
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width <= 0 || rect.height <= 0) return;
+                    const style = window.getComputedStyle(el);
+                    if (style.display === 'none' || style.visibility === 'hidden') return;
+
+                    const tag = el.tagName.toLowerCase();
+                    const text = (el.innerText || '').trim();
+                    if (!text) return;  // 无文本的交互 div 不收录
+
+                    out.push({
+                        tag, type: '', role: el.getAttribute('role') || '',
+                        id: el.id || '', name: el.getAttribute('data-testid') || '',
+                        text: text.substring(0, 100),
+                        placeholder: '', href: '',
+                        x: rect.x, y: rect.y,
+                        width: rect.width, height: rect.height,
+                        selector: get_selector(el),
+                        frame_selectors: frameSelectors
+                    });
+                });
+
+                return out;
+            }
+
+            // ── 递归遍历同源 iframe（跨域 contentDocument 访问会抛异常/为 null，跳过）──
+            function collectFrames(doc, frameSelectors) {
+                const collected = scanDoc(doc, frameSelectors);
+                doc.querySelectorAll('iframe').forEach(iframeEl => {
+                    try {
+                        const innerDoc = iframeEl.contentDocument;
+                        if (!innerDoc) return;
+                        const fs = get_selector(iframeEl);
+                        const child = collectFrames(innerDoc, frameSelectors.concat([fs]));
+                        for (const c of child) collected.push(c);
+                    } catch (e) {
+                        // 跨域 iframe：忽略
+                    }
+                });
+                return collected;
+            }
+
+            const elements = collectFrames(document, []);
+
+            // ── 去重：frame 路径 + selector + text → 只保留可见的 ──
             const seen = new Map();
             const deduped = [];
             for (const el of elements) {
-                const key = el.selector + '|' + el.text;
+                const key = (el.frame_selectors || []).join('>>') + '|' + el.selector + '|' + el.text;
                 const existing = seen.get(key);
                 if (existing) {
                     // 保留面积更大或位置更靠上的

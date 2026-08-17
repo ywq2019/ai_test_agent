@@ -1492,7 +1492,7 @@ function _startTracPoll(mode) {
   const FIRST_DELAY  = 15000   // 首次延迟15秒（降低延迟，提升体验）
   const INTERVAL     = 10000   // 之后每10秒查一次
   let   attempts     = 0
-  const MAX_ATTEMPTS = 24      // 最多查4分钟
+  const MAX_ATTEMPTS = 45      // 最多查约7.5分钟，对齐后端 AI 提取最坏耗时（信号量等待+单次调用）
 
   const check = async () => {
     // 操作已被 WS 处理完成（状态已归零），轮询不应再触发任何副作用

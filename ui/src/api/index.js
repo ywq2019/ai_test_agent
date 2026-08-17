@@ -272,8 +272,9 @@ export const recordingApi = {
   // sessionId → POST /recording/stop  { session_id }，无 sessionId 时传 task_id 兜底
   stop: (sessionId, taskId) => api.post('/recording/stop', sessionId ? { session_id: sessionId } : { task_id: taskId }),
   status: (sessionId)                  => api.get(`/recording/status/${sessionId}`),
-  // taskId, steps, name → POST /recording/save  { task_id, steps, name, page_title }
-  save:   (taskId, steps, name = '', pageTitle = '')   => api.post('/recording/save', { task_id: taskId, steps, name, page_title: pageTitle }),
+  // taskId, steps, name → POST /recording/save  { task_id, steps, name, page_title, replace_case_id }
+  save:   (taskId, steps, name = '', pageTitle = '', replaceCaseId = null) =>
+    api.post('/recording/save', { task_id: taskId, steps, name, page_title: pageTitle, replace_case_id: replaceCaseId }),
 }
 
 export const envVarApi = {

@@ -84,7 +84,7 @@ class CaseResponse(BaseModel):
     version: int = 1
     # 方案一
     setup_steps: Optional[List[Any]] = None
-    use_storage: bool = True
+    use_storage: bool = False
 
 
 class ExecuteRequest(BaseModel):

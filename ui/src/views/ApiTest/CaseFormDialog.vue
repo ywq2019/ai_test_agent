@@ -104,7 +104,7 @@
           <div v-if="form.bodyType === 'json'">
             <div v-if="fnList.length" style="margin-bottom:4px;display:flex;align-items:center;gap:6px">
               <span style="font-size:12px;color:#909399">插入函数：</span>
-              <el-dropdown trigger="click" @command="(fn) => form.bodyStr += fn">
+              <el-dropdown trigger="click" @command="(fn) => insertIntoBody('json', fn)">
                 <el-button size="small" style="font-family:monospace;font-size:12px">ƒ(x)</el-button>
                 <template #dropdown>
                   <el-dropdown-menu>
@@ -116,7 +116,7 @@
                 </template>
               </el-dropdown>
             </div>
-            <el-input v-model="form.bodyStr" type="textarea" :rows="5" placeholder='{"key": "value"}' style="font-family:monospace" />
+            <el-input ref="bodyJsonRef" v-model="form.bodyStr" type="textarea" :rows="5" placeholder='{"key": "value"}' style="font-family:monospace" />
           </div>
           <div v-else-if="form.bodyType === 'form'">
             <div
@@ -132,11 +132,27 @@
             </div>
             <el-button size="small" :icon="Plus" @click="form.formRows.push({ key: '', value: '' })">添加参数</el-button>
           </div>
-          <el-input
-            v-else-if="form.bodyType === 'raw'"
-            v-model="form.bodyRaw" type="textarea" :rows="5"
-            placeholder="请输入原始请求体内容..." style="font-family:monospace"
-          />
+          <div v-else-if="form.bodyType === 'raw'">
+            <div v-if="fnList.length" style="margin-bottom:4px;display:flex;align-items:center;gap:6px">
+              <span style="font-size:12px;color:#909399">插入函数：</span>
+              <el-dropdown trigger="click" @command="(fn) => insertIntoBody('raw', fn)">
+                <el-button size="small" style="font-family:monospace;font-size:12px">ƒ(x)</el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item v-for="fn in fnList" :key="fn.value" :command="fn.value">
+                      <span style="font-family:monospace;font-size:12px">{{ fn.value }}</span>
+                      <span style="color:#aaa;font-size:11px;margin-left:8px">{{ fn.desc }}</span>
+                    </el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+            </div>
+            <el-input
+              ref="bodyRawRef"
+              v-model="form.bodyRaw" type="textarea" :rows="5"
+              placeholder="请输入原始请求体内容..." style="font-family:monospace"
+            />
+          </div>
         </div>
       </el-form-item>
 
@@ -249,30 +265,11 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Plus, Delete } from '@element-plus/icons-vue'
 import { apiTestApi } from '../../api'
-
-// ── 内联的小工具组件：函数插入按钮 ──────────────────────────────────────────
-// 避免为 4 行的小组件单独建文件
-const FnInsertBtn = {
-  props: { fnList: Array },
-  emits: ['insert'],
-  template: `
-    <el-dropdown v-if="fnList && fnList.length" trigger="click" @command="$emit('insert', $event)">
-      <el-button size="small" text style="font-family:monospace;color:#909399;padding:0 4px;min-width:20px">ƒ</el-button>
-      <template #dropdown>
-        <el-dropdown-menu>
-          <el-dropdown-item v-for="fn in fnList" :key="fn.value" :command="fn.value">
-            <span style="font-family:monospace;font-size:12px">{{ fn.value }}</span>
-            <span style="color:#aaa;font-size:11px;margin-left:8px">{{ fn.desc }}</span>
-          </el-dropdown-item>
-        </el-dropdown-menu>
-      </template>
-    </el-dropdown>
-  `,
-}
+import FnInsertBtn from './FnInsertBtn.vue'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -369,6 +366,34 @@ const onBodyTypeChange = (newType) => {
 }
 
 const insertFn = (row, fn) => { row.value = (row.value || '') + fn }
+
+// 请求体 textarea（JSON / raw）在光标处插入函数占位符
+const bodyJsonRef = ref(null)
+const bodyRawRef = ref(null)
+
+const _getTextarea = (comp) => {
+  if (!comp) return null
+  return comp.input || comp.$el?.querySelector?.('textarea') || null
+}
+
+const insertIntoBody = (kind, fn) => {
+  const comp = kind === 'json' ? bodyJsonRef.value : bodyRawRef.value
+  const ta = _getTextarea(comp)
+  const key = kind === 'json' ? 'bodyStr' : 'bodyRaw'
+  if (!ta || typeof ta.selectionStart !== 'number') {
+    form[key] = (form[key] || '') + fn
+    return
+  }
+  const start = ta.selectionStart
+  const end = ta.selectionEnd
+  const v = ta.value || ''
+  form[key] = v.slice(0, start) + fn + v.slice(end)
+  nextTick(() => {
+    ta.focus()
+    const pos = start + fn.length
+    ta.setSelectionRange(pos, pos)
+  })
+}
 
 const onAssertionTypeChange = (row) => {
   if (row.type === 'status_code') { row.expected = 200; row.path = ''; row.match_type = 'equals' }

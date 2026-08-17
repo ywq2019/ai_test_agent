@@ -591,7 +591,7 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
     # LLM 调用（统一入口，支持 Anthropic / OpenAI 兼容格式）
     # ------------------------------------------------------------------
     async def _run_claude_subprocess(
-        self, system_prompt: str, prompt: str, timeout_secs: int = 90
+        self, system_prompt: str, prompt: str, timeout_secs: int = 90, retries: int = 3
     ) -> str:
         """调用 LLM API，自动根据模型和 URL 选择正确格式。
         受全局 Semaphore 保护，防止多用户并发超出代理 QPS。
@@ -602,6 +602,7 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
             system_prompt, prompt,
             max_tokens=16000,
             timeout_secs=timeout_secs,
+            retries=retries,
             semaphore=_GLOBAL_LLM_SEM,
             sem_timeout=_LLM_SEM_TIMEOUT,
         )
@@ -762,6 +763,150 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
             logger.error(f"模块提取失败（将回退到单次生成）: {e}")
             raise
         return []
+
+    # ------------------------------------------------------------------
+    # 需求追踪：提取需求条目（大文档分段并发提取 + 合并去重 + ID 重分配）
+    # ------------------------------------------------------------------
+    async def extract_requirements_segmented(
+        self,
+        content: str,
+        modules_hint: str,
+        cases_hint: str,
+        on_progress=None,
+    ) -> list:
+        """从需求文档提取结构化需求条目。
+
+        文档较长时单次调用易超时/截断，这里复用模块提取的分段思路：
+        按固定长度切分 + 段间重叠，各批并发提取后合并去重并重新编号。
+        on_progress 为可选回调 async (pct:int, stage:str)。
+        """
+        from skills.prompt_loader import get_system, render_user
+
+        system_prompt = get_system("ai_case_gen.yaml", "extract_requirements")
+
+        BATCH_SIZE = 15000     # 每批字数
+        OVERLAP = 1500         # 段间重叠字数，避免边界切断需求
+        MAX_CONCURRENT = 3     # 并发批数，避免代理过载
+
+        async def _extract_one(text: str, batch_hint: str, timeout_secs: int):
+            user_prompt = render_user(
+                "ai_case_gen.yaml", "extract_requirements",
+                modules_hint=modules_hint,
+                cases_hint=cases_hint,
+                batch_hint=batch_hint,
+                content=text,
+            )
+            raw = await self._run_claude_subprocess(
+                system_prompt, user_prompt, timeout_secs=timeout_secs, retries=1
+            )
+            data = json.loads(raw)
+            return data.get("requirements", [])
+
+        # 切分：覆盖全文，段间重叠
+        batches = []
+        start = 0
+        n = len(content)
+        while start < n:
+            end = min(start + BATCH_SIZE, n)
+            batches.append(content[start:end])
+            if end >= n:
+                break
+            start = end - OVERLAP
+        total = len(batches)
+
+        sem = asyncio.Semaphore(MAX_CONCURRENT)
+
+        async def _extract_batch(idx: int, text: str):
+            async with sem:
+                batch_hint = (
+                    f"注意：本次仅处理完整需求文档的第 {idx + 1}/{total} 部分，"
+                    f"请只提取该部分明确描述的需求条目，避免与其他部分重复。"
+                )
+                try:
+                    reqs = await _extract_one(text, batch_hint, timeout_secs=180)
+                    if on_progress:
+                        await on_progress(
+                            20 + int((idx + 1) / total * 70),
+                            f"正在提取需求条目（{idx + 1}/{total} 批）...",
+                        )
+                    return reqs
+                except Exception as e:
+                    logger.warning(f"需求提取批次 {idx + 1}/{total} 失败: {e}")
+                    if on_progress:
+                        await on_progress(
+                            20 + int((idx + 1) / total * 70),
+                            f"第 {idx + 1}/{total} 批提取失败，已跳过",
+                        )
+                    return []
+
+        batch_results = await asyncio.gather(
+            *[_extract_batch(i, text) for i, text in enumerate(batches)]
+        )
+
+        return self._merge_and_reindex_requirements(batch_results)
+
+    def _merge_and_reindex_requirements(self, batch_results: list) -> list:
+        """合并分批需求：按标题相似度去重，并按模块重新分配全局唯一 ID。"""
+        import re as _re
+
+        dedup: Dict[str, Dict] = {}
+
+        def _find_existing(req: Dict) -> Optional[str]:
+            title = (req.get("title") or "").strip().lower()
+            if not title:
+                return None
+            for key, existing in dedup.items():
+                etitle = (existing.get("title") or "").strip().lower()
+                if not etitle:
+                    continue
+                if title in etitle or etitle in title:
+                    return key
+                common = sum(1 for c in title if c in etitle)
+                if common / max(len(title), 1) >= 0.7:
+                    return key
+            return None
+
+        for batch in batch_results:
+            for req in (batch or []):
+                if not isinstance(req, dict):
+                    continue
+                title = (req.get("title") or "").strip()
+                if not title:
+                    continue
+                key = _find_existing(req)
+                if key is None:
+                    dedup[title] = req
+                else:
+                    # 合并关键词（并集）
+                    existing = dedup[key]
+                    kws = set(existing.get("keywords") or []) | set(req.get("keywords") or [])
+                    existing["keywords"] = list(kws)
+
+        # 按 module 分组后重新编号，保证 ID 全局唯一
+        by_module: Dict[str, list] = {}
+        for req in dedup.values():
+            module = (req.get("module") or "未分类").strip()
+            by_module.setdefault(module, []).append(req)
+
+        result = []
+        for module, reqs in by_module.items():
+            abbr = self._module_abbr(reqs, module, _re)
+            for i, req in enumerate(reqs, 1):
+                req["id"] = f"{abbr}-{i:03d}"
+                result.append(req)
+        return result
+
+    @staticmethod
+    def _module_abbr(reqs: list, module: str, _re) -> str:
+        """从该模块第一条原始 id 提取缩写前缀，否则回退用模块名。"""
+        for r in reqs:
+            raw = (r.get("id") or "").strip()
+            if raw:
+                prefix = _re.split(r'[-_]\d+$', raw)[0].strip()
+                if prefix:
+                    return prefix.upper()
+        fallback = _re.sub(r'[^A-Za-z0-9]', '', module).upper()
+        return fallback[:6] or "REQ"
 
     # ------------------------------------------------------------------
     # ------------------------------------------------------------------

@@ -60,6 +60,11 @@ ACTION_FIELD_DOCS: dict = {
     "assert_count":   {"selector": "CSS/XPath 选择器", "expected": "期望数量（整数字符串）"},
     "screenshot":     {"value": "截图文件名（可选，默认自动命名）"},
     "evaluate":       {"value": "要执行的 JS 表达式"},
+    "if":             {"condition": "条件表达式，如 visible(button[type=submit])"},
+    "else":           {},
+    "endif":          {},
+    "while":          {"condition": "循环条件表达式", "max_iter": "最大循环次数（防死循环）", "delay_ms": "每次循环结束后的等待毫秒"},
+    "endwhile":       {},
 }
 
 # ── ActionStep 字典结构（类型提示用） ─────────────────────────────────────────
@@ -90,6 +95,9 @@ def make_step(
     timeout: int = 30000,
     optional: bool = False,
     frame_selectors: Optional[list] = None,
+    condition: str = "",
+    max_iter: Optional[int] = None,
+    delay_ms: int = 0,
 ) -> dict:
     """构造一个 ActionStep 字典，用于录制器和 AI 生成时统一创建步骤。"""
     step = {
@@ -105,6 +113,12 @@ def make_step(
     }
     if frame_selectors:
         step["frame_selectors"] = frame_selectors
+    if condition:
+        step["condition"] = condition
+    if max_iter is not None:
+        step["max_iter"] = max_iter
+    if delay_ms:
+        step["delay_ms"] = delay_ms
     return step
 
 
@@ -124,6 +138,8 @@ def validate_step(step: dict) -> tuple[bool, str]:
         "assert_url", "assert_title", "assert_count",
         # 工具
         "screenshot", "evaluate",
+        # 控制流（第一阶段：条件分支 + 循环轮询）
+        "if", "else", "endif", "while", "endwhile",
     }
     if action not in valid_actions:
         return False, f"未知 action 类型: {action!r}"
@@ -198,6 +214,11 @@ def steps_to_description(steps: list) -> str:
             "assert_count":   f"断言 {sel} 数量 = {exp}",
             "screenshot":     f"截图 {val or '自动命名'}",
             "evaluate":       f"执行 JS: {val[:40]}{'...' if len(val) > 40 else ''}",
+            "if":             f"如果 {step.get('condition', '')}",
+            "else":           "否则",
+            "endif":          "结束条件",
+            "while":          f"当 {step.get('condition', '')} 时循环",
+            "endwhile":       "结束循环",
         }
         lines.append(f"{i}. {frame_prefix}{mapping.get(action, action)}")
     return "\n".join(lines)
