@@ -240,6 +240,7 @@ class PentestTaskCreate(BaseModel):
     scan_modules: List[str] = Field(default=["unauth", "sensitive"])
     case_ids: List[int] = Field(default_factory=list)
     concurrency: int = Field(default=3, ge=1, le=10)
+    second_headers: Optional[dict] = None   # 越权检测第二账号认证头（横向越权 B 访问 A 资源）
 
     @field_validator("scan_modules")
     @classmethod

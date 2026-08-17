@@ -467,6 +467,7 @@ class PentestTask(Base):
     scan_modules = Column(JSON, nullable=True)                  # ["unauth","idor","sensitive","sqli"]
     case_ids     = Column(JSON, nullable=True)                  # 指定扫描的用例 id 列表，空=全部
     concurrency  = Column(Integer, default=3)                   # 最大并发请求数
+    second_headers = Column(JSON, nullable=True)                # 越权检测第二账号认证头（横向越权 B 访问 A 资源）
     # 汇总：执行完毕后写入
     total_checks = Column(Integer, default=0)
     high_count   = Column(Integer, default=0)
@@ -490,6 +491,7 @@ class PentestFinding(Base):
     evidence         = Column(Text, nullable=True)                  # 响应摘要（截断200字）
     request_detail   = Column(JSON, nullable=True)                  # {method, url, headers, body}
     suggestion       = Column(Text, nullable=True)                  # AI 生成的修复建议
+    confidence       = Column(String(20), default="suspected")      # confirmed=确定 / suspected=疑似需人工确认
     created_at       = Column(DateTime, default=datetime.utcnow)
 
 
@@ -615,6 +617,9 @@ async def init_database():
         # 用例级前置步骤 — setup_steps（方案一）
         "ALTER TABLE test_cases ADD COLUMN setup_steps JSON",
         "ALTER TABLE test_cases ADD COLUMN use_storage BOOLEAN DEFAULT 1",
+        # 渗透测试：越权第二账号认证头 + 漏洞置信度分级
+        "ALTER TABLE pentest_tasks ADD COLUMN second_headers JSON",
+        "ALTER TABLE pentest_findings ADD COLUMN confidence VARCHAR(20) DEFAULT 'suspected'",
         # 元素别名库（create_all 自动建表，无需 ALTER）
     ]:
         try:
