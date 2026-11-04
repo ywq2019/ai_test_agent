@@ -1252,10 +1252,11 @@ Step 3：新文档中有但旧文档没有的模块归入 added。
         pro_max = self._load_pro_max_skill()
         if pro_max:
             system_prompt = pro_max["system_prompt"]
-            prompt = pro_max["user_prompt_template"].format(
-                task_name=task_name,
-                content=content,
-            )
+            # 模板中的 JSON 示例含字面大括号（如 "第一个字符必须是{...}"），不能用 .format()：
+            # .format() 会把字面大括号当成占位符导致 KeyError。改用 replace 精确替换占位符。
+            prompt = (pro_max["user_prompt_template"]
+                      .replace("{task_name}", task_name)
+                      .replace("{content}", content))
             if _p:
                 await _p(25, "已加载 test-case-pro-max 技能，正在调用 AI 生成专业级用例...")
         else:
